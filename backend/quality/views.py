@@ -1,7 +1,7 @@
 import random
 
 from django.db import transaction
-from django.db.models import Count, Q
+from django.db.models import Count, Prefetch, Q
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
 from rest_framework import mixins, viewsets
@@ -12,9 +12,12 @@ from rest_framework.views import APIView
 
 from accounts.models import Role, User
 from accounts.permissions import Cap, ProjectScopedViewMixin
-from jobs.models import Job, JobStatus
 from accounts.serializers import UserBriefSerializer
+from jobs.models import OPEN_STATUSES, Job, JobStatus
+from jobs.serializers import JobDetailSerializer, JobSerializer
+from jobs.views import ensure_editable, ensure_not_escalated, lock_job
 from projects.models import ActivityLog, Batch, DataStatus, SamplingMethod, StratifyBy
+from projects.views import StandardPagination
 
 from . import sampling
 from .models import Audit, AuditSample, ErrorCategory, ReviewError, ReviewStage
@@ -24,6 +27,8 @@ from .serializers import (
     AuditSerializer,
     ErrorCategorySerializer,
     PassSerializer,
+    Qc1RejectSerializer,
+    Qc1StartSerializer,
     RejectSerializer,
     SampleJobSerializer,
 )
@@ -334,3 +339,252 @@ class AuditStrategyView(ProjectScopedViewMixin, APIView):
                 {"id": b.id, "name": b.name, "dataset_name": b.dataset.name, "pending_qc2": b.pending_qc2} for b in batches
             ],
         })
+
+
+QC1_TABS = {
+    "queue": [JobStatus.PENDING_QC1],
+    "reviewing": [JobStatus.QC1_REVIEWING],
+    "done": [JobStatus.REWORK, JobStatus.PENDING_QC2, JobStatus.APPROVED, JobStatus.DELIVERED],
+}
+QC1_REVIEWABLE_STATUSES = {JobStatus.PENDING_QC1, JobStatus.QC1_REVIEWING}
+
+
+def _check_qc1_access(job, actor):
+    """Luật bốn mắt + kiểm tra quyền sở hữu QC1, khoá và escalation."""
+    if job.annotator_id and job.annotator_id == actor.id:
+        raise PermissionDenied("Luật bốn mắt: bạn không thể QC1 job do chính mình annotate.")
+    if job.qc1_reviewer_id and job.qc1_reviewer_id != actor.id:
+        raise PermissionDenied("Job này đã được giao cho người QC1 khác.")
+    ensure_editable(job)
+    ensure_not_escalated(job)
+
+
+@transaction.atomic
+def start_qc1(job_id, *, project, actor, note=""):
+    """QC1 bắt đầu kiểm tra job: PENDING_QC1 -> QC1_REVIEWING (tự nhận nếu chưa có qc1_reviewer)."""
+    job = lock_job(project, job_id)
+    _check_qc1_access(job, actor)
+    if job.status != JobStatus.PENDING_QC1:
+        raise ValidationError(
+            f"Chỉ bắt đầu QC1 khi job ở trạng thái Chờ QC1 (hiện tại: {job.get_status_display()})."
+        )
+
+    job.status = JobStatus.QC1_REVIEWING
+    update_fields = ["status", "updated_at"]
+    if not job.qc1_reviewer_id:
+        job.qc1_reviewer = actor
+        update_fields.append("qc1_reviewer")
+    job.save(update_fields=update_fields)
+    ActivityLog.record(
+        project=project,
+        actor=actor,
+        action="qc1.start",
+        target=job,
+        job=job,
+        before={"status": JobStatus.PENDING_QC1},
+        after={"status": JobStatus.QC1_REVIEWING, "qc1_reviewer": actor.username},
+        note=note,
+    )
+    return job
+
+
+@transaction.atomic
+def qc1_pass(job_id, *, project, actor, comment=""):
+    """QC1 duyệt đạt: PENDING_QC1 / QC1_REVIEWING -> PENDING_QC2."""
+    job = lock_job(project, job_id)
+    _check_qc1_access(job, actor)
+    if job.status not in QC1_REVIEWABLE_STATUSES:
+        raise ValidationError(
+            f"Chỉ có thể duyệt QC1 khi job đang Chờ QC1 hoặc Đang QC1 (hiện tại: {job.get_status_display()})."
+        )
+
+    prev_status = job.status
+    job.status = JobStatus.PENDING_QC2
+    update_fields = ["status", "updated_at"]
+    if not job.qc1_reviewer_id:
+        job.qc1_reviewer = actor
+        update_fields.append("qc1_reviewer")
+    job.save(update_fields=update_fields)
+    ActivityLog.record(
+        project=project,
+        actor=actor,
+        action="qc1.pass",
+        target=job,
+        job=job,
+        before={"status": prev_status},
+        after={"status": JobStatus.PENDING_QC2, "rework_round": job.rework_round},
+        note=comment,
+    )
+    return job
+
+
+@transaction.atomic
+def qc1_reject(job_id, *, project, actor, errors, comment=""):
+    """QC1 trả về Rework: ghi ReviewError (stage=QC1), tăng rework_round, vượt ngưỡng -> is_escalated."""
+    job = lock_job(project, job_id)
+    _check_qc1_access(job, actor)
+    if job.status not in QC1_REVIEWABLE_STATUSES:
+        raise ValidationError(
+            f"Chỉ có thể trả rework QC1 khi job đang Chờ QC1 hoặc Đang QC1 (hiện tại: {job.get_status_display()})."
+        )
+
+    prev_status = job.status
+    round_at_review = job.rework_round
+    ReviewError.objects.bulk_create([
+        ReviewError(
+            job=job,
+            stage=ReviewStage.QC1,
+            rework_round=round_at_review,
+            audit_sample=None,
+            category=e["category"],
+            severity=e.get("severity") or e["category"].severity,
+            location=e["location"],
+            description=e["description"],
+            reported_by=actor,
+        )
+        for e in errors
+    ])
+    job.status = JobStatus.REWORK
+    job.rework_round += 1
+    if job.rework_round > project.max_rework_rounds:
+        job.is_escalated = True
+    update_fields = ["status", "rework_round", "is_escalated", "updated_at"]
+    if not job.qc1_reviewer_id:
+        job.qc1_reviewer = actor
+        update_fields.append("qc1_reviewer")
+    job.save(update_fields=update_fields)
+    ActivityLog.record(
+        project=project,
+        actor=actor,
+        action="qc1.reject",
+        target=job,
+        job=job,
+        before={"status": prev_status},
+        after={
+            "status": JobStatus.REWORK,
+            "rework_round": job.rework_round,
+            "errors": len(errors),
+            "escalated": job.is_escalated,
+        },
+        note=comment,
+    )
+    return job
+
+
+class Qc1JobViewSet(
+    ProjectScopedViewMixin, mixins.ListModelMixin, mixins.RetrieveModelMixin, viewsets.GenericViewSet
+):
+    """Không gian làm việc Level 1 QC (QC1 & Team Leader):
+    xem hàng chờ QC1, nhận kiểm tra, Pass sang QC2 hoặc Reject trả về Rework kèm danh mục lỗi.
+    """
+
+    pagination_class = StandardPagination
+    lookup_value_regex = r"\d+"
+    required_capabilities = {"*": Cap.PERFORM_QC1}
+
+    def get_serializer_class(self):
+        return JobDetailSerializer if self.action == "retrieve" else JobSerializer
+
+    def _base_queryset(self):
+        return Job.objects.filter(project=self.project).select_related(
+            "batch__dataset", "annotator", "qc1_reviewer", "project"
+        ).prefetch_related(Prefetch(
+            "audit_samples",
+            queryset=AuditSample.objects.filter(audit__status=Audit.Status.IN_PROGRESS).select_related("auditor"),
+            to_attr="open_samples",
+        ))
+
+    def get_queryset(self):
+        queryset = self._base_queryset()
+        user = self.request.user
+
+        if self.action == "retrieve":
+            return queryset.filter(
+                Q(qc1_reviewer=user) | Q(qc1_reviewer__isnull=True, status=JobStatus.PENDING_QC1)
+            ).exclude(annotator=user)
+
+        queryset = queryset.exclude(annotator=user)
+        p = self.request.query_params
+        scope = p.get("scope", "mine")
+        pool_filter = Q(
+            qc1_reviewer__isnull=True,
+            status=JobStatus.PENDING_QC1,
+            is_locked=False,
+            is_escalated=False,
+        )
+        if scope == "pool":
+            queryset = queryset.filter(pool_filter)
+        elif scope == "all":
+            queryset = queryset.filter(Q(qc1_reviewer=user) | pool_filter)
+        else:
+            queryset = queryset.filter(qc1_reviewer=user)
+
+        tab = p.get("tab")
+        if tab in QC1_TABS:
+            queryset = queryset.filter(status__in=QC1_TABS[tab])
+        if p.get("status"):
+            queryset = queryset.filter(status__in=p["status"].split(","))
+        if p.get("batch"):
+            if not p["batch"].isdigit():
+                raise ValidationError({"batch": "Mã batch không hợp lệ."})
+            queryset = queryset.filter(batch_id=int(p["batch"]))
+        if p.get("annotator"):
+            if not p["annotator"].isdigit():
+                raise ValidationError({"annotator": "Mã annotator không hợp lệ."})
+            queryset = queryset.filter(annotator_id=int(p["annotator"]))
+        if p.get("overdue") == "1":
+            queryset = queryset.filter(deadline__lt=timezone.now(), status__in=OPEN_STATUSES)
+        if p.get("search"):
+            term = p["search"].strip()
+            cond = Q(name__icontains=term) | Q(batch__name__icontains=term) | Q(annotator__username__icontains=term)
+            if term.isdigit():
+                cond |= Q(cvat_job_id=int(term)) | Q(pk=int(term))
+            queryset = queryset.filter(cond)
+        ordering = p.get("ordering")
+        if ordering in {"deadline", "-deadline", "rework_round", "-rework_round", "updated_at", "-updated_at"}:
+            queryset = queryset.order_by(ordering, "id")
+        return queryset
+
+    def _detail(self, job):
+        fresh = self._base_queryset().get(pk=job.pk)
+        return Response(JobDetailSerializer(fresh, context=self.get_serializer_context()).data)
+
+    @action(detail=True, methods=["post"])
+    def start(self, request, project_id, pk=None):
+        """Bắt đầu kiểm tra QC1 (PENDING_QC1 -> QC1_REVIEWING; tự nhận nếu job chưa có qc1_reviewer)."""
+        serializer = Qc1StartSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        updated = start_qc1(
+            int(pk),
+            project=self.project,
+            actor=request.user,
+            note=serializer.validated_data["note"],
+        )
+        return self._detail(updated)
+
+    @action(detail=True, methods=["post"], url_path="pass")
+    def pass_(self, request, project_id, pk=None):
+        """Duyệt đạt QC1 (PENDING_QC1 / QC1_REVIEWING -> PENDING_QC2)."""
+        serializer = PassSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        updated = qc1_pass(
+            int(pk),
+            project=self.project,
+            actor=request.user,
+            comment=serializer.validated_data["comment"],
+        )
+        return self._detail(updated)
+
+    @action(detail=True, methods=["post"])
+    def reject(self, request, project_id, pk=None):
+        """Trả về Rework từ QC1: bắt buộc ghi ít nhất 1 lỗi (ReviewError stage=qc1)."""
+        serializer = Qc1RejectSerializer(data=request.data, context=self.get_serializer_context())
+        serializer.is_valid(raise_exception=True)
+        updated = qc1_reject(
+            int(pk),
+            project=self.project,
+            actor=request.user,
+            errors=serializer.validated_data["errors"],
+            comment=serializer.validated_data["comment"],
+        )
+        return self._detail(updated)

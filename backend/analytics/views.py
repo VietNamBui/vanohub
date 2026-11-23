@@ -258,3 +258,197 @@ class MemberPerformanceView(ProjectScopedViewMixin, APIView):
             }
             for r in sorted(rows, key=lambda r: -(r["objects_done"] or 0))
         ])
+
+
+class AnnotatorDashboardView(ProjectScopedViewMixin, APIView):
+    """GET /api/projects/{id}/annotator/dashboard/?period=day|week|month — dashboard cá nhân của Annotator."""
+
+    required_capabilities = {"*": Cap.ANNOTATE_JOBS}
+
+    def get(self, request, project_id):
+        project = self.project
+        user = request.user
+        now = timezone.now()
+        since = _period_start(request)
+
+        jobs = Job.objects.filter(project=project, annotator=user)
+        totals = jobs.aggregate(
+            total=Count("id"),
+            pending_annotation=Count("id", filter=Q(status=JobStatus.PENDING_ANNOTATION)),
+            annotating=Count("id", filter=Q(status=JobStatus.ANNOTATING)),
+            rework=Count("id", filter=Q(status=JobStatus.REWORK)),
+            waiting_review=Count(
+                "id",
+                filter=Q(status__in=[JobStatus.PENDING_QC1, JobStatus.QC1_REVIEWING, JobStatus.PENDING_QC2]),
+            ),
+            done=Count("id", filter=Q(status__in=DONE)),
+            objects_done=Sum("object_count", filter=Q(status__in=DONE)),
+            reached_qc2=Count("id", filter=Q(status__in=REACHED_QC2)),
+            first_pass=Count("id", filter=Q(status__in=REACHED_QC2, rework_round=0)),
+            reworked=Count("id", filter=Q(rework_round__gt=0)),
+            overdue=Count("id", filter=Q(deadline__lt=now, status__in=OPEN_STATUSES)),
+            escalated=Count("id", filter=Q(is_escalated=True)),
+        )
+
+        submitted_in_period = ActivityLog.objects.filter(
+            project=project,
+            actor=user,
+            action="job.status",
+            after__status=JobStatus.PENDING_QC1,
+            created_at__gte=since,
+        ).count()
+
+        top_errors = list(
+            ReviewError.objects.filter(job__project=project, job__annotator=user)
+            .values("category__name")
+            .annotate(n=Count("id"))
+            .order_by("-n")[:10]
+        )
+
+        due_soon = (
+            jobs.filter(
+                status__in=[JobStatus.PENDING_ANNOTATION, JobStatus.ANNOTATING, JobStatus.REWORK],
+                deadline__lte=now + timedelta(hours=24),
+            )
+            .select_related("batch")
+            .order_by("deadline", "id")[:10]
+        )
+
+        return Response({
+            "counts": {
+                "total": totals["total"],
+                "pending_annotation": totals["pending_annotation"],
+                "annotating": totals["annotating"],
+                "rework": totals["rework"],
+                "waiting_review": totals["waiting_review"],
+                "done": totals["done"],
+                "overdue": totals["overdue"],
+                "escalated": totals["escalated"],
+            },
+            "objects_done": totals["objects_done"] or 0,
+            "submitted_in_period": _metric(
+                submitted_in_period,
+                formula="Số lần bạn nộp bài sang Chờ QC1 trong kỳ",
+            ),
+            "rework_rate": _metric(
+                _pct(totals["reworked"], totals["total"]),
+                status="provisional",
+                formula="Job từng bị trả rework ÷ tổng job được giao",
+            ),
+            "first_pass_yield": _metric(
+                _pct(totals["first_pass"], totals["reached_qc2"]),
+                status="provisional",
+                formula="Job qua QC1 ngay lần đầu ÷ tổng job đã tới QC2",
+            ),
+            "kpi_target": project.kpi_annotation_target,
+            "errors_by_category": [{"category": r["category__name"], "count": r["n"]} for r in top_errors],
+            "due_soon": [
+                {
+                    "id": j.id,
+                    "name": j.name,
+                    "batch_name": j.batch.name,
+                    "status": j.status,
+                    "deadline": j.deadline,
+                    "is_overdue": j.deadline < now,
+                }
+                for j in due_soon
+            ],
+        })
+
+
+class Qc1SummaryView(ProjectScopedViewMixin, APIView):
+    """GET /api/projects/{id}/qc1-summary/?period=day|week|month — dashboard Level 1 QC."""
+
+    required_capabilities = {"*": [Cap.PERFORM_QC1, Cap.VIEW_DASHBOARD]}
+
+    def get(self, request, project_id):
+        project = self.project
+        user = request.user
+        scope = "project" if self.has_cap(Cap.VIEW_DASHBOARD) and request.query_params.get("scope") != "mine" else "mine"
+
+        jobs = Job.objects.filter(project=project)
+        logs = ActivityLog.objects.filter(project=project, action__in=["qc1.pass", "qc1.reject"])
+        qc1_errors = ReviewError.objects.filter(job__project=project, stage=ReviewStage.QC1)
+        qc2_escapes = ReviewError.objects.filter(job__project=project, stage=ReviewStage.QC2)
+
+        if scope == "mine":
+            jobs = jobs.filter(qc1_reviewer=user)
+            logs = logs.filter(actor=user)
+            qc1_errors = qc1_errors.filter(reported_by=user)
+            qc2_escapes = qc2_escapes.filter(job__qc1_reviewer=user)
+
+        since = _period_start(request)
+        now = timezone.now()
+        length = now - since
+
+        queue_stats = jobs.aggregate(
+            assigned=Count("id"),
+            pending=Count("id", filter=Q(status=JobStatus.PENDING_QC1)),
+            reviewing=Count("id", filter=Q(status=JobStatus.QC1_REVIEWING)),
+        )
+        decision_stats = logs.aggregate(
+            passed=Count("id", filter=Q(action="qc1.pass")),
+            rejected=Count("id", filter=Q(action="qc1.reject")),
+            reviewed_in_period=Count("id", filter=Q(created_at__gte=since)),
+        )
+        stats = {**queue_stats, **decision_stats}
+
+        kpi = {
+            "current": self._window(logs, qc1_errors, since, now),
+            "previous": self._window(logs, qc1_errors, since - length, since),
+        }
+
+        trend_days = 30 if length.days >= 30 else 7
+        start = (now - timedelta(days=trend_days - 1)).date()
+        tz = timezone.get_current_timezone()
+        daily = {
+            r["day"]: r
+            for r in logs.filter(created_at__date__gte=start)
+            .annotate(day=TruncDate("created_at", tzinfo=tz))
+            .values("day")
+            .annotate(
+                reviewed=Count("id"),
+                rejected=Count("id", filter=Q(action="qc1.reject")),
+            )
+        }
+        daily_errors = dict(
+            qc1_errors.filter(created_at__date__gte=start)
+            .annotate(day=TruncDate("created_at", tzinfo=tz))
+            .values("day")
+            .annotate(n=Count("id"))
+            .values_list("day", "n")
+        )
+        trend = []
+        for i in range(trend_days):
+            day = start + timedelta(days=i)
+            row = daily.get(day, {})
+            trend.append({
+                "date": day.isoformat(),
+                "reviewed": row.get("reviewed", 0),
+                "rejected": row.get("rejected", 0),
+                "errors": daily_errors.get(day, 0),
+            })
+
+        by_category = list(qc1_errors.values("category__name").annotate(n=Count("id")).order_by("-n")[:10])
+
+        return Response({
+            "scope": scope,
+            "stats": stats,
+            "pass_rate": _pct(stats["passed"], stats["passed"] + stats["rejected"]),
+            "kpi": kpi,
+            "trend": trend,
+            "qc2_escape_errors": qc2_escapes.count(),
+            "errors_by_category": [{"category": r["category__name"], "count": r["n"]} for r in by_category],
+            "kpi_target": project.kpi_qc1_target,
+        })
+
+    @staticmethod
+    def _window(logs, errors, start, end):
+        stats = logs.filter(created_at__gte=start, created_at__lt=end).aggregate(
+            reviewed=Count("id"),
+            passed=Count("id", filter=Q(action="qc1.pass")),
+            rejected=Count("id", filter=Q(action="qc1.reject")),
+        )
+        stats["pass_rate"] = _pct(stats["passed"], stats["reviewed"])
+        stats["errors"] = errors.filter(created_at__gte=start, created_at__lt=end).count()
+        return stats

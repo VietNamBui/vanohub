@@ -113,3 +113,12 @@ class DeadlineSerializer(serializers.Serializer):
 
 class BulkSerializer(serializers.Serializer):
     ids = serializers.ListField(child=serializers.IntegerField(), min_length=1, max_length=500)
+
+
+class AnnotatorStartSerializer(serializers.Serializer):
+    note = serializers.CharField(allow_blank=True, required=False, default="")
+
+
+class AnnotatorSubmitSerializer(serializers.Serializer):
+    note = serializers.CharField(allow_blank=True, required=False, default="")
+    object_count = serializers.IntegerField(min_value=0, required=False, allow_null=True)

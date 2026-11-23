@@ -118,3 +118,26 @@ class RejectSerializer(serializers.Serializer):
 
 class PassSerializer(serializers.Serializer):
     comment = serializers.CharField(required=False, allow_blank=True, default="")
+
+
+class Qc1StartSerializer(serializers.Serializer):
+    note = serializers.CharField(required=False, allow_blank=True, default="")
+
+
+class Qc1ErrorInputSerializer(serializers.Serializer):
+    category = serializers.PrimaryKeyRelatedField(queryset=ErrorCategory.objects.filter(is_active=True))
+    severity = serializers.ChoiceField(choices=Severity.choices, required=False)
+    location = serializers.CharField(max_length=120, required=False, allow_blank=True, default="")
+    description = serializers.CharField(required=False, allow_blank=True, default="")
+
+    def validate_category(self, category):
+        if category.project_id != self.context["project"].id:
+            raise serializers.ValidationError("Loại lỗi không thuộc dự án này.")
+        if category.applies_to == ErrorCategory.AppliesTo.QC2:
+            raise serializers.ValidationError("Loại lỗi này chỉ dùng cho QC2.")
+        return category
+
+
+class Qc1RejectSerializer(serializers.Serializer):
+    errors = Qc1ErrorInputSerializer(many=True, allow_empty=False)
+    comment = serializers.CharField(required=False, allow_blank=True, default="")

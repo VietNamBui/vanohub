@@ -41,6 +41,8 @@ class Cap:
     SEND_ANNOUNCEMENT = "send_announcement"
     VIEW_ACTIVITY = "view_activity"
     LEAD_TEAM = "lead_team"  # TL: dashboard team, job của team, giao lại / deadline trong team, cấp QC1
+    ANNOTATE_JOBS = "annotate_jobs"  # Annotator: xem job được giao, bắt đầu / nộp bài / làm lại rework
+    PERFORM_QC1 = "perform_qc1"  # QC1 (và TL kéo theo): xem hàng chờ QC1, bắt đầu / Pass / Reject QC1
 
 
 CAPABILITY_ROLES = {
@@ -59,6 +61,8 @@ CAPABILITY_ROLES = {
     Cap.SEND_ANNOUNCEMENT: {Role.PROJECT_MANAGER},
     Cap.VIEW_ACTIVITY: {Role.PROJECT_MANAGER},
     Cap.LEAD_TEAM: {Role.TEAM_LEADER},
+    Cap.ANNOTATE_JOBS: {Role.ANNOTATOR},
+    Cap.PERFORM_QC1: {Role.QC1},
 }
 
 # Director: theo wireframe chỉ XEM dashboard dự án, không thao tác trong dự án.

@@ -195,3 +195,150 @@ class Qc2ScreensTests(TestCase):
         self.assertEqual(len(data["trend"]), 7)
         self.assertEqual(data["trend"][-1]["audited"], 1)
         self.assertEqual(data["audit_speed"]["status"], "pending_definition")
+
+
+class Qc1WorkflowTests(TestCase):
+    """Kiểm thử Level 1 QC: phân quyền, luật bốn mắt, pool tự nhận, pass/reject nguyên tử và escalation."""
+
+    def setUp(self):
+        self.f = ProjectFixture()
+        self.job = self.f.job(status=JobStatus.PENDING_QC1, annotator=self.f.ann1)
+        self.qc1 = self.f.client(self.f.qc1)
+        self.ann1 = self.f.client(self.f.ann1)
+
+    def test_annotator_and_qc2_only_cannot_use_qc1_api(self):
+        self.assertEqual(self.ann1.get(self.f.url("qc1/jobs/")).status_code, 403)
+        self.assertEqual(self.f.client(self.f.qc2).get(self.f.url("qc1/jobs/")).status_code, 403)
+
+    def test_team_leader_has_implied_qc1_capability(self):
+        tl = make_user("tl_qc1", Role.TEAM_LEADER, project=self.f.project)
+        pool_job = self.f.job(status=JobStatus.PENDING_QC1, annotator=self.f.ann2)
+        Job.objects.filter(pk=pool_job.pk).update(qc1_reviewer=None)
+
+        client = self.f.client(tl)
+        listed = client.get(self.f.url("qc1/jobs/?scope=pool")).data
+        self.assertEqual([r["id"] for r in listed["results"]], [pool_job.id])
+
+        passed = client.post(self.f.url(f"qc1/jobs/{pool_job.id}/pass/"), {"comment": "ok"}, format="json")
+        self.assertEqual(passed.status_code, 200, passed.data)
+        self.assertEqual(passed.data["status"], JobStatus.PENDING_QC2)
+        self.assertEqual(passed.data["qc1_reviewer"]["id"], tl.id)
+
+    def test_qc1_start_then_pass_transitions_to_pending_qc2(self):
+        started = self.qc1.post(self.f.url(f"qc1/jobs/{self.job.id}/start/"), {}, format="json")
+        self.assertEqual(started.status_code, 200, started.data)
+        self.assertEqual(started.data["status"], JobStatus.QC1_REVIEWING)
+
+        passed = self.qc1.post(self.f.url(f"qc1/jobs/{self.job.id}/pass/"), {"comment": "dat chuan"}, format="json")
+        self.assertEqual(passed.status_code, 200, passed.data)
+        self.assertEqual(passed.data["status"], JobStatus.PENDING_QC2)
+        self.assertEqual([e["action"] for e in passed.data["timeline"]], ["qc1.start", "qc1.pass"])
+
+    def test_qc1_reject_records_errors_increments_rework_and_escalates(self):
+        from .models import ErrorCategory, ReviewStage
+
+        qc2_only_cat = ErrorCategory.objects.create(
+            project=self.f.project, name="Chi QC2", applies_to=ErrorCategory.AppliesTo.QC2
+        )
+        # Bị từ chối nếu rỗng errors hoặc dùng danh mục chỉ dành cho QC2
+        self.assertEqual(
+            self.qc1.post(self.f.url(f"qc1/jobs/{self.job.id}/reject/"), {"errors": []}, format="json").status_code,
+            400,
+        )
+        self.assertEqual(
+            self.qc1.post(
+                self.f.url(f"qc1/jobs/{self.job.id}/reject/"),
+                {"errors": [{"category": qc2_only_cat.id}]},
+                format="json",
+            ).status_code,
+            400,
+        )
+
+        # Reject vòng 1 (rework_round: 0 -> 1, chưa escalate vì max_rework_rounds=2)
+        body = {
+            "errors": [{"category": self.f.category.id, "location": "frame 5", "description": "lech box"}],
+            "comment": "sua lai",
+        }
+        r1 = self.qc1.post(self.f.url(f"qc1/jobs/{self.job.id}/reject/"), body, format="json")
+        self.assertEqual(r1.status_code, 200, r1.data)
+        self.assertEqual(r1.data["status"], JobStatus.REWORK)
+        self.assertEqual(r1.data["rework_round"], 1)
+        self.assertFalse(r1.data["is_escalated"])
+        self.assertEqual(ReviewError.objects.filter(job=self.job, stage=ReviewStage.QC1, rework_round=0).count(), 1)
+
+        # Vòng 2 -> 3 (vượt max_rework_rounds=2 → tự bật is_escalated)
+        Job.objects.filter(pk=self.job.pk).update(status=JobStatus.QC1_REVIEWING, rework_round=2)
+        r2 = self.qc1.post(self.f.url(f"qc1/jobs/{self.job.id}/reject/"), body, format="json")
+        self.assertEqual(r2.status_code, 200, r2.data)
+        self.assertEqual(r2.data["rework_round"], 3)
+        self.assertTrue(r2.data["is_escalated"])
+        self.assertEqual(ReviewError.objects.filter(job=self.job, stage=ReviewStage.QC1).count(), 2)
+
+    def test_four_eyes_blocks_qc1_on_own_annotated_job(self):
+        dual = make_user("dual_ann_qc1", Role.ANNOTATOR, Role.QC1, project=self.f.project)
+        own_job = self.f.job(status=JobStatus.PENDING_QC1, annotator=dual)
+        Job.objects.filter(pk=own_job.pk).update(qc1_reviewer=None)
+
+        client = self.f.client(dual)
+        # Không xuất hiện trong danh sách pool hoặc mine
+        self.assertEqual(client.get(self.f.url("qc1/jobs/?scope=all")).data["count"], 0)
+        # Gọi thẳng endpoint bị chặn 403 Luật bốn mắt
+        self.assertEqual(client.post(self.f.url(f"qc1/jobs/{own_job.id}/start/"), {}, format="json").status_code, 403)
+        self.assertEqual(client.post(self.f.url(f"qc1/jobs/{own_job.id}/pass/"), {}, format="json").status_code, 403)
+
+    def test_qc1_cannot_review_job_assigned_to_another_qc1(self):
+        other_qc1 = make_user("qc1_other", Role.QC1, project=self.f.project)
+        client = self.f.client(other_qc1)
+        self.assertEqual(client.get(self.f.url(f"qc1/jobs/{self.job.id}/")).status_code, 404)
+        self.assertEqual(client.post(self.f.url(f"qc1/jobs/{self.job.id}/pass/"), {}, format="json").status_code, 403)
+
+    def test_end_to_end_annotator_qc1_rework_qc2_pipeline(self):
+        """Toàn luồng: PENDING_ANNOTATION -> start -> submit -> QC1 reject -> rework -> resubmit -> QC1 pass -> QC2 pass."""
+        job = self.f.job(status=JobStatus.PENDING_ANNOTATION, annotator=self.f.ann1)
+        pm = self.f.client(self.f.pm)
+        qc2 = self.f.client(self.f.qc2)
+
+        self.assertEqual(self.ann1.post(self.f.url(f"annotator/jobs/{job.id}/start/"), {}, format="json").status_code, 200)
+        self.assertEqual(self.ann1.post(self.f.url(f"annotator/jobs/{job.id}/submit/"), {}, format="json").status_code, 200)
+        self.assertEqual(self.qc1.post(self.f.url(f"qc1/jobs/{job.id}/start/"), {}, format="json").status_code, 200)
+        self.assertEqual(
+            self.qc1.post(
+                self.f.url(f"qc1/jobs/{job.id}/reject/"),
+                {"errors": [{"category": self.f.category.id, "description": "sai"}]},
+                format="json",
+            ).status_code,
+            200,
+        )
+
+        # Annotator thấy lỗi trong chi tiết job và làm lại
+        detail = self.ann1.get(self.f.url(f"annotator/jobs/{job.id}/")).data
+        self.assertEqual(detail["status"], JobStatus.REWORK)
+        self.assertEqual(len(detail["errors"]), 1)
+
+        self.assertEqual(self.ann1.post(self.f.url(f"annotator/jobs/{job.id}/start/"), {}, format="json").status_code, 200)
+        self.assertEqual(self.ann1.post(self.f.url(f"annotator/jobs/{job.id}/submit/"), {}, format="json").status_code, 200)
+        self.assertEqual(self.qc1.post(self.f.url(f"qc1/jobs/{job.id}/pass/"), {}, format="json").status_code, 200)
+
+        # Sang QC2 audit
+        audit = pm.post(self.f.url("audits/"), {"batch": self.f.batch.id, "sampling_rate": 100, "auditors": [self.f.qc2.id]}, format="json")
+        self.assertEqual(audit.status_code, 201, audit.data)
+        sample = Audit.objects.get(pk=audit.data["id"]).samples.get(job=job)
+        self.assertEqual(qc2.post(self.f.url(f"audit-samples/{sample.id}/pass/"), {}, format="json").status_code, 200)
+
+        job.refresh_from_db()
+        self.assertEqual(job.status, JobStatus.APPROVED)
+
+    def test_qc1_reject_rolls_back_atomically_on_failure(self):
+        from unittest.mock import patch
+
+        from projects.models import ActivityLog
+
+        body = {"errors": [{"category": self.f.category.id, "description": "loi"}]}
+        with patch.object(ActivityLog, "record", side_effect=RuntimeError("db failure")):
+            with self.assertRaises(RuntimeError):
+                self.qc1.post(self.f.url(f"qc1/jobs/{self.job.id}/reject/"), body, format="json")
+
+        self.job.refresh_from_db()
+        self.assertEqual(self.job.status, JobStatus.PENDING_QC1)
+        self.assertEqual(self.job.rework_round, 0)
+        self.assertEqual(ReviewError.objects.filter(job=self.job).count(), 0)
