@@ -1,59 +1,61 @@
-import { Layout, Menu, type MenuProps } from 'antd'
-import {
-  BarChartOutlined,
-  CheckCircleOutlined,
-  FolderOutlined,
-  ProfileOutlined,
-  TeamOutlined,
-  UserOutlined,
-} from '@ant-design/icons'
-import { Outlet, useLocation, useNavigate } from 'react-router'
+import { DownOutlined, LogoutOutlined, UserOutlined } from '@ant-design/icons'
+import { Avatar, Dropdown, Layout, Space } from 'antd'
+import { Link, Outlet, useMatch } from 'react-router'
+import { useAuth } from '../features/auth/useAuth'
+import { listProjects } from '../features/projects/api'
+import ProjectSwitcher from '../features/projects/components/ProjectSwitcher'
+import { useRequest } from '../shared/hooks/useRequest'
+import HeaderRoles from './HeaderRoles'
+import NotificationBell from './NotificationBell'
 
-const { Header, Sider, Content } = Layout
-
-const menuItems: MenuProps['items'] = [
-  { key: '/projects', icon: <FolderOutlined />, label: 'Projects' },
-  { key: '/jobs', icon: <ProfileOutlined />, label: 'Jobs' },
-  {
-    key: '/quality',
-    icon: <CheckCircleOutlined />,
-    label: 'Quality',
-    children: [
-      { key: '/quality/qc1', label: 'QC1' },
-      { key: '/quality/qc2', label: 'QC2' },
-      { key: '/quality/rework', label: 'Rework' },
-    ],
-  },
-  { key: '/teams', icon: <TeamOutlined />, label: 'Teams' },
-  { key: '/accounts', icon: <UserOutlined />, label: 'Accounts' },
-  { key: '/analytics', icon: <BarChartOutlined />, label: 'Analytics' },
-]
-
+/**
+ * Khung chung sau khi đăng nhập: thanh trên cùng + nội dung.
+ * Dự án đang chọn lấy từ URL (/projects/:projectId/...) nên tải lại trang vẫn đúng.
+ */
 export default function MainLayout() {
-  const navigate = useNavigate()
-  const { pathname } = useLocation()
+  const { user, logout } = useAuth()
+  const projectMatch = useMatch('/projects/:projectId/*')
+  const projectId = projectMatch ? Number(projectMatch.params.projectId) : null
+  // Dùng chung cho vai trò + chuông. Tải lại khi đổi trang dự án → vai trò vừa được gán cũng hiện ra.
+  const { data: projects } = useRequest(`header-projects:${projectId ?? 'all'}`, listProjects)
+  const scopedProjects = (projects ?? []).filter((p) => projectId === null || p.id === projectId)
+  const displayName = [user?.first_name, user?.last_name].filter(Boolean).join(' ') || user?.username
 
   return (
     <Layout style={{ minHeight: '100vh' }}>
-      <Sider breakpoint="lg" collapsible>
-        <div style={{ color: '#fff', fontWeight: 600, padding: 16, fontSize: 18 }}>
-          VanoHub
+      <Layout.Header
+        style={{
+          display: 'flex', alignItems: 'center', gap: 16, padding: '0 20px',
+          background: '#fff', borderBottom: '1px solid #f0f0f0', position: 'sticky', top: 0, zIndex: 10,
+        }}
+      >
+        <Link to="/projects" style={{ fontSize: 18, fontWeight: 700, color: 'inherit', width: 196 }}>
+          Vanohub
+        </Link>
+        {projectId !== null && <ProjectSwitcher currentProjectId={projectId} />}
+        <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 12 }}>
+          {scopedProjects.length > 0 && <NotificationBell projects={scopedProjects} />}
+          <HeaderRoles projects={projects ?? []} projectId={projectId} />
+          <Dropdown
+            menu={{
+              items: [
+                { key: 'projects', label: <Link to="/projects">Dự án của tôi</Link> },
+                { type: 'divider' },
+                { key: 'logout', icon: <LogoutOutlined />, label: 'Đăng xuất', onClick: logout },
+              ],
+            }}
+          >
+            <Space style={{ cursor: 'pointer' }}>
+              <Avatar size="small" icon={<UserOutlined />} />
+              {displayName}
+              <DownOutlined style={{ fontSize: 10 }} />
+            </Space>
+          </Dropdown>
         </div>
-        <Menu
-          theme="dark"
-          mode="inline"
-          items={menuItems}
-          selectedKeys={[pathname]}
-          defaultOpenKeys={pathname.startsWith('/quality') ? ['/quality'] : []}
-          onClick={({ key }) => navigate(key)}
-        />
-      </Sider>
-      <Layout>
-        <Header style={{ background: '#fff', padding: '0 24px' }} />
-        <Content style={{ margin: 24 }}>
-          <Outlet />
-        </Content>
-      </Layout>
+      </Layout.Header>
+      <Layout.Content>
+        <Outlet />
+      </Layout.Content>
     </Layout>
   )
 }

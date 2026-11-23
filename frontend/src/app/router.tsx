@@ -1,29 +1,86 @@
-import { createBrowserRouter, Navigate } from 'react-router'
+import type { ReactNode } from 'react'
+import { createBrowserRouter } from 'react-router'
+import LoginPage from '../features/auth/LoginPage'
+import RequireAuth from '../features/auth/RequireAuth'
+import JobsPage from '../features/jobs/pages/JobsPage'
+import QueuePage from '../features/jobs/pages/QueuePage'
+import AnnouncementsPage from '../features/projects/pages/AnnouncementsPage'
+import BatchesPage from '../features/projects/pages/BatchesPage'
+import DatasetsPage from '../features/projects/pages/DatasetsPage'
+import DeliveryPage from '../features/projects/pages/DeliveryPage'
+import GuidelinesPage from '../features/projects/pages/GuidelinesPage'
+import OverviewPage from '../features/projects/pages/OverviewPage'
+import ProjectListPage from '../features/projects/pages/ProjectListPage'
+import TeamRankingPage from '../features/projects/pages/TeamRankingPage'
+import ProjectLayout from '../features/projects/ProjectLayout'
+import { ProjectIndexRedirect, RequireCap } from '../features/projects/RequireCap'
+import ErrorCategoriesPage from '../features/quality/pages/ErrorCategoriesPage'
+import AuditsPage from '../features/quality/qc2/AuditsPage'
+import AuditStrategyPage from '../features/quality/qc2/AuditStrategyPage'
+import AuditWorkPage from '../features/quality/qc2/AuditWorkPage'
+import Qc2DashboardPage from '../features/quality/qc2/Qc2DashboardPage'
+import CvatLinkPage from '../features/cvat/pages/CvatLinkPage'
+import HomeRedirect from '../features/projects/HomeRedirect'
+import TeamJobsPage from '../features/teams/leader/TeamJobsPage'
+import TeamMembersPage from '../features/teams/leader/TeamMembersPage'
+import TeamOverviewPage from '../features/teams/leader/TeamOverviewPage'
+import TeamWorkloadPage from '../features/teams/leader/TeamWorkloadPage'
+import TeamDetailPage from '../features/teams/pages/TeamDetailPage'
+import TeamsPage from '../features/teams/pages/TeamsPage'
+import WorkloadPage from '../features/teams/pages/WorkloadPage'
 import MainLayout from '../layouts/MainLayout'
-import Placeholder from '../shared/components/Placeholder'
+import StateView from '../shared/components/StateView'
+import type { Capability } from '../shared/types/capabilities'
+
+/** Route trong dự án, kèm capability cần có (khớp với capability backend kiểm tra ở API tương ứng). */
+const guarded = (path: string, cap: Capability | Capability[], element: ReactNode) => ({
+  path,
+  element: <RequireCap cap={cap}>{element}</RequireCap>,
+})
 
 export const router = createBrowserRouter([
+  { path: '/login', element: <LoginPage /> },
   {
-    path: '/',
-    element: <MainLayout />,
+    element: <RequireAuth />,
     children: [
-      { index: true, element: <Navigate to="/projects" replace /> },
-      { path: 'projects', element: <Placeholder title="Projects" /> },
-      { path: 'jobs', element: <Placeholder title="Jobs" /> },
       {
-        path: 'quality',
+        path: '/',
+        element: <MainLayout />,
         children: [
-          { index: true, element: <Navigate to="qc1" replace /> },
-          { path: 'qc1', element: <Placeholder title="QC1" /> },
-          { path: 'qc2', element: <Placeholder title="QC2" /> },
-          { path: 'rework', element: <Placeholder title="Rework" /> },
+          { index: true, element: <HomeRedirect /> },
+          { path: 'projects', element: <ProjectListPage /> },
+          {
+            path: 'projects/:projectId',
+            element: <ProjectLayout />,
+            children: [
+              { index: true, element: <ProjectIndexRedirect /> },
+              guarded('overview', 'view_dashboard', <OverviewPage />),
+              guarded('team-ranking', 'view_dashboard', <TeamRankingPage />),
+              guarded('datasets', 'view_jobs', <DatasetsPage />),
+              guarded('batches', 'view_jobs', <BatchesPage />),
+              guarded('jobs', 'view_jobs', <JobsPage />),
+              guarded('queue', 'view_jobs', <QueuePage />),
+              guarded('teams', 'manage_team', <TeamsPage />),
+              guarded('teams/:teamId', 'manage_team', <TeamDetailPage />),
+              guarded('workload', ['manage_team', 'view_dashboard'], <WorkloadPage />),
+              guarded('audits', 'manage_audits', <AuditsPage />),
+              guarded('leader/overview', 'lead_team', <TeamOverviewPage />),
+              guarded('leader/jobs', 'lead_team', <TeamJobsPage />),
+              guarded('leader/members', 'lead_team', <TeamMembersPage />),
+              guarded('leader/workload', 'lead_team', <TeamWorkloadPage />),
+              guarded('qc2/strategy', 'manage_audits', <AuditStrategyPage />),
+              guarded('qc2/work', 'perform_audit', <AuditWorkPage />),
+              guarded('qc2/dashboard', 'perform_audit', <Qc2DashboardPage />),
+              guarded('error-categories', 'manage_quality_catalog', <ErrorCategoriesPage />),
+              guarded('guidelines', 'view_guidelines', <GuidelinesPage />),
+              guarded('delivery', 'manage_delivery', <DeliveryPage />),
+              guarded('cvat-link', 'view_project', <CvatLinkPage />),
+              guarded('announcements', 'view_project', <AnnouncementsPage />),
+            ],
+          },
         ],
       },
-      { path: 'teams', element: <Placeholder title="Teams" /> },
-      { path: 'accounts', element: <Placeholder title="Accounts" /> },
-      { path: 'analytics', element: <Placeholder title="Analytics" /> },
     ],
   },
-  { path: '/login', element: <Placeholder title="Login" /> },
-  { path: '*', element: <Placeholder title="404 - Không tìm thấy trang" /> },
+  { path: '*', element: <StateView kind="empty" title="Không tìm thấy trang" /> },
 ])

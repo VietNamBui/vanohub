@@ -1,3 +1,75 @@
+from django.db import IntegrityError
 from django.test import TestCase
+from django.urls import reverse
+from rest_framework.test import APIClient
 
-# Create your tests here.
+from projects.models import Project
+
+from .models import Role, RoleAssignment, User, expand_roles
+
+
+class ExpandRolesTests(TestCase):
+    def test_pm_implies_qc2(self):
+        self.assertEqual(expand_roles([Role.PROJECT_MANAGER]), {Role.PROJECT_MANAGER, Role.QC2})
+
+    def test_qc2_does_not_imply_pm(self):
+        self.assertEqual(expand_roles([Role.QC2]), {Role.QC2})
+
+    def test_team_leader_implies_qc1(self):
+        self.assertEqual(expand_roles([Role.TEAM_LEADER]), {Role.TEAM_LEADER, Role.QC1})
+
+
+class RoleAssignmentConstraintTests(TestCase):
+    def setUp(self):
+        self.user = User.objects.create_user("alice", password="pw")
+        self.project = Project.objects.create(name="P1")
+
+    def test_project_role_requires_project(self):
+        with self.assertRaises(IntegrityError):
+            RoleAssignment.objects.create(user=self.user, role=Role.PROJECT_MANAGER, project=None)
+
+    def test_director_must_not_have_project(self):
+        with self.assertRaises(IntegrityError):
+            RoleAssignment.objects.create(user=self.user, role=Role.DIRECTOR, project=self.project)
+
+    def test_same_role_same_project_is_rejected(self):
+        RoleAssignment.objects.create(user=self.user, role=Role.QC2, project=self.project)
+        with self.assertRaises(IntegrityError):
+            RoleAssignment.objects.create(user=self.user, role=Role.QC2, project=self.project)
+
+    def test_director_cannot_be_assigned_twice(self):
+        RoleAssignment.objects.create(user=self.user, role=Role.DIRECTOR)
+        with self.assertRaises(IntegrityError):
+            RoleAssignment.objects.create(user=self.user, role=Role.DIRECTOR)
+
+
+class AuthApiTests(TestCase):
+    def setUp(self):
+        self.client = APIClient()
+        self.user = User.objects.create_user("bob", password="secret-pw")
+        self.project = Project.objects.create(name="P1")
+        RoleAssignment.objects.create(user=self.user, role=Role.PROJECT_MANAGER, project=self.project)
+
+    def test_login_returns_tokens_and_me_works_with_bearer(self):
+        response = self.client.post(
+            reverse("token_obtain_pair"), {"username": "bob", "password": "secret-pw"}, format="json"
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("access", response.data)
+        self.assertIn("refresh", response.data)
+
+        self.client.credentials(HTTP_AUTHORIZATION=f"Bearer {response.data['access']}")
+        me = self.client.get(reverse("me"))
+        self.assertEqual(me.status_code, 200)
+        self.assertEqual(me.data["username"], "bob")
+        self.assertFalse(me.data["is_director"])
+        self.assertEqual(me.data["role_assignments"][0]["role"], Role.PROJECT_MANAGER)
+
+    def test_wrong_password_is_rejected(self):
+        response = self.client.post(
+            reverse("token_obtain_pair"), {"username": "bob", "password": "wrong"}, format="json"
+        )
+        self.assertEqual(response.status_code, 401)
+
+    def test_me_requires_authentication(self):
+        self.assertEqual(self.client.get(reverse("me")).status_code, 401)

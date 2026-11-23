@@ -1,12 +1,12 @@
-import { ConfigProvider } from 'antd'
 import { RouterProvider } from 'react-router'
 import { router } from './app/router'
+import { AuthProvider } from './features/auth/AuthProvider'
 
 function App() {
   return (
-    <ConfigProvider>
+    <AuthProvider>
       <RouterProvider router={router} />
-    </ConfigProvider>
+    </AuthProvider>
   )
 }
 

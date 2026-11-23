@@ -11,6 +11,7 @@ https://docs.djangoproject.com/en/6.1/ref/settings/
 """
 
 import os
+from datetime import timedelta
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -43,6 +44,7 @@ INSTALLED_APPS = [
     'django.contrib.messages',
     'django.contrib.staticfiles',
     'rest_framework',
+    'corsheaders',
     'accounts',
     'teams',
     'projects',
@@ -53,6 +55,8 @@ INSTALLED_APPS = [
 ]
 
 MIDDLEWARE = [
+    # Phải đứng trước CommonMiddleware để gắn header CORS cho mọi response.
+    'corsheaders.middleware.CorsMiddleware',
     'django.middleware.security.SecurityMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
     'django.middleware.common.CommonMiddleware',
@@ -144,3 +148,44 @@ MAILERS = {
 }
 
 AUTH_USER_MODEL = "accounts.User"
+
+
+# Django REST Framework
+# - JWTAuthentication: frontend React gửi header "Authorization: Bearer <access token>".
+# - SessionAuthentication: để dùng được trang API có giao diện (browsable API) sau khi
+#   đăng nhập /admin/ — tiện khi học và kiểm thử thủ công.
+# - Mặc định mọi API đều yêu cầu đăng nhập; API nào mở công khai phải tự khai báo.
+REST_FRAMEWORK = {
+    'DEFAULT_AUTHENTICATION_CLASSES': [
+        'rest_framework_simplejwt.authentication.JWTAuthentication',
+        'rest_framework.authentication.SessionAuthentication',
+    ],
+    'DEFAULT_PERMISSION_CLASSES': [
+        'rest_framework.permissions.IsAuthenticated',
+    ],
+}
+
+SIMPLE_JWT = {
+    'ACCESS_TOKEN_LIFETIME': timedelta(minutes=30),
+    'REFRESH_TOKEN_LIFETIME': timedelta(days=1),
+}
+
+
+# CVAT
+# CVAT_URL: địa chỉ backend Django gọi API CVAT.
+# CVAT_PUBLIC_URL: địa chỉ trình duyệt mở CVAT (link "Mở trong CVAT"). Thường giống CVAT_URL.
+CVAT_URL = os.getenv('CVAT_URL', '')
+CVAT_PUBLIC_URL = os.getenv('CVAT_PUBLIC_URL', CVAT_URL)
+CVAT_ACCESS_TOKEN = os.getenv('CVAT_ACCESS_TOKEN', '')
+CVAT_USERNAME = os.getenv('CVAT_USERNAME', '')
+CVAT_PASSWORD = os.getenv('CVAT_PASSWORD', '')
+
+
+# CORS: cho phép frontend Vite (khác cổng) gọi API.
+CORS_ALLOWED_ORIGINS = [
+    origin.strip()
+    for origin in os.getenv(
+        'CORS_ALLOWED_ORIGINS', 'http://localhost:5173,http://127.0.0.1:5173'
+    ).split(',')
+    if origin.strip()
+]
