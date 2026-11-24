@@ -12,11 +12,13 @@ export function RequireCap({ cap, children }: { cap: Capability | Capability[]; 
   return <>{children}</>
 }
 
-/** Trang mặc định khi vào dự án: PM → Tổng quan, QC2 → Job audit, còn lại → Hướng dẫn. */
+/** Trang mặc định khi vào dự án theo vai trò cao nhất trong dự án. */
 export function ProjectIndexRedirect() {
   const { can } = useProject()
   if (can('view_dashboard')) return <Navigate to="overview" replace />
   if (can('lead_team')) return <Navigate to="leader/overview" replace />
   if (can('perform_audit')) return <Navigate to="qc2/dashboard" replace />
+  if (can('perform_qc1')) return <Navigate to="qc1/dashboard" replace />
+  if (can('annotate_jobs')) return <Navigate to="annotator/dashboard" replace />
   return <Navigate to="guidelines" replace />
 }

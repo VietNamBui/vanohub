@@ -25,7 +25,7 @@ interface Props {
 
 function describeEvent(event: JobDetail['timeline'][number]) {
   const after = event.after ?? {}
-  if (event.action === 'job.status' || event.action.startsWith('qc2.')) {
+  if (event.action === 'job.status' || event.action.startsWith('qc1.') || event.action.startsWith('qc2.')) {
     const status = after.status as JobStatus | undefined
     return status ? `→ ${JOB_STATUS_LABELS[status] ?? status}` : ''
   }

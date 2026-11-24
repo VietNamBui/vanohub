@@ -1,6 +1,6 @@
 import { apiClient } from '../../../shared/api/client'
 import { cleanParams, type Paginated } from '../../../shared/api/types'
-import type { Job, JobDetail, JobFilters, QueueStage } from '../types'
+import type { AnnotatorDashboard, AnnotatorJobTab, Job, JobDetail, JobFilters, QueueStage } from '../types'
 
 const p = (projectId: number, path: string) => `/projects/${projectId}/${path}`
 
@@ -50,3 +50,34 @@ export const getJobQueue = async (projectId: number, batch?: number) =>
       params: cleanParams({ batch }),
     })
   ).data
+
+// --- Không gian làm việc Annotator ---
+export const listAnnotatorJobs = async (
+  projectId: number,
+  params: { tab?: AnnotatorJobTab; search?: string; page?: number; overdue?: boolean } = {},
+) =>
+  (
+    await apiClient.get<Paginated<Job>>(p(projectId, 'annotator/jobs/'), {
+      params: cleanParams({
+        tab: params.tab === 'all' ? undefined : params.tab,
+        search: params.search,
+        page: params.page,
+        overdue: params.overdue ? 1 : undefined,
+      }),
+    })
+  ).data
+
+export const getAnnotatorJob = async (projectId: number, jobId: number) =>
+  (await apiClient.get<JobDetail>(p(projectId, `annotator/jobs/${jobId}/`))).data
+
+export const startAnnotatorJob = async (projectId: number, jobId: number, note = '') =>
+  (await apiClient.post<JobDetail>(p(projectId, `annotator/jobs/${jobId}/start/`), { note })).data
+
+export const submitAnnotatorJob = async (
+  projectId: number,
+  jobId: number,
+  data: { note?: string; object_count?: number | null } = {},
+) => (await apiClient.post<JobDetail>(p(projectId, `annotator/jobs/${jobId}/submit/`), data)).data
+
+export const getAnnotatorDashboard = async (projectId: number, period: string) =>
+  (await apiClient.get<AnnotatorDashboard>(p(projectId, 'annotator/dashboard/'), { params: cleanParams({ period }) })).data

@@ -93,3 +93,38 @@ export interface Qc2Assignment {
   result: 'pending' | 'pass' | 'reject'
   auditor: UserBrief | null
 }
+
+export type AnnotatorJobTab = 'todo' | 'rework' | 'submitted' | 'done' | 'all'
+
+export interface AnnotatorMetric {
+  value: number | null
+  status: 'ok' | 'provisional' | 'pending_definition'
+  formula: string
+}
+
+export interface AnnotatorDashboard {
+  counts: {
+    total: number
+    pending_annotation: number
+    annotating: number
+    rework: number
+    waiting_review: number
+    done: number
+    overdue: number
+    escalated: number
+  }
+  objects_done: number
+  submitted_in_period: AnnotatorMetric
+  rework_rate: AnnotatorMetric
+  first_pass_yield: AnnotatorMetric
+  kpi_target: number | null
+  errors_by_category: { category: string; count: number }[]
+  due_soon: {
+    id: number
+    name: string
+    batch_name: string
+    status: JobStatus
+    deadline: string
+    is_overdue: boolean
+  }[]
+}

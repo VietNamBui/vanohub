@@ -148,3 +148,32 @@ export interface AuditStrategy {
   }[]
   preview_batches: { id: number; name: string; dataset_name: string; pending_qc2: number }[]
 }
+
+export type Qc1Scope = 'mine' | 'pool' | 'all'
+export type Qc1JobTab = 'queue' | 'reviewing' | 'done' | 'all'
+
+export interface Qc1Window {
+  reviewed: number
+  passed: number
+  rejected: number
+  pass_rate: number | null
+  errors: number
+}
+
+export interface Qc1Summary {
+  scope: 'project' | 'mine'
+  stats: {
+    assigned: number
+    pending: number
+    reviewing: number
+    passed: number
+    rejected: number
+    reviewed_in_period: number
+  }
+  pass_rate: number | null
+  kpi: { current: Qc1Window; previous: Qc1Window }
+  trend: { date: string; reviewed: number; rejected: number; errors: number }[]
+  qc2_escape_errors: number
+  errors_by_category: { category: string; count: number }[]
+  kpi_target: number | null
+}

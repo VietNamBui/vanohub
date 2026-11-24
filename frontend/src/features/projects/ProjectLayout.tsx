@@ -29,7 +29,9 @@ const MENU: Group[] = [
       { key: 'overview', label: 'Tổng quan dự án', cap: 'view_dashboard' },
       { key: 'team-ranking', label: 'Xếp hạng team', cap: 'view_dashboard' },
       { key: 'qc2/dashboard', label: 'Tổng quan QC2', cap: 'perform_audit' },
+      { key: 'qc1/dashboard', label: 'Tổng quan QC1', cap: ['perform_qc1', 'view_dashboard'] },
       { key: 'leader/overview', label: 'Tổng quan team', cap: 'lead_team' },
+      { key: 'annotator/dashboard', label: 'Tổng quan Annotator', cap: 'annotate_jobs' },
     ],
   },
   {
@@ -40,6 +42,7 @@ const MENU: Group[] = [
       { key: 'jobs', label: 'Jobs', cap: 'view_jobs' },
       { key: 'queue', label: 'Data Queue', cap: 'view_jobs' },
       { key: 'leader/jobs', label: 'Job của team', cap: 'lead_team' },
+      { key: 'annotator/jobs', label: 'Job của tôi', cap: 'annotate_jobs' },
     ],
   },
   {
@@ -57,6 +60,7 @@ const MENU: Group[] = [
       { key: 'audits', label: 'Quản lý Audit', cap: 'manage_audits' },
       { key: 'qc2/strategy', label: 'Chiến thuật audit', cap: 'manage_audits' },
       { key: 'qc2/work', label: 'Job audit QC2', cap: 'perform_audit' },
+      { key: 'qc1/work', label: 'Job kiểm tra QC1', cap: 'perform_qc1' },
       { key: 'error-categories', label: 'Danh mục lỗi', cap: 'manage_quality_catalog' },
       { key: 'guidelines', label: 'Hướng dẫn gán nhãn', cap: 'view_guidelines' },
     ],

@@ -2,6 +2,8 @@ import type { ReactNode } from 'react'
 import { createBrowserRouter } from 'react-router'
 import LoginPage from '../features/auth/LoginPage'
 import RequireAuth from '../features/auth/RequireAuth'
+import AnnotatorDashboardPage from '../features/jobs/pages/AnnotatorDashboardPage'
+import AnnotatorJobsPage from '../features/jobs/pages/AnnotatorJobsPage'
 import JobsPage from '../features/jobs/pages/JobsPage'
 import QueuePage from '../features/jobs/pages/QueuePage'
 import AnnouncementsPage from '../features/projects/pages/AnnouncementsPage'
@@ -15,6 +17,8 @@ import TeamRankingPage from '../features/projects/pages/TeamRankingPage'
 import ProjectLayout from '../features/projects/ProjectLayout'
 import { ProjectIndexRedirect, RequireCap } from '../features/projects/RequireCap'
 import ErrorCategoriesPage from '../features/quality/pages/ErrorCategoriesPage'
+import Qc1DashboardPage from '../features/quality/qc1/Qc1DashboardPage'
+import Qc1WorkPage from '../features/quality/qc1/Qc1WorkPage'
 import AuditsPage from '../features/quality/qc2/AuditsPage'
 import AuditStrategyPage from '../features/quality/qc2/AuditStrategyPage'
 import AuditWorkPage from '../features/quality/qc2/AuditWorkPage'
@@ -71,6 +75,10 @@ export const router = createBrowserRouter([
               guarded('qc2/strategy', 'manage_audits', <AuditStrategyPage />),
               guarded('qc2/work', 'perform_audit', <AuditWorkPage />),
               guarded('qc2/dashboard', 'perform_audit', <Qc2DashboardPage />),
+              guarded('qc1/dashboard', ['perform_qc1', 'view_dashboard'], <Qc1DashboardPage />),
+              guarded('qc1/work', 'perform_qc1', <Qc1WorkPage />),
+              guarded('annotator/dashboard', 'annotate_jobs', <AnnotatorDashboardPage />),
+              guarded('annotator/jobs', 'annotate_jobs', <AnnotatorJobsPage />),
               guarded('error-categories', 'manage_quality_catalog', <ErrorCategoriesPage />),
               guarded('guidelines', 'view_guidelines', <GuidelinesPage />),
               guarded('delivery', 'manage_delivery', <DeliveryPage />),
