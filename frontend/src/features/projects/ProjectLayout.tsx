@@ -89,31 +89,35 @@ function buildMenu(can: (cap: Capability) => boolean): NavGroup[] {
   const groups: NavGroup[] = []
 
   // 1. Dashboard
-  const dashboardItems: NavItem[] = [
-    { key: 'annotator/dashboard', label: 'Tổng quan cá nhân', cap: 'annotate_jobs' },
-    { key: 'annotator/analytics', label: 'Phân tích cá nhân', cap: 'annotate_jobs' },
-    { key: 'overview', label: 'Tổng quan dự án', cap: 'view_dashboard' },
-    { key: 'team-ranking', label: 'Xếp hạng team', cap: 'view_dashboard' },
-    { key: 'leader/overview', label: 'Tổng quan team', cap: 'lead_team' },
-    { key: 'qc1/dashboard', label: 'Tổng quan QC1', cap: ['perform_qc1', 'view_dashboard'] },
-    { key: 'qc2/dashboard', label: 'Tổng quan QC2', cap: 'perform_audit' },
-  ].filter((i) => allowed(i.cap))
+  const dashboardItems: NavItem[] = (
+    [
+      { key: 'annotator/dashboard', label: 'Tổng quan cá nhân', cap: 'annotate_jobs' },
+      { key: 'annotator/analytics', label: 'Phân tích cá nhân', cap: 'annotate_jobs' },
+      { key: 'overview', label: 'Tổng quan dự án', cap: 'view_dashboard' },
+      { key: 'team-ranking', label: 'Xếp hạng team', cap: 'view_dashboard' },
+      { key: 'leader/overview', label: 'Tổng quan team', cap: 'lead_team' },
+      { key: 'qc1/dashboard', label: 'Tổng quan QC1', cap: ['perform_qc1', 'view_dashboard'] },
+      { key: 'qc2/dashboard', label: 'Tổng quan QC2', cap: 'perform_audit' },
+    ] satisfies NavItem[]
+  ).filter((i) => allowed(i.cap))
 
   if (dashboardItems.length > 0) {
     groups.push({ key: 'g-dashboard', label: 'Dashboard', icon: <BarIcon />, items: dashboardItems })
   }
 
   // 2. Công việc (Annotator + Vận hành)
-  const workItems: NavItem[] = [
-    { key: 'annotator/jobs', label: 'Job của tôi', cap: 'annotate_jobs', matchPrefix: 'annotator/jobs' },
-    { key: 'annotator/rework', label: 'Cần sửa', cap: 'annotate_jobs' },
-    { key: 'annotator/requests', label: 'Yêu cầu của tôi', cap: 'annotate_jobs' },
-    { key: 'leader/jobs', label: 'Job của team', cap: 'lead_team' },
-    { key: 'datasets', label: 'Datasets', cap: 'view_jobs' },
-    { key: 'batches', label: 'Batches', cap: 'view_jobs' },
-    { key: 'jobs', label: 'Jobs', cap: 'view_jobs' },
-    { key: 'queue', label: 'Data Queue', cap: 'view_jobs' },
-  ].filter((i) => allowed(i.cap))
+  const workItems: NavItem[] = (
+    [
+      { key: 'annotator/jobs', label: 'Job của tôi', cap: 'annotate_jobs', matchPrefix: 'annotator/jobs' },
+      { key: 'annotator/rework', label: 'Cần sửa', cap: 'annotate_jobs' },
+      { key: 'annotator/requests', label: 'Yêu cầu của tôi', cap: 'annotate_jobs' },
+      { key: 'leader/jobs', label: 'Job của team', cap: 'lead_team' },
+      { key: 'datasets', label: 'Datasets', cap: 'view_jobs' },
+      { key: 'batches', label: 'Batches', cap: 'view_jobs' },
+      { key: 'jobs', label: 'Jobs', cap: 'view_jobs' },
+      { key: 'queue', label: 'Data Queue', cap: 'view_jobs' },
+    ] satisfies NavItem[]
+  ).filter((i) => allowed(i.cap))
 
   if (workItems.length > 0) {
     groups.push({
@@ -137,33 +141,39 @@ function buildMenu(can: (cap: Capability) => boolean): NavGroup[] {
 
   // 4. Các nhóm dành cho vai trò quản lý / QC (ẩn hoàn toàn với Annotator thuần để khớp thiết kế)
   if (hasManagementOrQc) {
-    const peopleItems: NavItem[] = [
-      { key: 'teams', label: 'Team & Members', cap: 'manage_team' },
-      { key: 'workload', label: 'Tải công việc', cap: ['manage_team', 'view_dashboard'] },
-      { key: 'leader/members', label: 'Thành viên team', cap: 'lead_team' },
-      { key: 'leader/workload', label: 'Tải công việc team', cap: 'lead_team' },
-    ].filter((i) => allowed(i.cap))
+    const peopleItems: NavItem[] = (
+      [
+        { key: 'teams', label: 'Team & Members', cap: 'manage_team' },
+        { key: 'workload', label: 'Tải công việc', cap: ['manage_team', 'view_dashboard'] },
+        { key: 'leader/members', label: 'Thành viên team', cap: 'lead_team' },
+        { key: 'leader/workload', label: 'Tải công việc team', cap: 'lead_team' },
+      ] satisfies NavItem[]
+    ).filter((i) => allowed(i.cap))
     if (peopleItems.length > 0) {
       groups.push({ key: 'g-people', label: 'Nhân sự', icon: <UsersIcon />, items: peopleItems })
     }
 
-    const qualityItems: NavItem[] = [
-      { key: 'audits', label: 'Quản lý Audit', cap: 'manage_audits' },
-      { key: 'qc2/strategy', label: 'Chiến thuật audit', cap: 'manage_audits' },
-      { key: 'qc2/work', label: 'Job audit QC2', cap: 'perform_audit' },
-      { key: 'qc1/work', label: 'Job kiểm tra QC1', cap: 'perform_qc1' },
-      { key: 'error-categories', label: 'Danh mục lỗi', cap: 'manage_quality_catalog' },
-      { key: 'guidelines', label: 'Hướng dẫn gán nhãn', cap: 'view_guidelines' },
-    ].filter((i) => allowed(i.cap))
+    const qualityItems: NavItem[] = (
+      [
+        { key: 'audits', label: 'Quản lý Audit', cap: 'manage_audits' },
+        { key: 'qc2/strategy', label: 'Chiến thuật audit', cap: 'manage_audits' },
+        { key: 'qc2/work', label: 'Job audit QC2', cap: 'perform_audit' },
+        { key: 'qc1/work', label: 'Job kiểm tra QC1', cap: 'perform_qc1' },
+        { key: 'error-categories', label: 'Danh mục lỗi', cap: 'manage_quality_catalog' },
+        { key: 'guidelines', label: 'Hướng dẫn gán nhãn', cap: 'view_guidelines' },
+      ] satisfies NavItem[]
+    ).filter((i) => allowed(i.cap))
     if (qualityItems.length > 0) {
       groups.push({ key: 'g-quality', label: 'Chất lượng', icon: <ShieldIcon />, items: qualityItems })
     }
 
-    const extraItems: NavItem[] = [
-      { key: 'delivery', label: 'Delivery', cap: 'manage_delivery' },
-      { key: 'cvat-link', label: 'Liên kết CVAT', cap: 'view_project' },
-      { key: 'announcements', label: 'Thông báo dự án', cap: 'view_project' },
-    ].filter((i) => allowed(i.cap))
+    const extraItems: NavItem[] = (
+      [
+        { key: 'delivery', label: 'Delivery', cap: 'manage_delivery' },
+        { key: 'cvat-link', label: 'Liên kết CVAT', cap: 'view_project' },
+        { key: 'announcements', label: 'Thông báo dự án', cap: 'view_project' },
+      ] satisfies NavItem[]
+    ).filter((i) => allowed(i.cap))
     if (extraItems.length > 0) {
       groups.push({ key: 'g-extra', label: 'Hệ thống & Bàn giao', icon: <GearIcon />, items: extraItems })
     }
@@ -345,7 +355,7 @@ export default function ProjectLayout() {
             >
               {mobileOpen ? 'Đóng menu' : 'Menu'}
             </button>
-            <span className="truncate text-sm font-medium text-[#475467]">{project.name}</span>
+            <span className="truncate text-sm font-medium text-[#475467]">{context.project.name}</span>
           </div>
 
           {mobileOpen && (

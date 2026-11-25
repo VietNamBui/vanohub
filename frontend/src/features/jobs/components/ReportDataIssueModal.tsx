@@ -1,5 +1,5 @@
 import { AlertTriangle, XClose } from '@untitledui/icons'
-import { useEffect, useState } from 'react'
+import { useState } from 'react'
 import { Dialog, Modal, ModalOverlay } from '@/components/application/modals/modal'
 import { Button } from '@/components/base/buttons/button'
 import { Input } from '@/components/base/input/input'
@@ -17,18 +17,23 @@ interface Props {
 }
 
 /** Modal "Báo vấn đề dữ liệu" (Dữ liệu bị chặn — gửi PM xử lý và theo dõi ở Yêu cầu của tôi / TD13). */
-export default function ReportDataIssueModal({ isOpen, projectId, jobId, jobName, onClose, onSubmitted }: Props) {
+export default function ReportDataIssueModal(props: Props) {
+  return (
+    <ModalOverlay isOpen={props.isOpen} onOpenChange={(open) => !open && props.onClose()} isDismissable>
+      <Modal className="max-w-[564px]">
+        <Dialog aria-label="Báo vấn đề dữ liệu">
+          {props.isOpen && <ReportDataIssueForm key={props.jobId} {...props} />}
+        </Dialog>
+      </Modal>
+    </ModalOverlay>
+  )
+}
+
+function ReportDataIssueForm({ projectId, jobId, jobName, onClose, onSubmitted }: Props) {
   const { run, pending } = useAction()
   const [title, setTitle] = useState('')
   const [reason, setReason] = useState('')
   const [validationError, setValidationError] = useState<string | null>(null)
-
-  useEffect(() => {
-    if (!isOpen) return
-    setTitle('')
-    setReason('')
-    setValidationError(null)
-  }, [isOpen])
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault()
@@ -54,66 +59,60 @@ export default function ReportDataIssueModal({ isOpen, projectId, jobId, jobName
   }
 
   return (
-    <ModalOverlay isOpen={isOpen} onOpenChange={(open) => !open && onClose()} isDismissable>
-      <Modal className="max-w-[564px]">
-        <Dialog aria-label="Báo vấn đề dữ liệu">
-          <form onSubmit={handleSubmit} className="flex flex-col gap-5 p-6">
-            <div className="flex items-start justify-between">
-              <span className="flex size-12 items-center justify-center rounded-full bg-[#FFFAEB]">
-                <span className="flex size-9 items-center justify-center rounded-full bg-[#FEDF89] text-[#B54708]">
-                  <AlertTriangle className="size-5" />
-                </span>
-              </span>
-              <button
-                type="button"
-                onClick={onClose}
-                aria-label="Đóng"
-                className="flex size-8 cursor-pointer items-center justify-center rounded-lg text-[#98A2B3] hover:bg-[#F9FAFB] hover:text-[#475467]"
-              >
-                <XClose className="size-5" />
-              </button>
-            </div>
+    <form onSubmit={handleSubmit} className="flex flex-col gap-5 p-6">
+      <div className="flex items-start justify-between">
+        <span className="flex size-12 items-center justify-center rounded-full bg-[#FFFAEB]">
+          <span className="flex size-9 items-center justify-center rounded-full bg-[#FEDF89] text-[#B54708]">
+            <AlertTriangle className="size-5" />
+          </span>
+        </span>
+        <button
+          type="button"
+          onClick={onClose}
+          aria-label="Đóng"
+          className="flex size-8 cursor-pointer items-center justify-center rounded-lg text-[#98A2B3] hover:bg-[#F9FAFB] hover:text-[#475467]"
+        >
+          <XClose className="size-5" />
+        </button>
+      </div>
 
-            <div>
-              <h2 className="text-lg font-bold text-[#101828]">Báo vấn đề dữ liệu</h2>
-              <p className="mt-1 text-sm text-[#475467]">
-                {jobName} · Báo cáo dữ liệu hỏng / mờ point cloud sẽ được chuyển tới PM để kiểm tra và thay thế.
-              </p>
-            </div>
+      <div>
+        <h2 className="text-lg font-bold text-[#101828]">Báo vấn đề dữ liệu</h2>
+        <p className="mt-1 text-sm text-[#475467]">
+          {jobName} · Báo cáo dữ liệu hỏng / mờ point cloud sẽ được chuyển tới PM để kiểm tra và thay thế.
+        </p>
+      </div>
 
-            <div className="flex flex-col gap-4">
-              <Input
-                label="Tóm tắt vấn đề *"
-                placeholder="VD: Point cloud mờ frame 90–96"
-                value={title}
-                onChange={setTitle}
-              />
+      <div className="flex flex-col gap-4">
+        <Input
+          label="Tóm tắt vấn đề *"
+          placeholder="VD: Point cloud mờ frame 90–96"
+          value={title}
+          onChange={setTitle}
+        />
 
-              <TextArea
-                label="Mô tả chi tiết & phạm vi frame *"
-                placeholder="Ghi rõ frame lỗi, hiện tượng (mất điểm Lidar, lệch calibration, ảnh camera đen)…"
-                rows={4}
-                value={reason}
-                onChange={(v) => {
-                  setReason(v)
-                  if (validationError) setValidationError(null)
-                }}
-                isInvalid={!!validationError}
-                hint={validationError ?? undefined}
-              />
-            </div>
+        <TextArea
+          label="Mô tả chi tiết & phạm vi frame *"
+          placeholder="Ghi rõ frame lỗi, hiện tượng (mất điểm Lidar, lệch calibration, ảnh camera đen)…"
+          rows={4}
+          value={reason}
+          onChange={(v) => {
+            setReason(v)
+            if (validationError) setValidationError(null)
+          }}
+          isInvalid={!!validationError}
+          hint={validationError ?? undefined}
+        />
+      </div>
 
-            <div className="flex items-center justify-end gap-3 pt-1">
-              <Button color="secondary" size="md" onPress={onClose}>
-                Hủy
-              </Button>
-              <Button type="submit" color="primary" size="md" isLoading={pending}>
-                Gửi báo cáo
-              </Button>
-            </div>
-          </form>
-        </Dialog>
-      </Modal>
-    </ModalOverlay>
+      <div className="flex items-center justify-end gap-3 pt-1">
+        <Button color="secondary" size="md" onPress={onClose}>
+          Hủy
+        </Button>
+        <Button type="submit" color="primary" size="md" isLoading={pending}>
+          Gửi báo cáo
+        </Button>
+      </div>
+    </form>
   )
 }

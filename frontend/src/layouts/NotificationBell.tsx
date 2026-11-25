@@ -1,10 +1,11 @@
 import { AlertTriangle, Bell01, Check, CheckCircle, Clock, InfoCircle, XClose } from '@untitledui/icons'
-import { useCallback, useEffect, useState } from 'react'
+import { useEffect, useState } from 'react'
 import { useNavigate } from 'react-router'
 import { Badge } from '@/components/base/badges/badges'
 import { useAuth } from '../features/auth/useAuth'
 import { listAnnouncements, listProjectNotifications, markProjectNotificationsRead } from '../features/projects/api'
 import type { NotificationCategory, ProjectSummary, UnifiedNotification } from '../features/projects/types'
+import { useRequest } from '../shared/hooks/useRequest'
 import { formatDateTime, formatRelative } from '../shared/utils/format'
 import { cx } from '@/utils/cx'
 
@@ -27,6 +28,7 @@ function writeSeen(key: string, value: number) {
 }
 
 async function fetchNotifications(projects: ProjectSummary[], userId: number): Promise<UnifiedNotification[]> {
+  if (!projects.length || !userId) return []
   if (projects.length === 1) {
     const feed = await listProjectNotifications(projects[0].id)
     const seenAt = readSeen(seenKey(userId, projects[0].id))
@@ -116,30 +118,19 @@ export default function NotificationBell({ projects }: { projects: ProjectSummar
   const userId = user?.id ?? 0
   const [open, setOpen] = useState(false)
   const [tab, setTab] = useState<'all' | 'unread'>('all')
-  const [items, setItems] = useState<UnifiedNotification[]>([])
-  const [loading, setLoading] = useState(false)
-  const [error, setError] = useState<string | null>(null)
+  const [tick, setTick] = useState(0)
+  const [readIds, setReadIds] = useState<Record<string, boolean>>({})
   const scopeKey = projects.map((p) => p.id).join(',')
 
-  const load = useCallback(async () => {
-    if (!projects.length || !userId) return
-    setLoading(true)
-    setError(null)
-    try {
-      const next = await fetchNotifications(projects, userId)
-      setItems(next)
-    } catch {
-      setError('Không tải được thông báo.')
-    } finally {
-      setLoading(false)
-    }
-  }, [projects, userId])
+  const { data, error, isLoading } = useRequest(
+    `notif-drawer:${scopeKey}:${userId}:${tick}`,
+    () => fetchNotifications(projects, userId),
+  )
 
   useEffect(() => {
-    void load()
-    const timer = setInterval(() => void load(), POLL_MS)
+    const timer = setInterval(() => setTick((t) => t + 1), POLL_MS)
     return () => clearInterval(timer)
-  }, [scopeKey, load])
+  }, [])
 
   useEffect(() => {
     if (!open) return
@@ -150,25 +141,29 @@ export default function NotificationBell({ projects }: { projects: ProjectSummar
     return () => window.removeEventListener('keydown', onKey)
   }, [open])
 
+  const items = (data ?? []).map((item) => (readIds[item.id] ? { ...item, is_read: true } : item))
   const unreadCount = items.filter((i) => !i.is_read).length
   const visible = tab === 'unread' ? items.filter((i) => !i.is_read) : items
 
   async function markAllRead() {
-    const nowMs = Date.now()
+    const nowMs = new Date().getTime()
     for (const p of projects) {
       writeSeen(seenKey(userId, p.id), nowMs)
     }
+    const nextRead: Record<string, boolean> = {}
+    for (const item of items) nextRead[item.id] = true
+    setReadIds((prev) => ({ ...prev, ...nextRead }))
     if (projects.length === 1) {
       try {
         await markProjectNotificationsRead(projects[0].id)
       } catch {
-        // fallback optimistic
+        // ignore optimistic failure
       }
     }
-    setItems((prev) => prev.map((it) => ({ ...it, is_read: true })))
   }
 
   async function handleItemClick(item: UnifiedNotification) {
+    setReadIds((prev) => ({ ...prev, [item.id]: true }))
     if (!item.is_read && item.notification_id && projects.length === 1) {
       try {
         await markProjectNotificationsRead(projects[0].id, item.notification_id)
@@ -177,9 +172,8 @@ export default function NotificationBell({ projects }: { projects: ProjectSummar
       }
     }
     if (item.source === 'announcement' && projects.length === 1) {
-      writeSeen(seenKey(userId, projects[0].id), Date.now())
+      writeSeen(seenKey(userId, projects[0].id), new Date().getTime())
     }
-    setItems((prev) => prev.map((it) => (it.id === item.id ? { ...it, is_read: true } : it)))
     setOpen(false)
     if (item.action_url) {
       navigate(item.action_url)
@@ -192,7 +186,7 @@ export default function NotificationBell({ projects }: { projects: ProjectSummar
         type="button"
         onClick={() => {
           setOpen(true)
-          void load()
+          setTick((t) => t + 1)
         }}
         aria-label={unreadCount ? `Thông báo, ${unreadCount} chưa đọc` : 'Thông báo'}
         className="relative flex size-10 cursor-pointer items-center justify-center rounded-lg text-[#667085] transition hover:bg-[#F9FAFB] hover:text-[#344054]"
@@ -262,9 +256,9 @@ export default function NotificationBell({ projects }: { projects: ProjectSummar
             </div>
 
             <div className="flex-1 overflow-y-auto py-2">
-              {error && items.length === 0 ? (
-                <p className="px-6 py-12 text-center text-sm text-[#B42318]">{error}</p>
-              ) : loading && items.length === 0 ? (
+              {error != null && items.length === 0 ? (
+                <p className="px-6 py-12 text-center text-sm text-[#B42318]">Không tải được thông báo.</p>
+              ) : isLoading && items.length === 0 ? (
                 <p className="px-6 py-12 text-center text-sm text-[#667085]">Đang tải…</p>
               ) : visible.length === 0 ? (
                 <div className="flex flex-col items-center gap-2 px-6 py-14 text-center">

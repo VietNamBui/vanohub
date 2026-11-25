@@ -1,5 +1,5 @@
 import { InfoCircle, XClose } from '@untitledui/icons'
-import { useEffect, useState } from 'react'
+import { useState } from 'react'
 import { Dialog, Modal, ModalOverlay } from '@/components/application/modals/modal'
 import { Button } from '@/components/base/buttons/button'
 import { Input } from '@/components/base/input/input'
@@ -22,8 +22,24 @@ interface Props {
 }
 
 /** Modal "Phản hồi lỗi của QC1" (564px) — chọn lỗi theo frame/object và gửi đến Team Leader. */
-export default function DisputeErrorModal({
-  isOpen,
+export default function DisputeErrorModal(props: Props) {
+  return (
+    <ModalOverlay isOpen={props.isOpen} onOpenChange={(open) => !open && props.onClose()} isDismissable>
+      <Modal className="max-w-[564px]">
+        <Dialog aria-label="Phản hồi lỗi của QC1">
+          {props.isOpen && (
+            <DisputeErrorForm
+              key={`${props.jobId}:${props.initialErrorId ?? 'first'}`}
+              {...props}
+            />
+          )}
+        </Dialog>
+      </Modal>
+    </ModalOverlay>
+  )
+}
+
+function DisputeErrorForm({
   projectId,
   jobId,
   jobName,
@@ -34,19 +50,11 @@ export default function DisputeErrorModal({
   onSubmitted,
 }: Props) {
   const { run, pending } = useAction()
-  const [selectedErrorId, setSelectedErrorId] = useState<string>('')
+  const first = initialErrorId ?? errors[0]?.id ?? null
+  const [selectedErrorId, setSelectedErrorId] = useState<string>(first ? String(first) : '')
   const [reasonSummary, setReasonSummary] = useState('')
   const [details, setDetails] = useState('')
   const [validationError, setValidationError] = useState<string | null>(null)
-
-  useEffect(() => {
-    if (!isOpen) return
-    const first = initialErrorId ?? errors[0]?.id ?? null
-    setSelectedErrorId(first ? String(first) : '')
-    setReasonSummary('')
-    setDetails('')
-    setValidationError(null)
-  }, [isOpen, initialErrorId, errors])
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault()
@@ -87,73 +95,67 @@ export default function DisputeErrorModal({
   ]
 
   return (
-    <ModalOverlay isOpen={isOpen} onOpenChange={(open) => !open && onClose()} isDismissable>
-      <Modal className="max-w-[564px]">
-        <Dialog aria-label="Phản hồi lỗi của QC1">
-          <form onSubmit={handleSubmit} className="flex flex-col gap-5 p-6">
-            <div className="flex items-start justify-between">
-              <span className="flex size-12 items-center justify-center rounded-full bg-[#F9F5FF]">
-                <span className="flex size-9 items-center justify-center rounded-full bg-[#E9D7FE] text-[#6941C6]">
-                  <InfoCircle className="size-5" />
-                </span>
-              </span>
-              <button
-                type="button"
-                onClick={onClose}
-                aria-label="Đóng"
-                className="flex size-8 cursor-pointer items-center justify-center rounded-lg text-[#98A2B3] hover:bg-[#F9FAFB] hover:text-[#475467]"
-              >
-                <XClose className="size-5" />
-              </button>
-            </div>
+    <form onSubmit={handleSubmit} className="flex flex-col gap-5 p-6">
+      <div className="flex items-start justify-between">
+        <span className="flex size-12 items-center justify-center rounded-full bg-[#F9F5FF]">
+          <span className="flex size-9 items-center justify-center rounded-full bg-[#E9D7FE] text-[#6941C6]">
+            <InfoCircle className="size-5" />
+          </span>
+        </span>
+        <button
+          type="button"
+          onClick={onClose}
+          aria-label="Đóng"
+          className="flex size-8 cursor-pointer items-center justify-center rounded-lg text-[#98A2B3] hover:bg-[#F9FAFB] hover:text-[#475467]"
+        >
+          <XClose className="size-5" />
+        </button>
+      </div>
 
-            <div>
-              <h2 className="text-lg font-bold text-[#101828]">Phản hồi lỗi của QC1</h2>
-              <p className="mt-1 text-sm text-[#475467]">
-                {jobName} · Gửi đến TL {teamLeaderName || 'phụ trách team'}.
-              </p>
-            </div>
+      <div>
+        <h2 className="text-lg font-bold text-[#101828]">Phản hồi lỗi của QC1</h2>
+        <p className="mt-1 text-sm text-[#475467]">
+          {jobName} · Gửi đến TL {teamLeaderName || 'phụ trách team'}.
+        </p>
+      </div>
 
-            <div className="flex flex-col gap-4">
-              <NativeSelect
-                label="Lỗi và vị trí *"
-                value={selectedErrorId}
-                onChange={(e) => setSelectedErrorId(e.target.value)}
-                options={options}
-              />
+      <div className="flex flex-col gap-4">
+        <NativeSelect
+          label="Lỗi và vị trí *"
+          value={selectedErrorId}
+          onChange={(e) => setSelectedErrorId(e.target.value)}
+          options={options}
+        />
 
-              <Input
-                label="Lý do phản hồi *"
-                placeholder="VD: Đối tượng bị che khuất hoàn toàn nên đúng quy tắc v2.3…"
-                value={reasonSummary}
-                onChange={(v) => {
-                  setReasonSummary(v)
-                  if (validationError) setValidationError(null)
-                }}
-                isInvalid={!!validationError}
-                hint={validationError ?? undefined}
-              />
+        <Input
+          label="Lý do phản hồi *"
+          placeholder="VD: Đối tượng bị che khuất hoàn toàn nên đúng quy tắc v2.3…"
+          value={reasonSummary}
+          onChange={(v) => {
+            setReasonSummary(v)
+            if (validationError) setValidationError(null)
+          }}
+          isInvalid={!!validationError}
+          hint={validationError ?? undefined}
+        />
 
-              <TextArea
-                label="Bằng chứng / ghi chú thêm (không bắt buộc)"
-                placeholder="Ghi rõ frame liên quan, mục hướng dẫn áp dụng hoặc ngữ cảnh trên CVAT…"
-                rows={3}
-                value={details}
-                onChange={setDetails}
-              />
-            </div>
+        <TextArea
+          label="Bằng chứng / ghi chú thêm (không bắt buộc)"
+          placeholder="Ghi rõ frame liên quan, mục hướng dẫn áp dụng hoặc ngữ cảnh trên CVAT…"
+          rows={3}
+          value={details}
+          onChange={setDetails}
+        />
+      </div>
 
-            <div className="flex items-center justify-end gap-3 pt-1">
-              <Button color="secondary" size="md" onPress={onClose}>
-                Hủy
-              </Button>
-              <Button type="submit" color="primary" size="md" isLoading={pending}>
-                Gửi phản hồi
-              </Button>
-            </div>
-          </form>
-        </Dialog>
-      </Modal>
-    </ModalOverlay>
+      <div className="flex items-center justify-end gap-3 pt-1">
+        <Button color="secondary" size="md" onPress={onClose}>
+          Hủy
+        </Button>
+        <Button type="submit" color="primary" size="md" isLoading={pending}>
+          Gửi phản hồi
+        </Button>
+      </div>
+    </form>
   )
 }

@@ -1,5 +1,5 @@
 import { AlertTriangle, CheckCircle, SearchLg } from '@untitledui/icons'
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { useNavigate } from 'react-router'
 import { quickSearchAnnotator } from '../features/jobs/api'
 import type { AnnotatorQuickSearchResult } from '../features/jobs/types'
@@ -20,8 +20,12 @@ interface Props {
 
 /** Tìm kiếm nhanh (⌘K): tra cứu job cá nhân (PQ01) và nhảy nhanh tới các màn hình Annotator. */
 export default function QuickSearchModal({ open, projectId, onClose }: Props) {
+  if (!open) return null
+  return <QuickSearchPalette projectId={projectId} onClose={onClose} />
+}
+
+function QuickSearchPalette({ projectId, onClose }: { projectId: number | null; onClose: () => void }) {
   const navigate = useNavigate()
-  const inputRef = useRef<HTMLInputElement>(null)
   const [query, setQuery] = useState('')
   const [jobs, setJobs] = useState<AnnotatorQuickSearchResult['jobs']>([])
   const [loading, setLoading] = useState(false)
@@ -49,17 +53,7 @@ export default function QuickSearchModal({ open, projectId, onClose }: Props) {
   }, [projectId, query])
 
   useEffect(() => {
-    if (!open) return
-    setQuery('')
-    setActiveIndex(0)
-    setTimeout(() => inputRef.current?.focus(), 20)
-  }, [open])
-
-  useEffect(() => {
-    if (!open || !projectId) {
-      setJobs([])
-      return
-    }
+    if (!projectId) return
     let cancelled = false
     const timer = setTimeout(async () => {
       setLoading(true)
@@ -71,24 +65,25 @@ export default function QuickSearchModal({ open, projectId, onClose }: Props) {
       } finally {
         if (!cancelled) setLoading(false)
       }
-    }, 140)
+    }, 120)
     return () => {
       cancelled = true
       clearTimeout(timer)
     }
-  }, [open, projectId, query])
+  }, [projectId, query])
+
+  const visibleJobs = useMemo(() => (projectId ? jobs : []), [projectId, jobs])
 
   const flatTargets = useMemo(() => {
-    const jobItems = jobs.map((j) => ({
+    const jobItems = visibleJobs.map((j) => ({
       key: `job-${j.id}`,
       path: `/projects/${projectId}/annotator/jobs/${j.id}`,
     }))
     const pageItems = pages.map((p) => ({ key: p.id, path: p.path }))
     return [...jobItems, ...pageItems]
-  }, [jobs, pages, projectId])
+  }, [visibleJobs, pages, projectId])
 
   useEffect(() => {
-    if (!open) return
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
         e.preventDefault()
@@ -107,9 +102,7 @@ export default function QuickSearchModal({ open, projectId, onClose }: Props) {
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [open, flatTargets, activeIndex, navigate, onClose])
-
-  if (!open) return null
+  }, [flatTargets, activeIndex, navigate, onClose])
 
   return (
     <div className="fixed inset-0 z-50 flex items-start justify-center pt-[12vh] px-4" role="dialog" aria-modal="true" aria-label="Tìm kiếm nhanh">
@@ -119,7 +112,7 @@ export default function QuickSearchModal({ open, projectId, onClose }: Props) {
         <div className="flex items-center gap-3 border-b border-[#EAECF0] px-5 py-3.5">
           <SearchLg className="size-5 shrink-0 text-[#667085]" />
           <input
-            ref={inputRef}
+            autoFocus
             value={query}
             onChange={(e) => {
               setQuery(e.target.value)
@@ -141,13 +134,13 @@ export default function QuickSearchModal({ open, projectId, onClose }: Props) {
           {projectId != null && (
             <div className="mb-2">
               <div className="px-3 py-1.5 text-xs font-semibold text-[#667085]">Job</div>
-              {loading && jobs.length === 0 ? (
+              {loading && visibleJobs.length === 0 ? (
                 <p className="px-3 py-2 text-sm text-[#667085]">Đang tìm…</p>
-              ) : jobs.length === 0 ? (
+              ) : visibleJobs.length === 0 ? (
                 <p className="px-3 py-2 text-sm text-[#667085]">Không thấy job phù hợp.</p>
               ) : (
                 <ul>
-                  {jobs.map((job, idx) => (
+                  {visibleJobs.map((job, idx) => (
                     <li key={job.id}>
                       <button
                         type="button"
@@ -187,7 +180,7 @@ export default function QuickSearchModal({ open, projectId, onClose }: Props) {
             ) : (
               <ul>
                 {pages.map((page, idx) => {
-                  const flatIdx = jobs.length + idx
+                  const flatIdx = visibleJobs.length + idx
                   return (
                     <li key={page.id}>
                       <button
