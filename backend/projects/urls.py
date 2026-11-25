@@ -22,4 +22,8 @@ urlpatterns = [
          name="project-member-roles"),
     path("projects/<int:project_id>/permission-matrix/", views.PermissionMatrixView.as_view(),
          name="project-permission-matrix"),
+    path("projects/<int:project_id>/notifications/", views.ProjectNotificationsView.as_view(),
+         name="project-notifications"),
+    path("projects/<int:project_id>/notifications/mark-read/", views.MarkNotificationsReadView.as_view(),
+         name="project-notifications-mark-read"),
 ] + router.urls

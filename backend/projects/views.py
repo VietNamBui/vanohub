@@ -1,7 +1,10 @@
 from collections import defaultdict
 
+from datetime import timedelta
+
 from django.db import transaction
 from django.db.models import Count, Max, Prefetch, Q
+from django.utils import timezone
 from django.utils.dateparse import parse_date
 from rest_framework import mixins, status, viewsets
 from rest_framework.decorators import action
@@ -15,10 +18,20 @@ from accounts.permissions import CAPABILITY_ROLES, DIRECTOR_CAPABILITIES, Cap, P
 from accounts.serializers import UserBriefSerializer
 from cvat_integration.client import CvatError
 from cvat_integration.sync import import_task_jobs, sync_batch
-from jobs.models import OPEN_STATUSES, JobStatus
+from jobs.models import ACTIVE_ANNOTATOR_STATUSES, OPEN_STATUSES, Job, JobStatus
 from teams.models import TeamMember
 
-from .models import ActivityLog, Announcement, Batch, DataStatus, Dataset, Delivery, Guideline, Project
+from .models import (
+    ActivityLog,
+    Announcement,
+    Batch,
+    DataStatus,
+    Dataset,
+    Delivery,
+    Guideline,
+    Project,
+    UserNotification,
+)
 from .serializers import (
     ActivityLogSerializer,
     AnnouncementSerializer,
@@ -402,3 +415,124 @@ class GuidelineViewSet(ProjectScopedViewMixin, mixins.ListModelMixin, mixins.Cre
             guideline = serializer.save(project=self.project, created_by=self.request.user, version=(last or 0) + 1)
         ActivityLog.record(project=self.project, actor=self.request.user, action="guideline.publish",
                            target=guideline, after={"version": guideline.version})
+
+
+class ProjectNotificationsView(ProjectScopedViewMixin, APIView):
+    """GET /api/projects/{id}/notifications/ — Thông báo hợp nhất (sự kiện cá nhân, cảnh báo hạn, thông báo dự án)."""
+
+    required_capabilities = {"*": Cap.VIEW_PROJECT}
+
+    def get(self, request, project_id):
+        user = request.user
+        now = timezone.now()
+        items = []
+
+        # 1. Thông báo cá nhân đã lưu trong DB
+        persisted = list(
+            UserNotification.objects.filter(recipient=user, project=self.project).select_related("job")[:40]
+        )
+        notified_deadline_job_ids = {
+            n.job_id for n in persisted if n.category == UserNotification.Category.DEADLINE and n.job_id
+        }
+        for n in persisted:
+            items.append({
+                "id": f"sys-{n.id}",
+                "notification_id": n.id,
+                "source": "system",
+                "category": n.category,
+                "title": n.title,
+                "body": n.body,
+                "job_id": n.job_id,
+                "action_url": n.action_url or (f"/projects/{self.project.id}/annotator/jobs/{n.job_id}" if n.job_id else ""),
+                "is_read": n.is_read,
+                "is_pinned_pending": n.is_pinned_pending,
+                "created_at": n.created_at.isoformat(),
+            })
+
+        # 2. Cảnh báo job sắp / quá hạn đang giữ (TB03 + DB06)
+        if user.notify_deadline and self.has_cap(Cap.ANNOTATE_JOBS):
+            urgent_jobs = (
+                Job.objects.filter(
+                    project=self.project,
+                    annotator=user,
+                    status__in=ACTIVE_ANNOTATOR_STATUSES,
+                    deadline__isnull=False,
+                    deadline__lte=now + timedelta(hours=24),
+                )
+                .exclude(pk__in=notified_deadline_job_ids)
+                .order_by("deadline", "id")[:10]
+            )
+            for j in urgent_jobs:
+                overdue = j.deadline < now
+                hours = max(1, round(abs((j.deadline - now).total_seconds()) / 3600))
+                items.append({
+                    "id": f"due-{j.id}",
+                    "notification_id": None,
+                    "source": "deadline",
+                    "category": UserNotification.Category.DEADLINE,
+                    "title": f"{j.name} đã quá hạn" if overdue else f"{j.name} sắp đến hạn",
+                    "body": (
+                        f"Quá hạn {hours} giờ — ưu tiên xử lý ngay (DB06)."
+                        if overdue
+                        else f"Còn {hours} giờ — ưu tiên làm trước (DB06)."
+                    ),
+                    "job_id": j.id,
+                    "action_url": f"/projects/{self.project.id}/annotator/jobs/{j.id}",
+                    "is_read": False,
+                    "is_pinned_pending": True,
+                    "created_at": j.updated_at.isoformat(),
+                })
+
+        # 3. Thông báo dự án (Announcement) phù hợp vai trò / team
+        announcements = Announcement.objects.filter(project=self.project).select_related("sender", "target_team")[:20]
+        if not self.has_cap(Cap.SEND_ANNOUNCEMENT):
+            my_roles = expand_roles(
+                RoleAssignment.objects.filter(user=user, project=self.project).values_list("role", flat=True)
+            )
+            my_team_ids = set(
+                TeamMember.objects.filter(user=user, team__project=self.project).values_list("team_id", flat=True)
+            )
+            announcements = [
+                a for a in announcements
+                if (not a.target_roles or set(a.target_roles) & my_roles)
+                and (a.target_team_id is None or a.target_team_id in my_team_ids)
+            ]
+        for a in announcements:
+            sender_name = a.sender.get_full_name() or a.sender.username if a.sender else "Hệ thống"
+            items.append({
+                "id": f"ann-{a.id}",
+                "notification_id": None,
+                "source": "announcement",
+                "category": UserNotification.Category.ANNOUNCEMENT,
+                "title": f"Thông báo từ {sender_name}",
+                "body": a.content,
+                "job_id": None,
+                "action_url": f"/projects/{self.project.id}/announcements",
+                "is_read": a.sender_id == user.id,
+                "is_pinned_pending": False,
+                "created_at": a.created_at.isoformat(),
+            })
+
+        items.sort(key=lambda x: x["created_at"], reverse=True)
+        items.sort(key=lambda x: 0 if (not x["is_read"] and x["is_pinned_pending"]) else 1)
+
+        unread_count = sum(1 for item in items if not item["is_read"])
+        return Response({
+            "all_count": len(items),
+            "unread_count": unread_count,
+            "items": items[:50],
+        })
+
+
+class MarkNotificationsReadView(ProjectScopedViewMixin, APIView):
+    """POST /api/projects/{id}/notifications/mark-read/ — Đánh dấu đã đọc (một hoặc tất cả)."""
+
+    required_capabilities = {"*": Cap.VIEW_PROJECT}
+
+    def post(self, request, project_id):
+        notif_id = request.data.get("notification_id")
+        qs = UserNotification.objects.filter(recipient=request.user, project=self.project, is_read=False)
+        if notif_id is not None:
+            qs = qs.filter(pk=notif_id)
+        updated = qs.update(is_read=True)
+        return Response({"updated": updated})

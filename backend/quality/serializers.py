@@ -2,7 +2,7 @@ from rest_framework import serializers
 
 from accounts.models import Role, User
 from accounts.serializers import UserBriefSerializer
-from jobs.models import Job
+from jobs.models import Job, ReworkScope
 from projects.models import SamplingMethod, StratifyBy
 
 from .models import Audit, AuditSample, ErrorCategory, ReviewError, Severity
@@ -141,3 +141,4 @@ class Qc1ErrorInputSerializer(serializers.Serializer):
 class Qc1RejectSerializer(serializers.Serializer):
     errors = Qc1ErrorInputSerializer(many=True, allow_empty=False)
     comment = serializers.CharField(required=False, allow_blank=True, default="")
+    rework_scope = serializers.ChoiceField(choices=ReworkScope.choices, required=False, default=ReworkScope.PARTIAL)

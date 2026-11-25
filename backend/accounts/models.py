@@ -36,6 +36,13 @@ def expand_roles(roles):
 
 
 class User(AbstractUser):
+    avatar_url = models.TextField(blank=True, default="")
+    timezone_name = models.CharField(max_length=64, default="Asia/Ho_Chi_Minh")
+    notify_rework = models.BooleanField(default=True)
+    notify_deadline = models.BooleanField(default=True)
+    notify_request_updates = models.BooleanField(default=True)
+    notify_qc_pass = models.BooleanField(default=True)
+
     def is_director(self):
         return self.role_assignments.filter(role=Role.DIRECTOR, project__isnull=True).exists()
 

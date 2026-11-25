@@ -9,6 +9,8 @@ urlpatterns = [
          name="member-performance"),
     path("projects/<int:project_id>/annotator/dashboard/", views.AnnotatorDashboardView.as_view(),
          name="annotator-dashboard"),
+    path("projects/<int:project_id>/annotator/analytics/", views.AnnotatorAnalyticsView.as_view(),
+         name="annotator-analytics"),
     path("projects/<int:project_id>/qc1-summary/", views.Qc1SummaryView.as_view(), name="qc1-summary"),
     path("projects/<int:project_id>/qc2-summary/", views.Qc2SummaryView.as_view(), name="qc2-summary"),
 ]

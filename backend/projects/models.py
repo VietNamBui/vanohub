@@ -36,6 +36,11 @@ class Project(models.Model):
     max_rework_rounds = models.PositiveSmallIntegerField(
         default=3, help_text="Vượt số vòng này thì job bị Escalated."
     )
+    annotator_wip_limit = models.PositiveSmallIntegerField(
+        default=2,
+        validators=[MinValueValidator(1), MaxValueValidator(50)],
+        help_text="Số job tối đa mỗi annotator giữ cùng lúc (GV02).",
+    )
     sampling_method = models.CharField(
         max_length=20, choices=SamplingMethod.choices, default=SamplingMethod.RANDOM
     )
@@ -188,3 +193,34 @@ class Guideline(models.Model):
     class Meta:
         ordering = ["-version"]
         constraints = [models.UniqueConstraint(fields=["project", "version"], name="unique_guideline_version")]
+
+
+class UserNotification(models.Model):
+    """Thông báo cá nhân theo sự kiện hệ thống (TB03): rework, sắp hạn, phản hồi lỗi, đạt QC1."""
+
+    class Category(models.TextChoices):
+        REWORK = "rework", "Trả sửa (Rework)"
+        DEADLINE = "deadline", "Sắp / quá hạn"
+        DISPUTE = "dispute", "Phản hồi lỗi / Yêu cầu"
+        QC_PASS = "qc_pass", "Đạt QC1"
+        ANNOUNCEMENT = "announcement", "Thông báo dự án"
+
+    recipient = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="notifications"
+    )
+    project = models.ForeignKey(Project, on_delete=models.CASCADE, related_name="notifications")
+    job = models.ForeignKey("jobs.Job", on_delete=models.CASCADE, null=True, blank=True, related_name="+")
+    category = models.CharField(max_length=20, choices=Category.choices, default=Category.ANNOUNCEMENT)
+    title = models.CharField(max_length=200)
+    body = models.TextField(blank=True)
+    action_url = models.CharField(max_length=255, blank=True, default="")
+    is_read = models.BooleanField(default=False)
+    is_pinned_pending = models.BooleanField(default=False, help_text="TB03: treo tới khi xử lý xong")
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-created_at", "-id"]
+        indexes = [models.Index(fields=["recipient", "project", "is_read"])]
+
+    def __str__(self):
+        return f"{self.recipient} · {self.title}"

@@ -64,4 +64,20 @@ export const ACTION_LABELS: Record<string, string> = {
   'error_category.update': 'Sửa loại lỗi',
   'guideline.publish': 'Xuất bản guideline',
   'announcement.send': 'Gửi thông báo',
+  'annotator.dispute': 'Phản hồi lỗi QC1',
+  'annotator.data_issue': 'Báo dữ liệu bị chặn',
+}
+
+/** Định dạng thời gian còn lại / quá hạn theo thiết kế DH02 · DH04 ("Còn 8 giờ", "Quá hạn 3 giờ"). */
+export function formatDeadlineCountdown(hoursRemaining?: number | null): { text: string; tone: 'error' | 'warning' | 'gray' } | null {
+  if (hoursRemaining == null) return null
+  if (hoursRemaining < 0) {
+    const h = Math.max(1, Math.round(Math.abs(hoursRemaining)))
+    return { text: `Quá hạn ${h} giờ`, tone: 'error' }
+  }
+  const h = Math.max(1, Math.round(hoursRemaining))
+  if (hoursRemaining <= 24) {
+    return { text: `Còn ${h} giờ`, tone: 'warning' }
+  }
+  return { text: `Còn ${h} giờ`, tone: 'gray' }
 }

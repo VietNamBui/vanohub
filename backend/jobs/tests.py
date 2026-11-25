@@ -183,3 +183,114 @@ class AnnotatorWorkflowTests(TestCase):
         self.assertEqual(r2.status_code, 200)
         self.assertEqual(r2.data["status"], JobStatus.PENDING_QC1)
         self.assertEqual(r2.data["timeline"][-1]["after"]["event"], "annotator.resubmit")
+
+    def test_db06_priority_ordering_and_claim_respects_wip_limit(self):
+        from .models import Job
+
+        now = timezone.now()
+        self.job_mine.deadline = now + timedelta(days=3)
+        self.job_mine.save(update_fields=["deadline"])
+        # Tạo 2 job chưa phân công trong pool
+        pool1 = Job.objects.create(
+            project=self.f.project,
+            batch=self.f.batch,
+            name="POOL-1",
+            status=JobStatus.PENDING_ANNOTATION,
+            deadline=now + timedelta(hours=6),
+            target_object_count=1000,
+        )
+        pool2 = Job.objects.create(
+            project=self.f.project,
+            batch=self.f.batch,
+            name="POOL-2",
+            status=JobStatus.PENDING_ANNOTATION,
+            deadline=now + timedelta(days=2),
+        )
+
+        # WIP limit mặc định = 2, ann1 đang giữ 1 (job_mine) → nhận được pool1 (deadline sớm hơn)
+        claimed = self.ann1.post(self.f.url("annotator/jobs/claim/"), {}, format="json")
+        self.assertEqual(claimed.status_code, 200, claimed.data)
+        self.assertEqual(claimed.data["id"], pool1.id)
+
+        # Đã giữ 2/2 → bị chặn GV02
+        blocked = self.ann1.post(self.f.url("annotator/jobs/claim/"), {}, format="json")
+        self.assertEqual(blocked.status_code, 400)
+
+        # Thứ tự DB06: pool1 (sắp hạn 6h) đứng trước job_mine (còn 3 ngày)
+        listed = self.ann1.get(self.f.url("annotator/jobs/?tab=active")).data["results"]
+        self.assertEqual([r["id"] for r in listed], [pool1.id, self.job_mine.id])
+        self.assertTrue(Job.objects.filter(pk=pool2.id, annotator__isnull=True).exists())
+
+    def test_annotator_requests_dispute_data_issue_and_notifications(self):
+        from quality.models import ReviewError, ReviewStage
+        from teams.models import Team, TeamMember
+
+        tl = make_user("tl_req", Role.TEAM_LEADER, project=self.f.project)
+        team = Team.objects.create(project=self.f.project, name="Team Alpha", leader=tl)
+        TeamMember.objects.create(team=team, user=self.f.ann1)
+
+        err = ReviewError.objects.create(
+            job=self.job_mine,
+            stage=ReviewStage.QC1,
+            rework_round=1,
+            category=self.f.category,
+            severity="major",
+            location="Frame 231 · Object 12",
+            description="ID xe đổi từ 12 sang 47",
+            reported_by=self.f.qc1,
+        )
+
+        # 1. Phản hồi lỗi → định tuyến sang TL
+        r_dispute = self.ann1.post(
+            self.f.url("annotator/requests/"),
+            {
+                "job": self.job_mine.id,
+                "review_error": err.id,
+                "request_type": "error_dispute",
+                "reason": "Frame 230 xe bị che khuất hoàn toàn nên CVAT cấp track mới.",
+            },
+            format="json",
+        )
+        self.assertEqual(r_dispute.status_code, 201, r_dispute.data)
+        self.assertEqual(r_dispute.data["status"], "pending_tl")
+        self.assertEqual(r_dispute.data["handler"]["id"], tl.id)
+        self.assertEqual(r_dispute.data["handler_role"], "TL")
+
+        # 2. Báo dữ liệu bị chặn → định tuyến sang PM
+        r_data = self.ann1.post(
+            self.f.url("annotator/requests/"),
+            {
+                "job": self.job_mine.id,
+                "request_type": "data_issue",
+                "title": "Point cloud mờ frame 90–96",
+                "reason": "Thiếu điểm Lidar ở frame 90–96 không thể căn cuboid.",
+            },
+            format="json",
+        )
+        self.assertEqual(r_data.status_code, 201, r_data.data)
+        self.assertEqual(r_data.data["status"], "pending_pm")
+        self.assertEqual(r_data.data["handler"]["id"], self.f.pm.id)
+
+        # 3. PQ01: ann2 không thấy yêu cầu của ann1
+        self.assertEqual(len(self.f.client(self.f.ann2).get(self.f.url("annotator/requests/")).data), 0)
+
+        # 4. TL giải quyết yêu cầu
+        resolved = self.f.client(tl).post(
+            self.f.url(f"annotator/requests/{r_dispute.data['id']}/resolve/"),
+            {"status": "resolved", "resolution_note": "Đã kiểm tra và gỡ lỗi sai ID."},
+            format="json",
+        )
+        self.assertEqual(resolved.status_code, 200, resolved.data)
+        self.assertEqual(resolved.data["status"], "resolved")
+
+        # 5. Thông báo hợp nhất & đánh dấu đã đọc
+        notifs = self.ann1.get(self.f.url("notifications/"))
+        self.assertEqual(notifs.status_code, 200, notifs.data)
+        self.assertGreaterEqual(notifs.data["all_count"], 2)
+        mark = self.ann1.post(self.f.url("notifications/mark-read/"), {}, format="json")
+        self.assertEqual(mark.status_code, 200)
+
+        # 6. Tìm kiếm nhanh (⌘K) chỉ trả về job của chính annotator
+        search = self.ann1.get(self.f.url(f"annotator/search/?q={self.job_mine.name}"))
+        self.assertEqual(search.status_code, 200)
+        self.assertEqual([j["id"] for j in search.data["jobs"]], [self.job_mine.id])

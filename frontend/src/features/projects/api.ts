@@ -11,6 +11,7 @@ import type {
   Guideline,
   Member,
   MemberPerformance,
+  NotificationFeed,
   PermissionMatrix,
   ProjectDetail,
   ProjectOverview,
@@ -82,6 +83,15 @@ export const listActivity = async (
 ) => (await apiClient.get<Paginated<ActivityLog>>(p(id, 'activity/'), { params: cleanParams(params) })).data
 export const listAnnouncements = async (id: number) =>
   (await apiClient.get<Announcement[]>(p(id, 'announcements/'))).data
+export const listProjectNotifications = async (id: number) =>
+  (await apiClient.get<NotificationFeed>(p(id, 'notifications/'))).data
+export const markProjectNotificationsRead = async (id: number, notification_id?: number) =>
+  (
+    await apiClient.post<{ updated: number }>(
+      p(id, 'notifications/mark-read/'),
+      notification_id != null ? { notification_id } : {},
+    )
+  ).data
 export const sendAnnouncement = async (
   id: number,
   data: { content: string; target_roles: string[]; target_team?: number | null },

@@ -12,13 +12,15 @@ from django.utils import timezone
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from accounts.models import User
+from accounts.models import Role, RoleAssignment, User
 from accounts.permissions import Cap, ProjectScopedViewMixin
 from accounts.serializers import UserBriefSerializer
-from jobs.models import OPEN_STATUSES, STAGE_STATUSES, Job, JobStatus
-from projects.models import ActivityLog
+from jobs.models import ACTIVE_ANNOTATOR_STATUSES, OPEN_STATUSES, STAGE_STATUSES, AnnotatorRequest, Job, JobStatus
+from jobs.serializers import AnnotatorRequestSerializer, JobSerializer, ReviewErrorBriefSerializer
+from jobs.views import order_by_db06_priority
+from projects.models import ActivityLog, Batch
 from quality.models import Audit, AuditSample, ReviewError, ReviewStage
-from teams.models import Team
+from teams.models import Team, TeamMember
 
 PERIODS = {"day": 1, "week": 7, "month": 30}
 DONE = STAGE_STATUSES["done"]
@@ -269,6 +271,7 @@ class AnnotatorDashboardView(ProjectScopedViewMixin, APIView):
         project = self.project
         user = request.user
         now = timezone.now()
+        today = timezone.localdate(now)
         since = _period_start(request)
 
         jobs = Job.objects.filter(project=project, annotator=user)
@@ -287,6 +290,14 @@ class AnnotatorDashboardView(ProjectScopedViewMixin, APIView):
             first_pass=Count("id", filter=Q(status__in=REACHED_QC2, rework_round=0)),
             reworked=Count("id", filter=Q(rework_round__gt=0)),
             overdue=Count("id", filter=Q(deadline__lt=now, status__in=OPEN_STATUSES)),
+            due_soon_only=Count(
+                "id",
+                filter=Q(
+                    deadline__gte=now,
+                    deadline__lte=now + timedelta(hours=24),
+                    status__in=ACTIVE_ANNOTATOR_STATUSES,
+                ),
+            ),
             escalated=Count("id", filter=Q(is_escalated=True)),
         )
 
@@ -307,12 +318,146 @@ class AnnotatorDashboardView(ProjectScopedViewMixin, APIView):
 
         due_soon = (
             jobs.filter(
-                status__in=[JobStatus.PENDING_ANNOTATION, JobStatus.ANNOTATING, JobStatus.REWORK],
+                status__in=ACTIVE_ANNOTATOR_STATUSES,
                 deadline__lte=now + timedelta(hours=24),
             )
             .select_related("batch")
             .order_by("deadline", "id")[:10]
         )
+
+        # --- Dữ liệu mở rộng theo thiết kế Tổng quan cá nhân ---
+        membership = (
+            TeamMember.objects.filter(user=user, team__project=project)
+            .select_related("team__leader")
+            .first()
+        )
+        team_name = membership.team.name if membership else None
+        team_leader_name = (
+            membership.team.leader.get_full_name() or membership.team.leader.username
+            if membership and membership.team.leader
+            else None
+        )
+        last_sync = (
+            Batch.objects.filter(dataset__project=project, last_synced_at__isnull=False)
+            .order_by("-last_synced_at")
+            .values_list("last_synced_at", flat=True)
+            .first()
+        )
+
+        # Công việc tiếp theo (sắp xếp DB06: quá hạn → sắp hạn → rework → còn lại)
+        active_qs = order_by_db06_priority(
+            jobs.filter(status__in=ACTIVE_ANNOTATOR_STATUSES)
+            .select_related("batch__dataset", "annotator", "qc1_reviewer", "project")
+            .annotate(_open_error_count=Count("review_errors", distinct=True)),
+            now=now,
+        )
+        active_jobs = list(active_qs[:10])
+        active_jobs_count = jobs.filter(status__in=ACTIVE_ANNOTATOR_STATUSES).count()
+        active_object_frames = sum(
+            (j.target_object_count or j.object_count) for j in active_jobs
+        )
+        max_rework_round_active = max((j.rework_round for j in active_jobs if j.status == JobStatus.REWORK), default=0)
+
+        # Việc cần sửa nổi bật (CL04 · RW01 · RW04 · L8)
+        rework_job = next((j for j in active_jobs if j.status == JobStatus.REWORK), None) or next(
+            (j for j in active_jobs if j.rework_round > 0), None
+        )
+        rework_focus = None
+        if rework_job:
+            err_qs = rework_job.review_errors.select_related("category", "reported_by").order_by("-created_at")
+            err_list = list(err_qs[:5])
+            total_errs = err_qs.count()
+            rework_focus = {
+                "job_id": rework_job.id,
+                "job_name": rework_job.name,
+                "batch_name": rework_job.batch.name,
+                "deadline": rework_job.deadline,
+                "rework_round": rework_job.rework_round,
+                "max_rework_rounds": project.max_rework_rounds,
+                "rework_scope": rework_job.rework_scope,
+                "rework_scope_label": rework_job.get_rework_scope_display(),
+                "error_count": total_errs,
+                "pending_object_frames": total_errs,
+                "errors": ReviewErrorBriefSerializer(err_list, many=True).data,
+            }
+
+        # Kết quả theo ngày 7 ngày gần nhất (SL01 · SL03 · KPI01 · CS03)
+        start_7d = timezone.make_aware(
+            timezone.datetime.combine(today - timedelta(days=6), timezone.datetime.min.time())
+        )
+        sub_logs = (
+            ActivityLog.objects.filter(
+                project=project,
+                actor=user,
+                action="job.status",
+                after__status=JobStatus.PENDING_QC1,
+                created_at__gte=start_7d,
+            )
+            .select_related("job")
+            .order_by("created_at")
+        )
+        daily_first = {}
+        daily_rework = {}
+        for log in sub_logs:
+            d = timezone.localdate(log.created_at)
+            after = log.after or {}
+            objs = after.get("object_count")
+            if objs is None:
+                objs = log.job.object_count if log.job else 0
+            is_rw = after.get("event") == "annotator.resubmit" or (after.get("rework_round") or 0) > 0
+            if is_rw:
+                daily_rework[d] = daily_rework.get(d, 0) + int(objs or 0)
+            else:
+                daily_first[d] = daily_first.get(d, 0) + int(objs or 0)
+
+        daily_target = project.kpi_annotation_target or 0
+        daily_results = []
+        for offset in range(6, -1, -1):
+            d = today - timedelta(days=offset)
+            fp = daily_first.get(d, 0)
+            rw = daily_rework.get(d, 0)
+            total_d = fp + rw
+            daily_results.append({
+                "date": d.isoformat(),
+                "label": d.strftime("%d/%m"),
+                "first_pass_objects": fp,
+                "rework_objects": rw,
+                "total_objects": total_d,
+                "target_objects": daily_target,
+                "is_off_day": total_d == 0 and d.weekday() == 6,
+            })
+
+        # Nộp đúng hạn (DH06)
+        submitted_jobs = list(
+            jobs.filter(
+                status__in=[
+                    JobStatus.PENDING_QC1,
+                    JobStatus.QC1_REVIEWING,
+                    JobStatus.PENDING_QC2,
+                    JobStatus.APPROVED,
+                    JobStatus.DELIVERED,
+                ],
+                deadline__isnull=False,
+            ).only("deadline", "submitted_at", "updated_at")
+        )
+        submitted_total = len(submitted_jobs)
+        on_time_count = sum(1 for j in submitted_jobs if (j.submitted_at or j.updated_at) <= j.deadline)
+
+        # Sản lượng / chỉ tiêu (SL06 · KPI02 · KPI03)
+        today_actual = daily_first.get(today, 0) + daily_rework.get(today, 0)
+        actual_objects = today_actual if today_actual > 0 else (totals["objects_done"] or 0)
+        target_objects = project.kpi_annotation_target
+        achievement_pct = _pct(actual_objects, target_objects) if target_objects else None
+        shortfall = max(0, target_objects - actual_objects) if target_objects else 0
+
+        # Yêu cầu của tôi (TD13)
+        req_qs = AnnotatorRequest.objects.filter(project=project, created_by=user).select_related(
+            "job__batch", "review_error__category", "created_by", "handler"
+        )
+        pending_req_count = req_qs.filter(
+            status__in=[AnnotatorRequest.Status.PENDING_TL, AnnotatorRequest.Status.PENDING_PM]
+        ).count()
+        recent_req_items = AnnotatorRequestSerializer(req_qs[:5], many=True).data
 
         return Response({
             "counts": {
@@ -323,6 +468,7 @@ class AnnotatorDashboardView(ProjectScopedViewMixin, APIView):
                 "waiting_review": totals["waiting_review"],
                 "done": totals["done"],
                 "overdue": totals["overdue"],
+                "due_soon": totals["due_soon_only"],
                 "escalated": totals["escalated"],
             },
             "objects_done": totals["objects_done"] or 0,
@@ -353,6 +499,241 @@ class AnnotatorDashboardView(ProjectScopedViewMixin, APIView):
                 }
                 for j in due_soon
             ],
+            "meta": {
+                "team_name": team_name,
+                "team_leader_name": team_leader_name,
+                "project_name": project.name,
+                "last_cvat_sync_at": last_sync,
+                "wip_limit": project.annotator_wip_limit,
+                "active_jobs_count": active_jobs_count,
+                "active_object_frames": active_object_frames,
+            },
+            "kpi_summary": {
+                "actual_objects": actual_objects,
+                "target_objects": target_objects,
+                "achievement_pct": achievement_pct,
+                "shortfall": shortfall,
+                "rework_jobs_count": totals["rework"],
+                "max_rework_round_active": max_rework_round_active,
+                "max_rework_rounds": project.max_rework_rounds,
+                "due_soon_count": totals["due_soon_only"],
+                "overdue_count": totals["overdue"],
+                "fpy_pct": _pct(totals["first_pass"], totals["reached_qc2"]),
+                "fpy_passed": totals["first_pass"],
+                "fpy_total": totals["reached_qc2"],
+                "on_time_pct": _pct(on_time_count, submitted_total),
+                "on_time_count": on_time_count,
+                "submitted_total": submitted_total,
+            },
+            "next_jobs": JobSerializer(active_jobs, many=True).data,
+            "rework_focus": rework_focus,
+            "daily_results": daily_results,
+            "recent_requests": {
+                "pending_count": pending_req_count,
+                "items": recent_req_items,
+            },
+        })
+
+
+class AnnotatorAnalyticsView(ProjectScopedViewMixin, APIView):
+    """GET /api/projects/{id}/annotator/analytics/?range=7d|30d|week — Phân tích cá nhân P2 (PQ01, KPI10)."""
+
+    required_capabilities = {"*": Cap.ANNOTATE_JOBS}
+
+    def get(self, request, project_id):
+        project = self.project
+        user = request.user
+        now = timezone.now()
+        today = timezone.localdate(now)
+        iso_year, iso_week, _ = today.isocalendar()
+        range_key = request.query_params.get("range", "7d")
+        if range_key not in ("7d", "30d", "week"):
+            range_key = "7d"
+
+        if range_key == "30d":
+            days = 30
+            start_date = today - timedelta(days=29)
+        elif range_key == "week":
+            start_date = today - timedelta(days=today.weekday())
+            days = (today - start_date).days + 1
+        else:
+            days = 7
+            start_date = today - timedelta(days=6)
+
+        start_dt = timezone.make_aware(timezone.datetime.combine(start_date, timezone.datetime.min.time()))
+        prev_start_dt = start_dt - timedelta(days=max(days, 7))
+
+        # 1. Năng suất theo ngày (NS01, NS03) — chỉ dữ liệu của chính annotator (PQ01)
+        logs = list(
+            ActivityLog.objects.filter(
+                project=project,
+                actor=user,
+                action="job.status",
+                after__status=JobStatus.PENDING_QC1,
+                created_at__gte=start_dt,
+            )
+            .select_related("job")
+            .order_by("created_at")
+        )
+        day_fp = {}
+        day_rw = {}
+        day_hours = {}
+        for log in logs:
+            d = timezone.localdate(log.created_at)
+            after = log.after or {}
+            objs = after.get("object_count")
+            if objs is None:
+                objs = log.job.object_count if log.job else 0
+            objs = int(objs or 0)
+            is_rw = after.get("event") == "annotator.resubmit" or (after.get("rework_round") or 0) > 0
+            if is_rw:
+                day_rw[d] = day_rw.get(d, 0) + objs
+            else:
+                day_fp[d] = day_fp.get(d, 0) + objs
+
+            if log.job and log.job.started_at and log.created_at > log.job.started_at:
+                hrs = (log.created_at - log.job.started_at).total_seconds() / 3600
+                hrs = max(0.25, min(10.0, hrs))
+            else:
+                hrs = 0.0
+            day_hours[d] = day_hours.get(d, 0.0) + hrs
+
+        daily_productivity = []
+        total_objects = 0
+        total_hours = 0.0
+        active_days = 0
+        for i in range(days):
+            d = start_date + timedelta(days=i)
+            fp = day_fp.get(d, 0)
+            rw = day_rw.get(d, 0)
+            day_total = fp + rw
+            is_off = day_total == 0 and d.weekday() == 6
+            hrs = day_hours.get(d, 0.0)
+            if day_total > 0 and hrs <= 0:
+                hrs = 7.5  # mặc định 1 ca công tiêu chuẩn khi chưa có giờ bắt đầu chi tiết
+            if day_total > 0:
+                active_days += 1
+                total_objects += day_total
+                total_hours += hrs
+            daily_productivity.append({
+                "date": d.isoformat(),
+                "label": d.strftime("%d/%m"),
+                "first_pass_objects": fp,
+                "rework_objects": rw,
+                "first_pass_per_hour": round(fp / hrs, 1) if hrs > 0 else 0,
+                "rework_per_hour": round(rw / hrs, 1) if hrs > 0 else 0,
+                "hours": round(hrs, 1),
+                "is_off_day": is_off,
+            })
+
+        # Fallback nếu chưa có ActivityLog nộp bài nhưng có job đã hoàn tất
+        if total_objects == 0:
+            done_objs = (
+                Job.objects.filter(project=project, annotator=user, status__in=DONE).aggregate(s=Sum("object_count"))["s"]
+                or 0
+            )
+            if done_objs > 0:
+                total_objects = done_objs
+                active_days = 1
+                total_hours = 7.5
+
+        objects_per_hour = round(total_objects / total_hours) if total_hours > 0 else 0
+
+        # 2. Dự báo sản lượng tuần hiện tại (DB05 · KPI01)
+        avg_daily = round(total_objects / active_days) if active_days > 0 else 0
+        week_start = today - timedelta(days=today.weekday())
+        remaining_workdays = sum(
+            1 for offset in range(7) if (week_start + timedelta(days=offset)) > today and offset < 6
+        )
+        estimated_objects = avg_daily * remaining_workdays
+        daily_target = project.kpi_annotation_target or 0
+
+        # Chuỗi tuần (thực tế các ngày đã qua + ước tính các ngày công còn lại)
+        weekly_series = []
+        for offset in range(7):
+            d = week_start + timedelta(days=offset)
+            if d <= today:
+                actual = day_fp.get(d, 0) + day_rw.get(d, 0)
+                weekly_series.append({
+                    "date": d.isoformat(),
+                    "day_label": d.strftime("%d"),
+                    "actual_objects": actual,
+                    "forecast_objects": 0,
+                    "is_forecast": False,
+                    "is_off_day": actual == 0 and d.weekday() == 6,
+                })
+            else:
+                is_sun = d.weekday() == 6
+                weekly_series.append({
+                    "date": d.isoformat(),
+                    "day_label": d.strftime("%d"),
+                    "actual_objects": 0,
+                    "forecast_objects": 0 if is_sun else avg_daily,
+                    "is_forecast": True,
+                    "is_off_day": is_sun,
+                })
+
+        # 3. Xếp hạng sản lượng cá nhân (KPI10) — CHỈ trả hạng của chính user, không lộ dữ liệu người khác.
+        annotator_ids = list(
+            RoleAssignment.objects.filter(project=project, role=Role.ANNOTATOR)
+            .values_list("user_id", flat=True)
+            .distinct()
+        )
+        if user.id not in annotator_ids:
+            annotator_ids.append(user.id)
+
+        def _rank_for_window(window_start, window_end=None):
+            qs = ActivityLog.objects.filter(
+                project=project,
+                actor_id__in=annotator_ids,
+                action="job.status",
+                after__status=JobStatus.PENDING_QC1,
+                created_at__gte=window_start,
+            ).select_related("job")
+            if window_end is not None:
+                qs = qs.filter(created_at__lt=window_end)
+            scores = {uid: 0 for uid in annotator_ids}
+            for ev in qs:
+                after = ev.after or {}
+                objs = after.get("object_count")
+                if objs is None:
+                    objs = ev.job.object_count if ev.job else 0
+                scores[ev.actor_id] = scores.get(ev.actor_id, 0) + int(objs or 0)
+            if all(v == 0 for v in scores.values()):
+                for row in (
+                    Job.objects.filter(project=project, annotator_id__in=annotator_ids, status__in=DONE)
+                    .values("annotator_id")
+                    .annotate(s=Sum("object_count"))
+                ):
+                    scores[row["annotator_id"]] = row["s"] or 0
+            my_score = scores.get(user.id, 0)
+            return 1 + sum(1 for v in scores.values() if v > my_score)
+
+        current_rank = _rank_for_window(start_dt)
+        previous_rank = _rank_for_window(prev_start_dt, start_dt)
+
+        return Response({
+            "range": range_key,
+            "week_label": f"Tuần {iso_week}",
+            "iso_year": iso_year,
+            "avg_productivity": {
+                "objects_per_hour": objects_per_hour,
+                "total_objects": total_objects,
+                "total_hours": round(total_hours, 1),
+            },
+            "forecast": {
+                "estimated_objects": estimated_objects,
+                "avg_daily_objects": avg_daily,
+                "remaining_workdays": remaining_workdays,
+                "daily_target": daily_target,
+            },
+            "ranking": {
+                "rank": current_rank,
+                "total_annotators": len(annotator_ids),
+                "previous_rank": previous_rank,
+            },
+            "daily_productivity": daily_productivity,
+            "weekly_forecast_series": weekly_series,
         })
 
 

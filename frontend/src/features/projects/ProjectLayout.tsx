@@ -1,91 +1,191 @@
-import {
-  AuditOutlined,
-  BarChartOutlined,
-  DatabaseOutlined,
-  NotificationOutlined,
-  SendOutlined,
-  SettingOutlined,
-  TeamOutlined,
-} from '@ant-design/icons'
-import { Layout, Menu, type MenuProps } from 'antd'
-import { useEffect, useMemo } from 'react'
+import { ChevronDown, ChevronRight, HelpCircle } from '@untitledui/icons'
+import { useEffect, useMemo, useState, type ReactNode } from 'react'
 import { Outlet, useLocation, useNavigate, useParams } from 'react-router'
+import { useShell } from '../../layouts/ShellContext'
 import { getErrorKind, getErrorMessage } from '../../shared/api/errors'
 import StateView from '../../shared/components/StateView'
 import { useRequest } from '../../shared/hooks/useRequest'
 import type { Capability } from '../../shared/types/capabilities'
+import { cx } from '@/utils/cx'
 import { getProject } from './api'
 import { setLastProjectId } from './lastProject'
 import { ProjectContext, type ProjectContextValue } from './projectContext'
 
-type Item = { key: string; label: string; cap: Capability | Capability[] }
-type Group = { key: string; label: string; icon: React.ReactNode; items: Item[] }
+type NavItem = { key: string; label: string; cap: Capability | Capability[]; matchPrefix?: string }
+type NavGroup = {
+  key: string
+  label: string
+  icon: ReactNode
+  items: NavItem[]
+  /** Nhóm một mục (bấm thẳng để điều hướng thay vì xổ menu con). */
+  directKey?: string
+  cap?: Capability | Capability[]
+}
 
-/** Menu theo workflow. Mục nào user không có capability thì ẩn đi. */
-const MENU: Group[] = [
-  {
-    key: 'g-overview', label: 'Tổng quan', icon: <BarChartOutlined />,
-    items: [
-      { key: 'overview', label: 'Tổng quan dự án', cap: 'view_dashboard' },
-      { key: 'team-ranking', label: 'Xếp hạng team', cap: 'view_dashboard' },
-      { key: 'qc2/dashboard', label: 'Tổng quan QC2', cap: 'perform_audit' },
-      { key: 'qc1/dashboard', label: 'Tổng quan QC1', cap: ['perform_qc1', 'view_dashboard'] },
-      { key: 'leader/overview', label: 'Tổng quan team', cap: 'lead_team' },
-      { key: 'annotator/dashboard', label: 'Tổng quan Annotator', cap: 'annotate_jobs' },
-    ],
-  },
-  {
-    key: 'g-ops', label: 'Vận hành', icon: <DatabaseOutlined />,
-    items: [
-      { key: 'datasets', label: 'Datasets', cap: 'view_jobs' },
-      { key: 'batches', label: 'Batches', cap: 'view_jobs' },
-      { key: 'jobs', label: 'Jobs', cap: 'view_jobs' },
-      { key: 'queue', label: 'Data Queue', cap: 'view_jobs' },
-      { key: 'leader/jobs', label: 'Job của team', cap: 'lead_team' },
-      { key: 'annotator/jobs', label: 'Job của tôi', cap: 'annotate_jobs' },
-    ],
-  },
-  {
-    key: 'g-people', label: 'Nhân sự', icon: <TeamOutlined />,
-    items: [
+function BarIcon() {
+  return (
+    <svg className="size-5 shrink-0" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.7">
+      <path d="M4.5 15.5v-5M10 15.5v-11M15.5 15.5v-7.5" strokeLinecap="round" />
+    </svg>
+  )
+}
+
+function LayersIcon() {
+  return (
+    <svg className="size-5 shrink-0" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.7">
+      <path d="M10 3.5 3 7l7 3.5L17 7l-7-3.5Z" strokeLinejoin="round" />
+      <path d="m3 10.5 7 3.5 7-3.5M3 14l7 3.5 7-3.5" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  )
+}
+
+function BookIcon() {
+  return (
+    <svg className="size-5 shrink-0" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.7">
+      <path d="M4 4.5A1.5 1.5 0 0 1 5.5 3h9A1.5 1.5 0 0 1 16 4.5v11a1.5 1.5 0 0 1-1.5 1.5h-9A1.5 1.5 0 0 1 4 15.5v-11Z" />
+      <path d="M7.5 7h5M7.5 10h5M7.5 13h3" strokeLinecap="round" />
+    </svg>
+  )
+}
+
+function UsersIcon() {
+  return (
+    <svg className="size-5 shrink-0" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.7">
+      <circle cx="8" cy="7" r="2.5" />
+      <path d="M3.5 16a4.5 4.5 0 0 1 9 0M13.5 6.5a2 2 0 0 1 0 4M14 16a3.5 3.5 0 0 1 3-3.4" strokeLinecap="round" />
+    </svg>
+  )
+}
+
+function ShieldIcon() {
+  return (
+    <svg className="size-5 shrink-0" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.7">
+      <path d="M10 3 4.5 5.2v4.6c0 3.7 2.4 6.5 5.5 7.7 3.1-1.2 5.5-4 5.5-7.7V5.2L10 3Z" strokeLinejoin="round" />
+    </svg>
+  )
+}
+
+function GearIcon() {
+  return (
+    <svg className="size-5 shrink-0" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.7">
+      <circle cx="10" cy="10" r="2.75" />
+      <path d="M10 3.2v1.6M10 15.2v1.6M3.2 10h1.6M15.2 10h1.6M5.2 5.2l1.1 1.1M13.7 13.7l1.1 1.1M14.8 5.2l-1.1 1.1M6.3 13.7l-1.1 1.1" strokeLinecap="round" />
+    </svg>
+  )
+}
+
+/**
+ * Menu điều hướng theo vai trò.
+ * Annotator thấy cấu trúc đúng thiết kế: Dashboard (Tổng quan cá nhân, Phân tích cá nhân),
+ * Công việc (Job của tôi, Cần sửa, Yêu cầu của tôi), Hướng dẫn gán nhãn + Hỗ trợ / Cài đặt ở cuối.
+ * Các vai trò khác (PM, Director, TL, QC1, QC2) giữ đầy đủ các nhóm quản lý của mình.
+ */
+function buildMenu(can: (cap: Capability) => boolean): NavGroup[] {
+  const allowed = (cap: Capability | Capability[]) => (Array.isArray(cap) ? cap.some(can) : can(cap))
+  const isAnnotator = can('annotate_jobs')
+  const hasManagementOrQc =
+    can('view_dashboard') || can('view_jobs') || can('lead_team') || can('perform_qc1') || can('perform_audit') || can('manage_team')
+
+  const groups: NavGroup[] = []
+
+  // 1. Dashboard
+  const dashboardItems: NavItem[] = [
+    { key: 'annotator/dashboard', label: 'Tổng quan cá nhân', cap: 'annotate_jobs' },
+    { key: 'annotator/analytics', label: 'Phân tích cá nhân', cap: 'annotate_jobs' },
+    { key: 'overview', label: 'Tổng quan dự án', cap: 'view_dashboard' },
+    { key: 'team-ranking', label: 'Xếp hạng team', cap: 'view_dashboard' },
+    { key: 'leader/overview', label: 'Tổng quan team', cap: 'lead_team' },
+    { key: 'qc1/dashboard', label: 'Tổng quan QC1', cap: ['perform_qc1', 'view_dashboard'] },
+    { key: 'qc2/dashboard', label: 'Tổng quan QC2', cap: 'perform_audit' },
+  ].filter((i) => allowed(i.cap))
+
+  if (dashboardItems.length > 0) {
+    groups.push({ key: 'g-dashboard', label: 'Dashboard', icon: <BarIcon />, items: dashboardItems })
+  }
+
+  // 2. Công việc (Annotator + Vận hành)
+  const workItems: NavItem[] = [
+    { key: 'annotator/jobs', label: 'Job của tôi', cap: 'annotate_jobs', matchPrefix: 'annotator/jobs' },
+    { key: 'annotator/rework', label: 'Cần sửa', cap: 'annotate_jobs' },
+    { key: 'annotator/requests', label: 'Yêu cầu của tôi', cap: 'annotate_jobs' },
+    { key: 'leader/jobs', label: 'Job của team', cap: 'lead_team' },
+    { key: 'datasets', label: 'Datasets', cap: 'view_jobs' },
+    { key: 'batches', label: 'Batches', cap: 'view_jobs' },
+    { key: 'jobs', label: 'Jobs', cap: 'view_jobs' },
+    { key: 'queue', label: 'Data Queue', cap: 'view_jobs' },
+  ].filter((i) => allowed(i.cap))
+
+  if (workItems.length > 0) {
+    groups.push({
+      key: 'g-work',
+      label: isAnnotator && !hasManagementOrQc ? 'Công việc' : 'Công việc & Vận hành',
+      icon: <LayersIcon />,
+      items: workItems,
+    })
+  }
+
+  // 3. Hướng dẫn gán nhãn (mục trực tiếp nổi bật theo thiết kế Annotator)
+  if (allowed('view_guidelines') && !hasManagementOrQc) {
+    groups.push({
+      key: 'guidelines',
+      label: 'Hướng dẫn gán nhãn',
+      icon: <BookIcon />,
+      directKey: 'guidelines',
+      items: [],
+    })
+  }
+
+  // 4. Các nhóm dành cho vai trò quản lý / QC (ẩn hoàn toàn với Annotator thuần để khớp thiết kế)
+  if (hasManagementOrQc) {
+    const peopleItems: NavItem[] = [
       { key: 'teams', label: 'Team & Members', cap: 'manage_team' },
       { key: 'workload', label: 'Tải công việc', cap: ['manage_team', 'view_dashboard'] },
       { key: 'leader/members', label: 'Thành viên team', cap: 'lead_team' },
       { key: 'leader/workload', label: 'Tải công việc team', cap: 'lead_team' },
-    ],
-  },
-  {
-    key: 'g-quality', label: 'Chất lượng', icon: <AuditOutlined />,
-    items: [
+    ].filter((i) => allowed(i.cap))
+    if (peopleItems.length > 0) {
+      groups.push({ key: 'g-people', label: 'Nhân sự', icon: <UsersIcon />, items: peopleItems })
+    }
+
+    const qualityItems: NavItem[] = [
       { key: 'audits', label: 'Quản lý Audit', cap: 'manage_audits' },
       { key: 'qc2/strategy', label: 'Chiến thuật audit', cap: 'manage_audits' },
       { key: 'qc2/work', label: 'Job audit QC2', cap: 'perform_audit' },
       { key: 'qc1/work', label: 'Job kiểm tra QC1', cap: 'perform_qc1' },
       { key: 'error-categories', label: 'Danh mục lỗi', cap: 'manage_quality_catalog' },
       { key: 'guidelines', label: 'Hướng dẫn gán nhãn', cap: 'view_guidelines' },
-    ],
-  },
-  {
-    key: 'g-delivery', label: 'Bàn giao', icon: <SendOutlined />,
-    items: [{ key: 'delivery', label: 'Delivery', cap: 'manage_delivery' }],
-  },
-  {
-    key: 'g-settings', label: 'Cấu hình', icon: <SettingOutlined />,
-    items: [
+    ].filter((i) => allowed(i.cap))
+    if (qualityItems.length > 0) {
+      groups.push({ key: 'g-quality', label: 'Chất lượng', icon: <ShieldIcon />, items: qualityItems })
+    }
+
+    const extraItems: NavItem[] = [
+      { key: 'delivery', label: 'Delivery', cap: 'manage_delivery' },
       { key: 'cvat-link', label: 'Liên kết CVAT', cap: 'view_project' },
-    ],
-  },
-  {
-    key: 'g-notify', label: 'Thông báo', icon: <NotificationOutlined />,
-    items: [{ key: 'announcements', label: 'Thông báo dự án', cap: 'view_project' }],
-  },
-]
+      { key: 'announcements', label: 'Thông báo dự án', cap: 'view_project' },
+    ].filter((i) => allowed(i.cap))
+    if (extraItems.length > 0) {
+      groups.push({ key: 'g-extra', label: 'Hệ thống & Bàn giao', icon: <GearIcon />, items: extraItems })
+    }
+  }
+
+  return groups
+}
 
 export default function ProjectLayout() {
   const projectId = Number(useParams().projectId)
   const navigate = useNavigate()
   const { pathname } = useLocation()
+  const { openSupport } = useShell()
   const { data: project, error, isLoading, retry } = useRequest(`project:${projectId}`, () => getProject(projectId))
+  const [openGroups, setOpenGroups] = useState<Record<string, boolean>>({
+    'g-dashboard': true,
+    'g-work': true,
+    'g-people': true,
+    'g-quality': true,
+    'g-extra': false,
+  })
+  const [mobileOpen, setMobileOpen] = useState(false)
 
   const context = useMemo<ProjectContextValue | null>(() => {
     if (!project) return null
@@ -93,7 +193,6 @@ export default function ProjectLayout() {
     return { project, projectId, can: (cap) => caps.has(cap), reload: retry }
   }, [project, projectId, retry])
 
-  // Chỉ nhớ dự án đã mở được (có quyền) → lần đăng nhập sau vào thẳng dự án này.
   useEffect(() => {
     if (project) setLastProjectId(project.id)
   }, [project])
@@ -107,38 +206,157 @@ export default function ProjectLayout() {
     )
   }
 
-  const allowed = (cap: Item['cap']) => (Array.isArray(cap) ? cap.some(context.can) : context.can(cap))
-  const items: MenuProps['items'] = MENU.map((group) => ({
-    key: group.key,
-    label: group.label,
-    icon: group.icon,
-    children: group.items.filter((item) => allowed(item.cap)).map((item) => ({ key: item.key, label: item.label })),
-  })).filter((group) => group.children.length > 0)
-
+  const groups = buildMenu(context.can)
   const base = `/projects/${projectId}/`
   const subPath = pathname.startsWith(base) ? pathname.slice(base.length).replace(/\/$/, '') : ''
-  // Trang con (vd. teams/3) vẫn sáng mục cha "teams" trong menu.
-  const selected = MENU.flatMap((group) => group.items.map((item) => item.key))
-    .filter((key) => subPath === key || subPath.startsWith(`${key}/`))
-    .sort((a, b) => b.length - a.length)[0] ?? subPath
+
+  const allKeys = groups.flatMap((g) => (g.directKey ? [g.directKey] : g.items.map((i) => i.key)))
+  const selected =
+    allKeys
+      .filter((key) => subPath === key || subPath.startsWith(`${key}/`))
+      .sort((a, b) => b.length - a.length)[0] ?? subPath
+
+  const toggleGroup = (key: string) => setOpenGroups((prev) => ({ ...prev, [key]: !prev[key] }))
+
+  const sidebarContent = (
+    <div className="flex h-full flex-col justify-between px-4 py-6">
+      <nav aria-label="Điều hướng dự án" className="flex flex-col gap-1">
+        {groups.map((group) => {
+          if (group.directKey) {
+            const active = selected === group.directKey
+            return (
+              <button
+                key={group.key}
+                type="button"
+                onClick={() => {
+                  navigate(`${base}${group.directKey}`)
+                  setMobileOpen(false)
+                }}
+                className={cx(
+                  'flex w-full cursor-pointer items-center gap-3 rounded-lg px-3 py-2.5 text-left text-[15px] font-semibold transition',
+                  active ? 'bg-[#F9FAFB] text-[#101828]' : 'text-[#344054] hover:bg-[#F9FAFB]',
+                )}
+              >
+                <span className={active ? 'text-[#344054]' : 'text-[#667085]'}>{group.icon}</span>
+                <span>{group.label}</span>
+              </button>
+            )
+          }
+
+          const hasActiveChild = group.items.some((i) => i.key === selected)
+          const isExpanded = openGroups[group.key] ?? hasActiveChild
+
+          return (
+            <div key={group.key} className="flex flex-col">
+              <button
+                type="button"
+                onClick={() => toggleGroup(group.key)}
+                className={cx(
+                  'flex w-full cursor-pointer items-center justify-between rounded-lg px-3 py-2.5 text-left text-[15px] font-semibold transition hover:bg-[#F9FAFB]',
+                  hasActiveChild ? 'text-[#101828]' : 'text-[#344054]',
+                )}
+              >
+                <span className="flex items-center gap-3">
+                  <span className={hasActiveChild ? 'text-[#344054]' : 'text-[#667085]'}>{group.icon}</span>
+                  <span>{group.label}</span>
+                </span>
+                {isExpanded ? (
+                  <ChevronDown className="size-4 text-[#98A2B3]" />
+                ) : (
+                  <ChevronRight className="size-4 text-[#98A2B3]" />
+                )}
+              </button>
+
+              {isExpanded && (
+                <div className="mt-1 flex flex-col gap-0.5">
+                  {group.items.map((item) => {
+                    const active = selected === item.key
+                    return (
+                      <button
+                        key={item.key}
+                        type="button"
+                        onClick={() => {
+                          navigate(`${base}${item.key}`)
+                          setMobileOpen(false)
+                        }}
+                        className={cx(
+                          'w-full cursor-pointer rounded-lg py-2 pr-3 pl-11 text-left text-[15px] transition',
+                          active
+                            ? 'bg-[#F9FAFB] font-semibold text-[#101828]'
+                            : 'font-normal text-[#475467] hover:bg-[#F9FAFB] hover:text-[#101828]',
+                        )}
+                      >
+                        {item.label}
+                      </button>
+                    )
+                  })}
+                </div>
+              )}
+            </div>
+          )
+        })}
+      </nav>
+
+      <div className="mt-6 flex flex-col gap-1 border-t border-[#F2F4F7] pt-4">
+        <button
+          type="button"
+          onClick={() => {
+            setMobileOpen(false)
+            openSupport()
+          }}
+          className="flex w-full cursor-pointer items-center gap-3 rounded-lg px-3 py-2.5 text-left text-[15px] font-semibold text-[#344054] transition hover:bg-[#F9FAFB]"
+        >
+          <HelpCircle className="size-5 text-[#667085]" />
+          <span>Hỗ trợ</span>
+        </button>
+        <button
+          type="button"
+          onClick={() => {
+            setMobileOpen(false)
+            navigate(`${base}account/settings`)
+          }}
+          className={cx(
+            'flex w-full cursor-pointer items-center gap-3 rounded-lg px-3 py-2.5 text-left text-[15px] font-semibold transition hover:bg-[#F9FAFB]',
+            selected === 'account/settings' ? 'bg-[#F9FAFB] text-[#101828]' : 'text-[#344054]',
+          )}
+        >
+          <GearIcon />
+          <span>Cài đặt</span>
+        </button>
+      </div>
+    </div>
+  )
 
   return (
     <ProjectContext.Provider value={context}>
-      <Layout style={{ minHeight: 'calc(100vh - 64px)' }}>
-        <Layout.Sider width={232} theme="light" breakpoint="lg" collapsedWidth={0} style={{ borderRight: '1px solid #f0f0f0' }}>
-          <Menu
-            mode="inline"
-            items={items}
-            selectedKeys={[selected]}
-            defaultOpenKeys={MENU.map((g) => g.key)}
-            onClick={({ key }) => navigate(`${base}${key}`)}
-            style={{ borderInlineEnd: 'none', paddingTop: 8 }}
-          />
-        </Layout.Sider>
-        <Layout.Content style={{ minWidth: 0 }}>
-          <Outlet />
-        </Layout.Content>
-      </Layout>
+      <div className="flex min-h-[calc(100vh-72px)] flex-1">
+        {/* Sidebar Desktop 280px */}
+        <aside className="sticky top-[72px] hidden h-[calc(100vh-72px)] w-[280px] shrink-0 overflow-y-auto border-r border-[#EAECF0] bg-white lg:block">
+          {sidebarContent}
+        </aside>
+
+        {/* Mobile menu button + drawer */}
+        <div className="flex min-w-0 flex-1 flex-col">
+          <div className="flex items-center justify-between border-b border-[#EAECF0] bg-white px-4 py-2 lg:hidden">
+            <button
+              type="button"
+              onClick={() => setMobileOpen((v) => !v)}
+              className="rounded-lg border border-[#D0D5DD] px-3 py-1.5 text-sm font-semibold text-[#344054]"
+            >
+              {mobileOpen ? 'Đóng menu' : 'Menu'}
+            </button>
+            <span className="truncate text-sm font-medium text-[#475467]">{project.name}</span>
+          </div>
+
+          {mobileOpen && (
+            <div className="border-b border-[#EAECF0] bg-white lg:hidden">{sidebarContent}</div>
+          )}
+
+          <div className="min-w-0 flex-1">
+            <Outlet />
+          </div>
+        </div>
+      </div>
     </ProjectContext.Provider>
   )
 }

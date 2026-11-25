@@ -13,10 +13,10 @@ from rest_framework.views import APIView
 from accounts.models import Role, User
 from accounts.permissions import Cap, ProjectScopedViewMixin
 from accounts.serializers import UserBriefSerializer
-from jobs.models import OPEN_STATUSES, Job, JobStatus
+from jobs.models import OPEN_STATUSES, Job, JobStatus, ReworkScope
 from jobs.serializers import JobDetailSerializer, JobSerializer
 from jobs.views import ensure_editable, ensure_not_escalated, lock_job
-from projects.models import ActivityLog, Batch, DataStatus, SamplingMethod, StratifyBy
+from projects.models import ActivityLog, Batch, DataStatus, SamplingMethod, StratifyBy, UserNotification
 from projects.views import StandardPagination
 
 from . import sampling
@@ -415,11 +415,26 @@ def qc1_pass(job_id, *, project, actor, comment=""):
         after={"status": JobStatus.PENDING_QC2, "rework_round": job.rework_round},
         note=comment,
     )
+    if job.annotator and job.annotator.notify_qc_pass:
+        body = (
+            "Job đạt ngay lần kiểm đầu — FPY được tính."
+            if job.rework_round == 0
+            else f"Job đạt QC1 sau vòng sửa {job.rework_round}."
+        )
+        UserNotification.objects.create(
+            recipient=job.annotator,
+            project=project,
+            job=job,
+            category=UserNotification.Category.QC_PASS,
+            title=f"{job.name} đạt QC1",
+            body=body,
+            action_url=f"/projects/{project.id}/annotator/jobs/{job.id}",
+        )
     return job
 
 
 @transaction.atomic
-def qc1_reject(job_id, *, project, actor, errors, comment=""):
+def qc1_reject(job_id, *, project, actor, errors, comment="", rework_scope=ReworkScope.PARTIAL):
     """QC1 trả về Rework: ghi ReviewError (stage=QC1), tăng rework_round, vượt ngưỡng -> is_escalated."""
     job = lock_job(project, job_id)
     _check_qc1_access(job, actor)
@@ -446,9 +461,10 @@ def qc1_reject(job_id, *, project, actor, errors, comment=""):
     ])
     job.status = JobStatus.REWORK
     job.rework_round += 1
+    job.rework_scope = rework_scope
     if job.rework_round > project.max_rework_rounds:
         job.is_escalated = True
-    update_fields = ["status", "rework_round", "is_escalated", "updated_at"]
+    update_fields = ["status", "rework_round", "rework_scope", "is_escalated", "updated_at"]
     if not job.qc1_reviewer_id:
         job.qc1_reviewer = actor
         update_fields.append("qc1_reviewer")
@@ -463,11 +479,26 @@ def qc1_reject(job_id, *, project, actor, errors, comment=""):
         after={
             "status": JobStatus.REWORK,
             "rework_round": job.rework_round,
+            "rework_scope": rework_scope,
             "errors": len(errors),
             "escalated": job.is_escalated,
         },
         note=comment,
     )
+    if job.annotator and job.annotator.notify_rework:
+        deadline_txt = (
+            f" Hạn sửa {timezone.localtime(job.deadline).strftime('%d/%m %H:%M')}." if job.deadline else ""
+        )
+        UserNotification.objects.create(
+            recipient=job.annotator,
+            project=project,
+            job=job,
+            category=UserNotification.Category.REWORK,
+            title=f"{job.name} bị trả sửa (vòng {job.rework_round})",
+            body=f"QC1 ghi {len(errors)} lỗi theo object-frame.{deadline_txt}",
+            action_url=f"/projects/{project.id}/annotator/jobs/{job.id}",
+            is_pinned_pending=True,
+        )
     return job
 
 
@@ -586,5 +617,6 @@ class Qc1JobViewSet(
             actor=request.user,
             errors=serializer.validated_data["errors"],
             comment=serializer.validated_data["comment"],
+            rework_scope=serializer.validated_data["rework_scope"],
         )
         return self._detail(updated)

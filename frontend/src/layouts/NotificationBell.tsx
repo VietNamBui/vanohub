@@ -1,20 +1,15 @@
-import { Bell01 } from '@untitledui/icons'
-import { useEffect, useState } from 'react'
-import { Button as AriaButton, Dialog as AriaDialog, DialogTrigger, Popover } from 'react-aria-components'
-import { Link } from 'react-router'
+import { AlertTriangle, Bell01, Check, CheckCircle, Clock, InfoCircle, XClose } from '@untitledui/icons'
+import { useCallback, useEffect, useState } from 'react'
+import { useNavigate } from 'react-router'
+import { Badge } from '@/components/base/badges/badges'
 import { useAuth } from '../features/auth/useAuth'
-import { listAnnouncements } from '../features/projects/api'
-import type { Announcement, ProjectSummary } from '../features/projects/types'
-import { useRequest } from '../shared/hooks/useRequest'
-import { ROLE_SHORT_LABELS } from '../shared/types/roles'
+import { listAnnouncements, listProjectNotifications, markProjectNotificationsRead } from '../features/projects/api'
+import type { NotificationCategory, ProjectSummary, UnifiedNotification } from '../features/projects/types'
 import { formatDateTime, formatRelative } from '../shared/utils/format'
 import { cx } from '@/utils/cx'
 
 const POLL_MS = 60_000
 
-type Item = Announcement & { projectId: number; projectName: string }
-
-/** Mốc "đã xem đến" lưu trên trình duyệt, theo từng user + dự án. */
 const seenKey = (userId: number, projectId: number) => `vanohub:notifSeen:${userId}:${projectId}`
 function readSeen(key: string): number {
   try {
@@ -27,159 +22,301 @@ function writeSeen(key: string, value: number) {
   try {
     localStorage.setItem(key, String(value))
   } catch {
-    // Trình duyệt chặn localStorage → chỉ mất trạng thái đã đọc.
+    // ignore storage restriction
   }
 }
 
-/** Lấy thông báo của nhiều dự án; dự án nào lỗi thì bỏ qua để các dự án khác vẫn hiện. */
-async function loadItems(projects: ProjectSummary[]): Promise<Item[]> {
+async function fetchNotifications(projects: ProjectSummary[], userId: number): Promise<UnifiedNotification[]> {
+  if (projects.length === 1) {
+    const feed = await listProjectNotifications(projects[0].id)
+    const seenAt = readSeen(seenKey(userId, projects[0].id))
+    return feed.items.map((item) => {
+      if (item.source === 'announcement' && new Date(item.created_at).getTime() <= seenAt) {
+        return { ...item, is_read: true }
+      }
+      return item
+    })
+  }
   const results = await Promise.allSettled(
-    projects.map(async (p) => (await listAnnouncements(p.id)).map((a) => ({ ...a, projectId: p.id, projectName: p.name }))),
+    projects.map(async (p) => {
+      const seenAt = readSeen(seenKey(userId, p.id))
+      const list = await listAnnouncements(p.id)
+      return list.map<UnifiedNotification>((a) => ({
+        id: `ann-${p.id}-${a.id}`,
+        notification_id: null,
+        source: 'announcement',
+        category: 'announcement',
+        title: `${p.name} · ${a.sender?.full_name ?? 'Hệ thống'}`,
+        body: a.content,
+        job_id: null,
+        action_url: `/projects/${p.id}/announcements`,
+        is_read: a.sender?.id === userId || new Date(a.created_at).getTime() <= seenAt,
+        is_pinned_pending: false,
+        created_at: a.created_at,
+      }))
+    }),
   )
-  if (results.length > 0 && results.every((r) => r.status === 'rejected')) throw (results[0] as PromiseRejectedResult).reason
   return results
     .flatMap((r) => (r.status === 'fulfilled' ? r.value : []))
     .sort((a, b) => b.created_at.localeCompare(a.created_at))
 }
 
+function CategoryIcon({ category }: { category: NotificationCategory }) {
+  if (category === 'rework') {
+    return (
+      <span className="flex size-10 shrink-0 items-center justify-center rounded-full bg-[#FFFAEB]">
+        <span className="flex size-7 items-center justify-center rounded-full bg-[#FEDF89] text-[#B54708]">
+          <AlertTriangle className="size-4" />
+        </span>
+      </span>
+    )
+  }
+  if (category === 'deadline') {
+    return (
+      <span className="flex size-10 shrink-0 items-center justify-center rounded-full bg-[#FFFAEB]">
+        <span className="flex size-7 items-center justify-center rounded-full bg-[#FEDF89] text-[#B54708]">
+          <Clock className="size-4" />
+        </span>
+      </span>
+    )
+  }
+  if (category === 'dispute') {
+    return (
+      <span className="flex size-10 shrink-0 items-center justify-center rounded-full bg-[#EFF8FF]">
+        <span className="flex size-7 items-center justify-center rounded-full bg-[#B2DDFF] text-[#175CD3]">
+          <InfoCircle className="size-4" />
+        </span>
+      </span>
+    )
+  }
+  if (category === 'qc_pass') {
+    return (
+      <span className="flex size-10 shrink-0 items-center justify-center rounded-full bg-[#ECFDF3]">
+        <span className="flex size-7 items-center justify-center rounded-full bg-[#ABEFC6] text-[#067647]">
+          <CheckCircle className="size-4" />
+        </span>
+      </span>
+    )
+  }
+  return (
+    <span className="flex size-10 shrink-0 items-center justify-center rounded-full bg-[#F9F5FF]">
+      <span className="flex size-7 items-center justify-center rounded-full bg-[#E9D7FE] text-[#6941C6]">
+        <Bell01 className="size-4" />
+      </span>
+    </span>
+  )
+}
+
 /**
- * Chuông thông báo trên thanh trên cùng. Nguồn: Thông báo dự án dành cho vai trò/team của mình (backend lọc).
- * - Trong một dự án: chỉ thông báo của dự án đó.
- * - Ngoài dự án (trang chọn dự án): gộp thông báo của mọi dự án mình tham gia, có ghi tên dự án.
- *
- * "Chưa đọc" = mới hơn lần cuối mở chuông, không tính thông báo do chính mình gửi.
- * Trạng thái này lưu trên trình duyệt (chưa có backend lưu đã đọc). Tự tải lại mỗi phút.
+ * Chuông thông báo + Drawer trượt phải 440px (Tất cả / Chưa đọc, Đánh dấu đã đọc, TB03).
  */
 export default function NotificationBell({ projects }: { projects: ProjectSummary[] }) {
   const { user } = useAuth()
+  const navigate = useNavigate()
   const userId = user?.id ?? 0
-  const [tick, setTick] = useState(0)
+  const [open, setOpen] = useState(false)
+  const [tab, setTab] = useState<'all' | 'unread'>('all')
+  const [items, setItems] = useState<UnifiedNotification[]>([])
+  const [loading, setLoading] = useState(false)
+  const [error, setError] = useState<string | null>(null)
   const scopeKey = projects.map((p) => p.id).join(',')
-  const { data, isLoading, error } = useRequest(`notif:${scopeKey}:${tick}`, () => loadItems(projects))
-  // Giữ danh sách cũ trong lúc tải lại định kỳ để popup không nhấp nháy.
-  const [items, setItems] = useState<Item[]>([])
-  const [itemsFor, setItemsFor] = useState(scopeKey)
-  // Mốc đã xem vừa ghi trong phiên này (dự án chưa có ở đây thì đọc từ localStorage).
-  const [seenMap, setSeenMap] = useState<Record<number, number>>({})
-  const seenOf = (projectId: number) => seenMap[projectId] ?? readSeen(seenKey(userId, projectId))
 
-  if (itemsFor !== scopeKey) {
-    setItemsFor(scopeKey)
-    setItems([])
-  }
-  if (data && data !== items && !isLoading) setItems(data)
+  const load = useCallback(async () => {
+    if (!projects.length || !userId) return
+    setLoading(true)
+    setError(null)
+    try {
+      const next = await fetchNotifications(projects, userId)
+      setItems(next)
+    } catch {
+      setError('Không tải được thông báo.')
+    } finally {
+      setLoading(false)
+    }
+  }, [projects, userId])
 
   useEffect(() => {
-    const timer = setInterval(() => setTick((t) => t + 1), POLL_MS)
+    void load()
+    const timer = setInterval(() => void load(), POLL_MS)
     return () => clearInterval(timer)
-  }, [])
+  }, [scopeKey, load])
 
-  const isUnread = (a: Item) => new Date(a.created_at).getTime() > seenOf(a.projectId) && a.sender?.id !== userId
-  const unread = items.filter(isUnread).length
-  const multiProject = projects.length > 1
-
-  function handleOpenChange(open: boolean) {
-    if (open) {
-      setTick((t) => t + 1) // mở ra thì lấy bản mới nhất
-      return
+  useEffect(() => {
+    if (!open) return
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setOpen(false)
     }
-    // Đóng popup → coi như đã xem hết những gì vừa hiện (theo từng dự án).
-    const next: Record<number, number> = {}
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [open])
+
+  const unreadCount = items.filter((i) => !i.is_read).length
+  const visible = tab === 'unread' ? items.filter((i) => !i.is_read) : items
+
+  async function markAllRead() {
+    const nowMs = Date.now()
     for (const p of projects) {
-      next[p.id] = Math.max(seenOf(p.id), ...items.filter((a) => a.projectId === p.id).map((a) => new Date(a.created_at).getTime()))
-      writeSeen(seenKey(userId, p.id), next[p.id])
+      writeSeen(seenKey(userId, p.id), nowMs)
     }
-    setSeenMap((current) => ({ ...current, ...next }))
+    if (projects.length === 1) {
+      try {
+        await markProjectNotificationsRead(projects[0].id)
+      } catch {
+        // fallback optimistic
+      }
+    }
+    setItems((prev) => prev.map((it) => ({ ...it, is_read: true })))
+  }
+
+  async function handleItemClick(item: UnifiedNotification) {
+    if (!item.is_read && item.notification_id && projects.length === 1) {
+      try {
+        await markProjectNotificationsRead(projects[0].id, item.notification_id)
+      } catch {
+        // ignore
+      }
+    }
+    if (item.source === 'announcement' && projects.length === 1) {
+      writeSeen(seenKey(userId, projects[0].id), Date.now())
+    }
+    setItems((prev) => prev.map((it) => (it.id === item.id ? { ...it, is_read: true } : it)))
+    setOpen(false)
+    if (item.action_url) {
+      navigate(item.action_url)
+    }
   }
 
   return (
-    <DialogTrigger onOpenChange={handleOpenChange}>
-      <AriaButton
-        aria-label={unread ? `Thông báo, ${unread} chưa đọc` : 'Thông báo'}
-        className={({ isHovered, isPressed, isFocusVisible }) => cx(
-          'relative flex size-9 cursor-pointer items-center justify-center rounded-lg text-fg-quaternary outline-focus-ring transition duration-100',
-          (isHovered || isPressed) && 'bg-primary_hover text-fg-quaternary_hover',
-          isFocusVisible && 'outline-2 outline-offset-2',
-        )}
+    <>
+      <button
+        type="button"
+        onClick={() => {
+          setOpen(true)
+          void load()
+        }}
+        aria-label={unreadCount ? `Thông báo, ${unreadCount} chưa đọc` : 'Thông báo'}
+        className="relative flex size-10 cursor-pointer items-center justify-center rounded-lg text-[#667085] transition hover:bg-[#F9FAFB] hover:text-[#344054]"
       >
         <Bell01 className="size-5" />
-        {unread > 0 && (
-          <span className="absolute -top-0.5 -right-0.5 flex h-4.5 min-w-4.5 items-center justify-center rounded-full bg-error-solid px-1 text-[11px] leading-none font-semibold text-white ring-2 ring-white">
-            {unread > 9 ? '9+' : unread}
-          </span>
+        {unreadCount > 0 && (
+          <span className="absolute top-1.5 right-1.5 size-2.5 rounded-full bg-[#F04438] ring-2 ring-white" />
         )}
-      </AriaButton>
+      </button>
 
-      <Popover
-        placement="bottom end"
-        offset={8}
-        className={({ isEntering, isExiting }) => cx(
-          'w-[min(380px,calc(100vw-24px))] overflow-hidden rounded-xl bg-primary shadow-xl ring-1 ring-secondary_alt',
-          isEntering && 'duration-150 ease-out animate-in fade-in slide-in-from-top-1',
-          isExiting && 'duration-100 ease-in animate-out fade-out',
-        )}
-      >
-        <AriaDialog aria-label="Thông báo" className="outline-hidden">
-          {({ close }) => (
-            <>
-              <div className="flex items-center justify-between border-b border-secondary px-4 py-3">
-                <h2 className="text-md font-semibold text-primary">Thông báo</h2>
-                {unread > 0 && <span className="text-xs font-medium text-brand-secondary">{unread} chưa đọc</span>}
-              </div>
+      {open && (
+        <div className="fixed inset-0 z-50 flex justify-end" role="dialog" aria-modal="true" aria-label="Thông báo">
+          <div className="fixed inset-0 bg-[#0C111D]/70 backdrop-blur-[2px]" onClick={() => setOpen(false)} />
 
-              <div className="max-h-[420px] overflow-y-auto">
-                {error != null && items.length === 0 ? (
-                  <p className="px-4 py-10 text-center text-sm text-error-primary">Không tải được thông báo.</p>
-                ) : isLoading && items.length === 0 ? (
-                  <p className="px-4 py-10 text-center text-sm text-tertiary">Đang tải…</p>
-                ) : items.length === 0 ? (
-                  <div className="flex flex-col items-center gap-2 px-4 py-10 text-center">
-                    <span className="flex size-10 items-center justify-center rounded-full bg-secondary text-fg-quaternary"><Bell01 className="size-5" /></span>
-                    <p className="text-sm font-medium text-secondary">Chưa có thông báo nào</p>
-                    <p className="text-xs text-tertiary">Thông báo của dự án sẽ hiện ở đây.</p>
-                  </div>
-                ) : (
-                  <ul>
-                    {items.slice(0, 20).map((a) => (
-                      <li key={`${a.projectId}-${a.id}`} className={cx('border-b border-secondary last:border-0', isUnread(a) && 'bg-brand-primary_alt')}>
-                        <Link to={`/projects/${a.projectId}/announcements`} onClick={close} className="flex gap-3 px-4 py-3 hover:bg-primary_hover">
-                          <span className="flex size-9 shrink-0 items-center justify-center rounded-full bg-brand-secondary text-xs font-semibold text-brand-secondary">
-                            {(a.sender?.full_name || a.sender?.username || '?').slice(0, 1).toUpperCase()}
-                          </span>
-                          <div className="min-w-0 flex-1">
-                            <div className="flex items-baseline justify-between gap-2">
-                              <p className="truncate text-sm font-semibold text-secondary">{a.sender?.full_name ?? 'Hệ thống'}</p>
-                              <time className="shrink-0 text-xs text-quaternary" title={formatDateTime(a.created_at)}>{formatRelative(a.created_at)}</time>
-                            </div>
-                            {multiProject && <p className="truncate text-xs font-medium text-brand-secondary">{a.projectName}</p>}
-                            <p className="mt-0.5 line-clamp-3 text-sm whitespace-pre-line text-tertiary">{a.content}</p>
-                            {(a.target_roles.length > 0 || a.target_team_name) && (
-                              <p className="mt-1 text-xs text-quaternary">
-                                Gửi tới: {[...a.target_roles.map((r) => ROLE_SHORT_LABELS[r]), a.target_team_name].filter(Boolean).join(', ')}
-                              </p>
-                            )}
-                          </div>
-                          {isUnread(a) && <span aria-label="Chưa đọc" className="mt-1.5 size-2 shrink-0 rounded-full bg-brand-solid" />}
-                        </Link>
-                      </li>
-                    ))}
-                  </ul>
-                )}
-              </div>
-
-              {!multiProject && projects[0] && (
-                <Link
-                  to={`/projects/${projects[0].id}/announcements`}
-                  onClick={close}
-                  className="block border-t border-secondary px-4 py-3 text-center text-sm font-semibold text-brand-secondary hover:bg-primary_hover"
+          <aside className="relative z-10 flex h-full w-full max-w-[440px] flex-col border-l border-[#EAECF0] bg-white shadow-2xl">
+            <div className="flex items-center justify-between px-6 pt-6 pb-4">
+              <h2 className="text-xl font-bold text-[#101828]">Thông báo</h2>
+              <div className="flex items-center gap-3">
+                <button
+                  type="button"
+                  onClick={markAllRead}
+                  className="inline-flex cursor-pointer items-center gap-1.5 text-sm font-semibold text-[#6941C6] hover:text-[#53389E]"
                 >
-                  Xem tất cả thông báo
-                </Link>
+                  <Check className="size-4" />
+                  Đánh dấu đã đọc
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setOpen(false)}
+                  aria-label="Đóng thông báo"
+                  className="flex size-8 cursor-pointer items-center justify-center rounded-lg text-[#98A2B3] hover:bg-[#F9FAFB] hover:text-[#475467]"
+                >
+                  <XClose className="size-5" />
+                </button>
+              </div>
+            </div>
+
+            <div className="flex items-center gap-6 border-b border-[#EAECF0] px-6">
+              <button
+                type="button"
+                onClick={() => setTab('all')}
+                className={cx(
+                  'relative flex cursor-pointer items-center gap-2 pb-3 text-sm font-semibold transition',
+                  tab === 'all' ? 'text-[#6941C6]' : 'text-[#667085] hover:text-[#344054]',
+                )}
+              >
+                Tất cả
+                <Badge size="sm" type="pill-color" color={tab === 'all' ? 'brand' : 'gray'}>
+                  {items.length}
+                </Badge>
+                {tab === 'all' && <span className="absolute inset-x-0 bottom-0 h-0.5 bg-[#7F56D9]" />}
+              </button>
+              <button
+                type="button"
+                onClick={() => setTab('unread')}
+                className={cx(
+                  'relative flex cursor-pointer items-center gap-2 pb-3 text-sm font-semibold transition',
+                  tab === 'unread' ? 'text-[#6941C6]' : 'text-[#667085] hover:text-[#344054]',
+                )}
+              >
+                Chưa đọc
+                <Badge size="sm" type="pill-color" color={tab === 'unread' ? 'brand' : 'gray'}>
+                  {unreadCount}
+                </Badge>
+                {tab === 'unread' && <span className="absolute inset-x-0 bottom-0 h-0.5 bg-[#7F56D9]" />}
+              </button>
+            </div>
+
+            <div className="flex-1 overflow-y-auto py-2">
+              {error && items.length === 0 ? (
+                <p className="px-6 py-12 text-center text-sm text-[#B42318]">{error}</p>
+              ) : loading && items.length === 0 ? (
+                <p className="px-6 py-12 text-center text-sm text-[#667085]">Đang tải…</p>
+              ) : visible.length === 0 ? (
+                <div className="flex flex-col items-center gap-2 px-6 py-14 text-center">
+                  <span className="flex size-10 items-center justify-center rounded-full bg-[#F2F4F7] text-[#667085]">
+                    <Bell01 className="size-5" />
+                  </span>
+                  <p className="text-sm font-semibold text-[#344054]">
+                    {tab === 'unread' ? 'Không có thông báo chưa đọc' : 'Chưa có thông báo nào'}
+                  </p>
+                  <p className="text-xs text-[#667085]">Các thông báo về rework, hạn nộp và phản hồi sẽ hiện ở đây.</p>
+                </div>
+              ) : (
+                <ul className="divide-y divide-[#F2F4F7]">
+                  {visible.map((item) => (
+                    <li key={item.id}>
+                      <button
+                        type="button"
+                        onClick={() => void handleItemClick(item)}
+                        className={cx(
+                          'relative flex w-full cursor-pointer gap-3 px-6 py-4 text-left transition hover:bg-[#F9FAFB]',
+                          !item.is_read && 'bg-[#FCFAFF]',
+                        )}
+                      >
+                        {!item.is_read && (
+                          <span className="absolute top-7 left-2.5 size-2 rounded-full bg-[#7F56D9]" aria-label="Chưa đọc" />
+                        )}
+                        <CategoryIcon category={item.category} />
+                        <div className="min-w-0 flex-1">
+                          <p className="text-sm font-semibold text-[#101828]">{item.title}</p>
+                          {item.body && (
+                            <p className="mt-0.5 line-clamp-2 text-sm text-[#475467]">{item.body}</p>
+                          )}
+                          <time
+                            className="mt-1.5 block text-xs text-[#667085]"
+                            title={formatDateTime(item.created_at)}
+                          >
+                            {formatRelative(item.created_at)}
+                          </time>
+                        </div>
+                      </button>
+                    </li>
+                  ))}
+                </ul>
               )}
-            </>
-          )}
-        </AriaDialog>
-      </Popover>
-    </DialogTrigger>
+            </div>
+
+            <footer className="border-t border-[#EAECF0] px-6 py-4 text-xs text-[#667085]">
+              Thông báo chưa xử lý được treo cho tới khi xử lý (TB03).
+            </footer>
+          </aside>
+        </div>
+      )}
+    </>
   )
 }

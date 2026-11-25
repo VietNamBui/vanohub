@@ -1,19 +1,33 @@
+from datetime import timedelta
+
 from django.db import transaction
-from django.db.models import Count, Prefetch, Q
+from django.db.models import Case, Count, F, IntegerField, Prefetch, Q, When
 from django.utils import timezone
-from rest_framework import mixins, viewsets
+from rest_framework import mixins, status, viewsets
 from rest_framework.decorators import action
 from rest_framework.exceptions import NotFound, PermissionDenied, ValidationError
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
+from accounts.models import Role, RoleAssignment
 from accounts.permissions import Cap, ProjectScopedViewMixin
-from projects.models import ActivityLog, DataStatus
+from projects.models import ActivityLog, DataStatus, UserNotification
 from projects.views import StandardPagination
 from quality.models import Audit, AuditSample
+from teams.models import TeamMember
 
-from .models import OPEN_STATUSES, STAGE_STATUSES, Job, JobStatus
+from .models import (
+    ACTIVE_ANNOTATOR_STATUSES,
+    OPEN_STATUSES,
+    STAGE_STATUSES,
+    AnnotatorRequest,
+    Job,
+    JobStatus,
+)
 from .serializers import (
+    AnnotatorRequestCreateSerializer,
+    AnnotatorRequestResolveSerializer,
+    AnnotatorRequestSerializer,
     AnnotatorStartSerializer,
     AnnotatorSubmitSerializer,
     AssignSerializer,
@@ -29,13 +43,18 @@ def _iso(value):
 
 
 def _base_job_queryset(project):
-    return Job.objects.filter(project=project).select_related(
-        "batch__dataset", "annotator", "qc1_reviewer", "project"
-    ).prefetch_related(Prefetch(
-        "audit_samples",
-        queryset=AuditSample.objects.filter(audit__status=Audit.Status.IN_PROGRESS).select_related("auditor"),
-        to_attr="open_samples",
-    ))
+    return (
+        Job.objects.filter(project=project)
+        .select_related("batch__dataset", "annotator", "qc1_reviewer", "project")
+        .annotate(_open_error_count=Count("review_errors", distinct=True))
+        .prefetch_related(
+            Prefetch(
+                "audit_samples",
+                queryset=AuditSample.objects.filter(audit__status=Audit.Status.IN_PROGRESS).select_related("auditor"),
+                to_attr="open_samples",
+            )
+        )
+    )
 
 
 def ensure_editable(job):
@@ -85,7 +104,11 @@ def start_annotation(job_id, *, project, actor, note=""):
 
     prev_status = job.status
     job.status = JobStatus.ANNOTATING
-    job.save(update_fields=["status", "updated_at"])
+    update_fields = ["status", "updated_at"]
+    if job.started_at is None:
+        job.started_at = timezone.now()
+        update_fields.append("started_at")
+    job.save(update_fields=update_fields)
     ActivityLog.record(
         project=project,
         actor=actor,
@@ -125,21 +148,30 @@ def submit_annotation(job_id, *, project, actor, note="", object_count=None):
     prev_status = job.status
     prev_objects = job.object_count
     job.status = JobStatus.PENDING_QC1
-    update_fields = ["status", "updated_at"]
+    job.submitted_at = timezone.now()
+    update_fields = ["status", "submitted_at", "updated_at"]
     if object_count is not None:
         job.object_count = object_count
         update_fields.append("object_count")
     job.save(update_fields=update_fields)
+
+    # TB03: gỡ ghim thông báo rework/deadline của job sau khi đã nộp xử lý.
+    UserNotification.objects.filter(
+        recipient=actor,
+        project=project,
+        job=job,
+        is_pinned_pending=True,
+    ).update(is_pinned_pending=False)
 
     before = {"status": prev_status}
     after = {
         "status": JobStatus.PENDING_QC1,
         "event": "annotator.resubmit" if job.rework_round > 0 else "annotator.submit",
         "rework_round": job.rework_round,
+        "object_count": job.object_count,
     }
     if object_count is not None and object_count != prev_objects:
         before["object_count"] = prev_objects
-        after["object_count"] = object_count
 
     ActivityLog.record(
         project=project,
@@ -217,6 +249,8 @@ class JobViewSet(ProjectScopedViewMixin, mixins.ListModelMixin, mixins.RetrieveM
         ordering = p.get("ordering")
         if ordering in {"deadline", "-deadline", "rework_round", "-rework_round", "updated_at", "-updated_at"}:
             queryset = queryset.order_by(ordering, "id")
+        else:
+            queryset = queryset.order_by("deadline", "id")
         return queryset
 
     def _detail(self, job):
@@ -342,11 +376,27 @@ class JobQueueView(ProjectScopedViewMixin, APIView):
 
 
 ANNOTATOR_TABS = {
+    "active": [JobStatus.REWORK, JobStatus.ANNOTATING, JobStatus.PENDING_ANNOTATION],
     "todo": [JobStatus.PENDING_ANNOTATION, JobStatus.ANNOTATING],
     "rework": [JobStatus.REWORK],
     "submitted": [JobStatus.PENDING_QC1, JobStatus.QC1_REVIEWING, JobStatus.PENDING_QC2],
     "done": [JobStatus.APPROVED, JobStatus.DELIVERED],
 }
+
+
+def order_by_db06_priority(queryset, now=None):
+    """Sắp xếp hàng đợi theo DB06: quá hạn → sắp hạn (<= 24h) → rework → còn lại, deadline sớm trước."""
+    now = now or timezone.now()
+    soon_cutoff = now + timedelta(hours=24)
+    return queryset.annotate(
+        _db06_rank=Case(
+            When(status__in=OPEN_STATUSES, deadline__lt=now, then=0),
+            When(status__in=OPEN_STATUSES, deadline__lte=soon_cutoff, then=1),
+            When(status=JobStatus.REWORK, then=2),
+            default=3,
+            output_field=IntegerField(),
+        )
+    ).order_by("_db06_rank", F("deadline").asc(nulls_last=True), "id")
 
 
 class AnnotatorJobViewSet(
@@ -386,11 +436,77 @@ class AnnotatorJobViewSet(
         ordering = p.get("ordering")
         if ordering in {"deadline", "-deadline", "rework_round", "-rework_round", "updated_at", "-updated_at"}:
             queryset = queryset.order_by(ordering, "id")
+        else:
+            queryset = order_by_db06_priority(queryset)
         return queryset
 
     def _detail(self, job):
         fresh = _base_job_queryset(self.project).get(pk=job.pk)
         return Response(JobDetailSerializer(fresh, context=self.get_serializer_context()).data)
+
+    @action(detail=False, methods=["post"])
+    def claim(self, request, project_id):
+        """Nhận job mới từ hàng chờ chưa phân công (GV02: tôn trọng giới hạn số job đang giữ)."""
+        user = request.user
+        wip_limit = self.project.annotator_wip_limit
+        team_ids = list(
+            TeamMember.objects.filter(user=user, team__project=self.project).values_list("team_id", flat=True)
+        )
+
+        with transaction.atomic():
+            active_count = (
+                Job.objects.select_for_update()
+                .filter(project=self.project, annotator=user, status__in=ACTIVE_ANNOTATOR_STATUSES)
+                .count()
+            )
+            if active_count >= wip_limit:
+                raise ValidationError(
+                    f"Bạn đang giữ {active_count}/{wip_limit} job (GV02). Hoàn tất bớt job trước khi nhận thêm."
+                )
+
+            pool = (
+                Job.objects.select_for_update(skip_locked=True)
+                .select_related("batch__dataset")
+                .filter(
+                    project=self.project,
+                    annotator__isnull=True,
+                    status=JobStatus.PENDING_ANNOTATION,
+                    is_locked=False,
+                    is_escalated=False,
+                    batch__status=DataStatus.ACTIVE,
+                    batch__dataset__status=DataStatus.ACTIVE,
+                )
+                .exclude(qc1_reviewer=user)
+            )
+            if team_ids:
+                pool = pool.annotate(
+                    _team_pref=Case(
+                        When(batch__team_id__in=team_ids, then=0),
+                        When(batch__team__isnull=True, then=1),
+                        default=2,
+                        output_field=IntegerField(),
+                    )
+                ).order_by("_team_pref", F("deadline").asc(nulls_last=True), "id")
+            else:
+                pool = pool.order_by(F("deadline").asc(nulls_last=True), "id")
+
+            job = pool.first()
+            if job is None:
+                raise ValidationError("Hiện không còn job mới sẵn sàng để nhận trong dự án.")
+
+            job.annotator = user
+            job.save(update_fields=["annotator", "updated_at"])
+            ActivityLog.record(
+                project=self.project,
+                actor=user,
+                action="job.assign",
+                target=job,
+                job=job,
+                before={"annotator": None},
+                after={"annotator": user.pk, "event": "annotator.claim"},
+                note="Tự nhận job từ hàng chờ (GV02)",
+            )
+        return self._detail(job)
 
     @action(detail=True, methods=["post"])
     def start(self, request, project_id, pk=None):
@@ -420,3 +536,217 @@ class AnnotatorJobViewSet(
             object_count=serializer.validated_data.get("object_count"),
         )
         return self._detail(updated)
+
+
+def _find_request_handler(project, user, request_type):
+    """Định tuyến yêu cầu: phản hồi lỗi → TL (chuyển PM nếu chưa có TL); dữ liệu bị chặn → PM (hoặc TL)."""
+    membership = (
+        TeamMember.objects.filter(user=user, team__project=project)
+        .select_related("team__leader")
+        .first()
+    )
+    tl = membership.team.leader if membership and membership.team and membership.team.leader else None
+    pm_assignment = (
+        RoleAssignment.objects.filter(project=project, role=Role.PROJECT_MANAGER)
+        .select_related("user")
+        .first()
+    )
+    pm = pm_assignment.user if pm_assignment else None
+
+    if request_type == AnnotatorRequest.RequestType.DATA_ISSUE:
+        if pm:
+            return pm, "PM", AnnotatorRequest.Status.PENDING_PM
+        if tl:
+            return tl, "TL", AnnotatorRequest.Status.PENDING_TL
+        return None, "PM", AnnotatorRequest.Status.PENDING_PM
+
+    if tl:
+        return tl, "TL", AnnotatorRequest.Status.PENDING_TL
+    if pm:
+        return pm, "PM", AnnotatorRequest.Status.PENDING_PM
+    return None, "TL", AnnotatorRequest.Status.PENDING_TL
+
+
+class AnnotatorRequestViewSet(
+    ProjectScopedViewMixin,
+    mixins.ListModelMixin,
+    mixins.RetrieveModelMixin,
+    mixins.CreateModelMixin,
+    viewsets.GenericViewSet,
+):
+    """Yêu cầu của Annotator (TD13): phản hồi lỗi QC1 & báo dữ liệu bị chặn."""
+
+    serializer_class = AnnotatorRequestSerializer
+    lookup_value_regex = r"\d+"
+    required_capabilities = {
+        "list": [Cap.ANNOTATE_JOBS, Cap.LEAD_TEAM, Cap.MANAGE_JOBS],
+        "retrieve": [Cap.ANNOTATE_JOBS, Cap.LEAD_TEAM, Cap.MANAGE_JOBS],
+        "create": Cap.ANNOTATE_JOBS,
+        "resolve": [Cap.LEAD_TEAM, Cap.MANAGE_JOBS],
+    }
+
+    def get_queryset(self):
+        qs = AnnotatorRequest.objects.filter(project=self.project).select_related(
+            "job__batch", "review_error__category", "created_by", "handler"
+        )
+        if not self.has_cap(Cap.MANAGE_JOBS) and not self.has_cap(Cap.LEAD_TEAM):
+            qs = qs.filter(created_by=self.request.user)
+        elif self.has_cap(Cap.LEAD_TEAM) and not self.has_cap(Cap.MANAGE_JOBS):
+            team_members = TeamMember.objects.filter(
+                team__project=self.project, team__leader=self.request.user
+            ).values_list("user_id", flat=True)
+            qs = qs.filter(Q(created_by=self.request.user) | Q(created_by_id__in=team_members) | Q(handler=self.request.user))
+
+        p = self.request.query_params
+        if p.get("request_type"):
+            qs = qs.filter(request_type=p["request_type"])
+        if p.get("status"):
+            qs = qs.filter(status__in=p["status"].split(","))
+        if p.get("job") and p["job"].isdigit():
+            qs = qs.filter(job_id=int(p["job"]))
+        return qs
+
+    def create(self, request, project_id):
+        serializer = AnnotatorRequestCreateSerializer(data=request.data, context=self.get_serializer_context())
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
+        job = data["job_obj"]
+        review_error = data["review_error_obj"]
+        req_type = data["request_type"]
+
+        handler, handler_role, initial_status = _find_request_handler(self.project, request.user, req_type)
+        default_progress = (
+            "TL đang đối chiếu lỗi được phản hồi. Nếu chưa phân xử được, TL sẽ chuyển PM."
+            if handler_role == "TL"
+            else "PM đang kiểm tra dữ liệu bị chặn và phương án thay thế."
+        )
+
+        with transaction.atomic():
+            req = AnnotatorRequest.objects.create(
+                project=self.project,
+                job=job,
+                review_error=review_error,
+                request_type=req_type,
+                status=initial_status,
+                title=data["title"],
+                reason=data["reason"].strip(),
+                progress_note=default_progress,
+                created_by=request.user,
+                handler=handler,
+                handler_role=handler_role,
+            )
+            ActivityLog.record(
+                project=self.project,
+                actor=request.user,
+                action="annotator.dispute" if req_type == AnnotatorRequest.RequestType.ERROR_DISPUTE else "annotator.data_issue",
+                target=job,
+                job=job,
+                after={"request_id": req.id, "type": req_type, "status": initial_status},
+                note=req.title,
+            )
+            if request.user.notify_request_updates:
+                handler_name = handler.get_full_name() or handler.username if handler else handler_role
+                UserNotification.objects.create(
+                    recipient=request.user,
+                    project=self.project,
+                    job=job,
+                    category=UserNotification.Category.DISPUTE,
+                    title=f"{handler_role} đã nhận {req.get_request_type_display().lower()}",
+                    body=f"{handler_name} đang xem yêu cầu '{req.title}' trên {job.name}.",
+                    action_url=f"/projects/{self.project.id}/annotator/requests",
+                    is_pinned_pending=True,
+                )
+            if handler and handler.id != request.user.id:
+                UserNotification.objects.create(
+                    recipient=handler,
+                    project=self.project,
+                    job=job,
+                    category=UserNotification.Category.DISPUTE,
+                    title=f"{req.get_request_type_display()} · {job.name}",
+                    body=req.title,
+                    action_url=f"/projects/{self.project.id}/annotator/requests",
+                    is_pinned_pending=True,
+                )
+
+        fresh = self.get_queryset().get(pk=req.pk)
+        return Response(AnnotatorRequestSerializer(fresh).data, status=status.HTTP_201_CREATED)
+
+    @action(detail=True, methods=["post"])
+    def resolve(self, request, project_id, pk=None):
+        """TL / PM cập nhật trạng thái, chuyển lên PM hoặc kết luận yêu cầu."""
+        req = self.get_object()
+        serializer = AnnotatorRequestResolveSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        new_status = serializer.validated_data["status"]
+        with transaction.atomic():
+            req.status = new_status
+            if serializer.validated_data["progress_note"]:
+                req.progress_note = serializer.validated_data["progress_note"]
+            if serializer.validated_data["resolution_note"]:
+                req.resolution_note = serializer.validated_data["resolution_note"]
+            if new_status == AnnotatorRequest.Status.PENDING_PM:
+                pm_assignment = (
+                    RoleAssignment.objects.filter(project=self.project, role=Role.PROJECT_MANAGER)
+                    .select_related("user")
+                    .first()
+                )
+                req.handler = pm_assignment.user if pm_assignment else req.handler
+                req.handler_role = "PM"
+            else:
+                req.handler = request.user
+                req.handler_role = "PM" if self.has_cap(Cap.MANAGE_JOBS) else "TL"
+                req.resolved_at = timezone.now()
+            req.save()
+
+            if new_status in (AnnotatorRequest.Status.RESOLVED, AnnotatorRequest.Status.REJECTED):
+                UserNotification.objects.filter(
+                    recipient=req.created_by,
+                    project=self.project,
+                    job=req.job,
+                    category=UserNotification.Category.DISPUTE,
+                    is_pinned_pending=True,
+                ).update(is_pinned_pending=False)
+                if req.created_by.notify_request_updates:
+                    UserNotification.objects.create(
+                        recipient=req.created_by,
+                        project=self.project,
+                        job=req.job,
+                        category=UserNotification.Category.DISPUTE,
+                        title=f"{req.get_status_display()} · {req.job.name}",
+                        body=req.resolution_note or req.title,
+                        action_url=f"/projects/{self.project.id}/annotator/requests",
+                    )
+
+        return Response(AnnotatorRequestSerializer(self.get_queryset().get(pk=req.pk)).data)
+
+
+class AnnotatorQuickSearchView(ProjectScopedViewMixin, APIView):
+    """GET /api/projects/{id}/annotator/search/?q=... — Tìm kiếm nhanh (⌘K) trong phạm vi PQ01."""
+
+    required_capabilities = {"*": Cap.ANNOTATE_JOBS}
+
+    def get(self, request, project_id):
+        q = (request.query_params.get("q") or "").strip()
+        qs = order_by_db06_priority(
+            Job.objects.filter(project=self.project, annotator=request.user).select_related("batch")
+        )
+        if q:
+            cond = Q(name__icontains=q) | Q(batch__name__icontains=q)
+            if q.isdigit():
+                cond |= Q(cvat_job_id=int(q)) | Q(pk=int(q))
+            qs = qs.filter(cond)
+        jobs = list(qs[:8])
+        return Response({
+            "jobs": [
+                {
+                    "id": j.id,
+                    "name": j.name,
+                    "batch_name": j.batch.name,
+                    "status": j.status,
+                    "status_label": j.get_status_display(),
+                    "rework_round": j.rework_round,
+                    "progress_percent": j.progress_percent,
+                }
+                for j in jobs
+            ]
+        })

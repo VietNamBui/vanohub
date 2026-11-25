@@ -1,0 +1,131 @@
+# Generated manually to add Job progress/rework scope fields and AnnotatorRequest.
+
+import django.db.models.deletion
+from django.conf import settings
+from django.db import migrations, models
+
+
+class Migration(migrations.Migration):
+
+    dependencies = [
+        ("jobs", "0002_initial"),
+        ("projects", "0004_batch_team"),
+        ("quality", "0002_review_error_category_restrict"),
+        migrations.swappable_dependency(settings.AUTH_USER_MODEL),
+    ]
+
+    operations = [
+        migrations.AddField(
+            model_name="job",
+            name="rework_scope",
+            field=models.CharField(
+                choices=[("partial", "Sửa một phần"), ("full", "Sửa toàn job")],
+                default="partial",
+                max_length=16,
+            ),
+        ),
+        migrations.AddField(
+            model_name="job",
+            name="started_at",
+            field=models.DateTimeField(blank=True, null=True),
+        ),
+        migrations.AddField(
+            model_name="job",
+            name="submitted_at",
+            field=models.DateTimeField(blank=True, null=True),
+        ),
+        migrations.AddField(
+            model_name="job",
+            name="target_object_count",
+            field=models.PositiveIntegerField(
+                default=0, help_text="Tổng object-frame mục tiêu của job (TD03/TD10)"
+            ),
+        ),
+        migrations.CreateModel(
+            name="AnnotatorRequest",
+            fields=[
+                ("id", models.BigAutoField(auto_created=True, primary_key=True, serialize=False, verbose_name="ID")),
+                (
+                    "request_type",
+                    models.CharField(
+                        choices=[("error_dispute", "Phản hồi lỗi"), ("data_issue", "Dữ liệu bị chặn")],
+                        max_length=20,
+                    ),
+                ),
+                (
+                    "status",
+                    models.CharField(
+                        choices=[
+                            ("pending_tl", "Đang chờ TL"),
+                            ("pending_pm", "Đang chờ PM"),
+                            ("resolved", "Đã giải quyết"),
+                            ("rejected", "Từ chối"),
+                        ],
+                        default="pending_tl",
+                        max_length=20,
+                    ),
+                ),
+                ("title", models.CharField(max_length=255)),
+                ("reason", models.TextField()),
+                ("progress_note", models.TextField(blank=True, default="")),
+                ("resolution_note", models.TextField(blank=True, default="")),
+                ("handler_role", models.CharField(blank=True, default="TL", max_length=16)),
+                ("created_at", models.DateTimeField(auto_now_add=True)),
+                ("updated_at", models.DateTimeField(auto_now=True)),
+                ("resolved_at", models.DateTimeField(blank=True, null=True)),
+                (
+                    "created_by",
+                    models.ForeignKey(
+                        on_delete=django.db.models.deletion.CASCADE,
+                        related_name="annotator_requests",
+                        to=settings.AUTH_USER_MODEL,
+                    ),
+                ),
+                (
+                    "handler",
+                    models.ForeignKey(
+                        blank=True,
+                        null=True,
+                        on_delete=django.db.models.deletion.SET_NULL,
+                        related_name="handled_requests",
+                        to=settings.AUTH_USER_MODEL,
+                    ),
+                ),
+                (
+                    "job",
+                    models.ForeignKey(
+                        on_delete=django.db.models.deletion.CASCADE,
+                        related_name="annotator_requests",
+                        to="jobs.job",
+                    ),
+                ),
+                (
+                    "project",
+                    models.ForeignKey(
+                        on_delete=django.db.models.deletion.CASCADE,
+                        related_name="annotator_requests",
+                        to="projects.project",
+                    ),
+                ),
+                (
+                    "review_error",
+                    models.ForeignKey(
+                        blank=True,
+                        null=True,
+                        on_delete=django.db.models.deletion.SET_NULL,
+                        related_name="disputes",
+                        to="quality.reviewerror",
+                    ),
+                ),
+            ],
+            options={
+                "ordering": ["-created_at", "-id"],
+                "indexes": [
+                    models.Index(
+                        fields=["project", "created_by", "status"],
+                        name="jobs_annota_project_902011_idx",
+                    ),
+                ],
+            },
+        ),
+    ]

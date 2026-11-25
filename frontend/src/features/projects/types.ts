@@ -24,6 +24,7 @@ export type StratifyBy = 'annotator' | 'qc1_reviewer' | 'dataset'
 export interface ProjectSettings {
   cvat_project_id: number | null
   max_rework_rounds: number
+  annotator_wip_limit?: number
   sampling_method: SamplingMethod
   sampling_rate: number
   stratify_by: StratifyBy
@@ -183,4 +184,26 @@ export interface MemberPerformance {
   done: number
   objects_done: number
   rework_rate: number | null
+}
+
+export type NotificationCategory = 'rework' | 'deadline' | 'dispute' | 'qc_pass' | 'announcement'
+
+export interface UnifiedNotification {
+  id: string
+  notification_id: number | null
+  source: 'system' | 'deadline' | 'announcement'
+  category: NotificationCategory
+  title: string
+  body: string
+  job_id: number | null
+  action_url: string
+  is_read: boolean
+  is_pinned_pending: boolean
+  created_at: string
+}
+
+export interface NotificationFeed {
+  all_count: number
+  unread_count: number
+  items: UnifiedNotification[]
 }

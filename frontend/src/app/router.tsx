@@ -1,11 +1,18 @@
 import type { ReactNode } from 'react'
 import { createBrowserRouter } from 'react-router'
+import AccountSettingsPage from '../features/accounts/AccountSettingsPage'
+import AnnotatorAnalyticsPage from '../features/analytics/AnnotatorAnalyticsPage'
 import LoginPage from '../features/auth/LoginPage'
 import RequireAuth from '../features/auth/RequireAuth'
+import CvatLinkPage from '../features/cvat/pages/CvatLinkPage'
 import AnnotatorDashboardPage from '../features/jobs/pages/AnnotatorDashboardPage'
+import AnnotatorJobDetailPage from '../features/jobs/pages/AnnotatorJobDetailPage'
 import AnnotatorJobsPage from '../features/jobs/pages/AnnotatorJobsPage'
+import AnnotatorRequestsPage from '../features/jobs/pages/AnnotatorRequestsPage'
+import AnnotatorReworkPage from '../features/jobs/pages/AnnotatorReworkPage'
 import JobsPage from '../features/jobs/pages/JobsPage'
 import QueuePage from '../features/jobs/pages/QueuePage'
+import HomeRedirect from '../features/projects/HomeRedirect'
 import AnnouncementsPage from '../features/projects/pages/AnnouncementsPage'
 import BatchesPage from '../features/projects/pages/BatchesPage'
 import DatasetsPage from '../features/projects/pages/DatasetsPage'
@@ -23,8 +30,6 @@ import AuditsPage from '../features/quality/qc2/AuditsPage'
 import AuditStrategyPage from '../features/quality/qc2/AuditStrategyPage'
 import AuditWorkPage from '../features/quality/qc2/AuditWorkPage'
 import Qc2DashboardPage from '../features/quality/qc2/Qc2DashboardPage'
-import CvatLinkPage from '../features/cvat/pages/CvatLinkPage'
-import HomeRedirect from '../features/projects/HomeRedirect'
 import TeamJobsPage from '../features/teams/leader/TeamJobsPage'
 import TeamMembersPage from '../features/teams/leader/TeamMembersPage'
 import TeamOverviewPage from '../features/teams/leader/TeamOverviewPage'
@@ -53,6 +58,7 @@ export const router = createBrowserRouter([
         children: [
           { index: true, element: <HomeRedirect /> },
           { path: 'projects', element: <ProjectListPage /> },
+          { path: 'account/settings', element: <AccountSettingsPage /> },
           {
             path: 'projects/:projectId',
             element: <ProjectLayout />,
@@ -78,12 +84,17 @@ export const router = createBrowserRouter([
               guarded('qc1/dashboard', ['perform_qc1', 'view_dashboard'], <Qc1DashboardPage />),
               guarded('qc1/work', 'perform_qc1', <Qc1WorkPage />),
               guarded('annotator/dashboard', 'annotate_jobs', <AnnotatorDashboardPage />),
+              guarded('annotator/analytics', 'annotate_jobs', <AnnotatorAnalyticsPage />),
               guarded('annotator/jobs', 'annotate_jobs', <AnnotatorJobsPage />),
+              guarded('annotator/jobs/:jobId', 'annotate_jobs', <AnnotatorJobDetailPage />),
+              guarded('annotator/rework', 'annotate_jobs', <AnnotatorReworkPage />),
+              guarded('annotator/requests', ['annotate_jobs', 'lead_team', 'manage_jobs'], <AnnotatorRequestsPage />),
               guarded('error-categories', 'manage_quality_catalog', <ErrorCategoriesPage />),
               guarded('guidelines', 'view_guidelines', <GuidelinesPage />),
               guarded('delivery', 'manage_delivery', <DeliveryPage />),
               guarded('cvat-link', 'view_project', <CvatLinkPage />),
               guarded('announcements', 'view_project', <AnnouncementsPage />),
+              guarded('account/settings', 'view_project', <AccountSettingsPage />),
             ],
           },
         ],

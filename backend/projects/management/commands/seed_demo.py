@@ -15,9 +15,9 @@ from django.db import transaction
 from django.utils import timezone
 
 from accounts.models import Role, RoleAssignment, User
-from jobs.models import Job, JobStatus
-from projects.models import Batch, Dataset, Guideline, Project
-from quality.models import ErrorCategory, Severity
+from jobs.models import AnnotatorRequest, Job, JobStatus, ReworkScope
+from projects.models import ActivityLog, Batch, Dataset, Guideline, Project, UserNotification
+from quality.models import ErrorCategory, ReviewError, ReviewStage, Severity
 from teams.models import Team, TeamMember
 
 PROJECT_NAME = "[DEMO] Robotaxi 3D Cuboid"
@@ -72,8 +72,9 @@ class Command(BaseCommand):
             users[username] = user
 
         project = Project.objects.create(
-            name=PROJECT_NAME, description="Dữ liệu giả để thử luồng PM / QC2 — không phải dữ liệu thật.",
+            name=PROJECT_NAME, description="Dữ liệu giả để thử luồng PM / QC2 / Annotator — không phải dữ liệu thật.",
             created_by=users["director_demo"], sampling_rate=30, max_rework_rounds=2,
+            annotator_wip_limit=2, kpi_annotation_target=1200,
         )
         for username, roles in USERS.items():
             for role in roles:
@@ -128,7 +129,67 @@ class Command(BaseCommand):
         overdue = make(b02, 21, JobStatus.ANNOTATING)
         overdue.deadline = now - timedelta(hours=6)
         overdue.save()
-        # N01: chưa giao.
+        # N01: chưa giao (dùng để thử "Nhận job mới").
         for i in range(1, 6):
-            Job.objects.create(project=project, batch=b03, name=f"N01-{i:03d}", deadline=b03.deadline, frame_count=80)
+            Job.objects.create(
+                project=project, batch=b03, name=f"N01-{i:03d}",
+                deadline=b03.deadline, frame_count=80, target_object_count=960,
+            )
+
+        # Dữ liệu mẫu cho ann1_demo: lỗi rework, yêu cầu phản hồi lỗi / dữ liệu bị chặn & thông báo
+        ann1_rework = Job.objects.filter(project=project, annotator=users["ann1_demo"], status=JobStatus.REWORK).first()
+        if ann1_rework:
+            ann1_rework.target_object_count = 1210
+            ann1_rework.object_count = 1065
+            ann1_rework.rework_scope = ReworkScope.PARTIAL
+            ann1_rework.deadline = now + timedelta(hours=8)
+            ann1_rework.save(update_fields=["target_object_count", "object_count", "rework_scope", "deadline"])
+            cats = list(ErrorCategory.objects.filter(project=project))
+            if cats:
+                e1 = ReviewError.objects.create(
+                    job=ann1_rework, stage=ReviewStage.QC1, rework_round=0,
+                    category=cats[0], severity=Severity.MAJOR,
+                    location="Frame 214 · Object 38", description="Cuboid xe tải lệch đuôi ~0,4m",
+                    reported_by=users["qc1_demo"],
+                )
+                ReviewError.objects.create(
+                    job=ann1_rework, stage=ReviewStage.QC1, rework_round=0,
+                    category=cats[min(1, len(cats) - 1)], severity=Severity.CRITICAL,
+                    location="Frame 220 · Chưa có ID object", description="Thiếu người đi bộ sau cột đèn",
+                    reported_by=users["qc1_demo"],
+                )
+                AnnotatorRequest.objects.create(
+                    project=project, job=ann1_rework, review_error=e1,
+                    request_type=AnnotatorRequest.RequestType.ERROR_DISPUTE,
+                    status=AnnotatorRequest.Status.PENDING_TL,
+                    title=f"Không đồng ý lỗi '{e1.category.name}' frame 214",
+                    reason="Điểm point cloud đuôi xe bị nhiễu mưa.",
+                    progress_note="TL đang đối chiếu frame 214. Nếu chưa phân xử được, TL sẽ chuyển PM.",
+                    created_by=users["ann1_demo"], handler=users["tl_demo"], handler_role="TL",
+                )
+                UserNotification.objects.create(
+                    recipient=users["ann1_demo"], project=project, job=ann1_rework,
+                    category=UserNotification.Category.REWORK,
+                    title=f"{ann1_rework.name} bị trả sửa (vòng 1)",
+                    body="QC1 ghi 2 lỗi theo object-frame. Ưu tiên xử lý trước hạn.",
+                    action_url=f"/projects/{project.id}/annotator/jobs/{ann1_rework.id}",
+                    is_pinned_pending=True,
+                )
+
+        # Cập nhật target_object_count cho các job chưa có
+        for job in Job.objects.filter(project=project, target_object_count=0):
+            job.target_object_count = max(job.object_count, 1000)
+            job.save(update_fields=["target_object_count"])
+
+        # Lịch sử nộp bài vài ngày gần đây để biểu đồ dashboard & P2 có dữ liệu
+        sample_job = Job.objects.filter(project=project, annotator=users["ann1_demo"]).first()
+        if sample_job:
+            for days_ago, objs in [(5, 1080), (4, 1150), (3, 1010), (2, 1220), (1, 1190), (0, 980)]:
+                ev = ActivityLog.record(
+                    project=project, actor=users["ann1_demo"], action="job.status",
+                    target=sample_job, job=sample_job,
+                    before={"status": JobStatus.ANNOTATING},
+                    after={"status": JobStatus.PENDING_QC1, "event": "annotator.submit", "object_count": objs},
+                )
+                ActivityLog.objects.filter(pk=ev.pk).update(created_at=now - timedelta(days=days_ago))
         return project

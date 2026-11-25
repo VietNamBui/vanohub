@@ -1,6 +1,18 @@
 import { apiClient } from '../../../shared/api/client'
 import { cleanParams, type Paginated } from '../../../shared/api/types'
-import type { AnnotatorDashboard, AnnotatorJobTab, Job, JobDetail, JobFilters, QueueStage } from '../types'
+import type {
+  AnnotatorAnalytics,
+  AnnotatorAnalyticsRange,
+  AnnotatorDashboard,
+  AnnotatorJobTab,
+  AnnotatorQuickSearchResult,
+  AnnotatorRequest,
+  AnnotatorRequestType,
+  Job,
+  JobDetail,
+  JobFilters,
+  QueueStage,
+} from '../types'
 
 const p = (projectId: number, path: string) => `/projects/${projectId}/${path}`
 
@@ -70,6 +82,9 @@ export const listAnnotatorJobs = async (
 export const getAnnotatorJob = async (projectId: number, jobId: number) =>
   (await apiClient.get<JobDetail>(p(projectId, `annotator/jobs/${jobId}/`))).data
 
+export const claimAnnotatorJob = async (projectId: number) =>
+  (await apiClient.post<JobDetail>(p(projectId, 'annotator/jobs/claim/'), {})).data
+
 export const startAnnotatorJob = async (projectId: number, jobId: number, note = '') =>
   (await apiClient.post<JobDetail>(p(projectId, `annotator/jobs/${jobId}/start/`), { note })).data
 
@@ -79,5 +94,28 @@ export const submitAnnotatorJob = async (
   data: { note?: string; object_count?: number | null } = {},
 ) => (await apiClient.post<JobDetail>(p(projectId, `annotator/jobs/${jobId}/submit/`), data)).data
 
-export const getAnnotatorDashboard = async (projectId: number, period: string) =>
+export const getAnnotatorDashboard = async (projectId: number, period = 'week') =>
   (await apiClient.get<AnnotatorDashboard>(p(projectId, 'annotator/dashboard/'), { params: cleanParams({ period }) })).data
+
+export const getAnnotatorAnalytics = async (projectId: number, range: AnnotatorAnalyticsRange = '7d') =>
+  (await apiClient.get<AnnotatorAnalytics>(p(projectId, 'annotator/analytics/'), { params: { range } })).data
+
+export const listAnnotatorRequests = async (
+  projectId: number,
+  params: { request_type?: AnnotatorRequestType; status?: string; job?: number } = {},
+) =>
+  (await apiClient.get<AnnotatorRequest[]>(p(projectId, 'annotator/requests/'), { params: cleanParams(params) })).data
+
+export const createAnnotatorRequest = async (
+  projectId: number,
+  payload: {
+    job: number
+    review_error?: number | null
+    request_type: AnnotatorRequestType
+    title?: string
+    reason: string
+  },
+) => (await apiClient.post<AnnotatorRequest>(p(projectId, 'annotator/requests/'), payload)).data
+
+export const quickSearchAnnotator = async (projectId: number, q: string) =>
+  (await apiClient.get<AnnotatorQuickSearchResult>(p(projectId, 'annotator/search/'), { params: cleanParams({ q }) })).data

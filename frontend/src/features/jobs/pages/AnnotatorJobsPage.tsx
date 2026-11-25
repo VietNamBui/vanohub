@@ -1,160 +1,252 @@
-import { InfoCircle, SearchLg } from '@untitledui/icons'
+import { ArrowRight, Plus, SearchLg } from '@untitledui/icons'
+import dayjs from 'dayjs'
 import { useState } from 'react'
-import { Table } from '@/components/application/table/table'
+import { useNavigate } from 'react-router'
 import { Tabs } from '@/components/application/tabs/tabs'
+import { Badge, BadgeWithDot } from '@/components/base/badges/badges'
 import { Button } from '@/components/base/buttons/button'
 import { Input } from '@/components/base/input/input'
+import { ProgressBarBase } from '@/components/base/progress-indicators/progress-indicators'
 import { getErrorMessage } from '../../../shared/api/errors'
-import EmptyRow from '../../../shared/components/ui/EmptyRow'
 import PageState from '../../../shared/components/ui/PageState'
-import SectionCard from '../../../shared/components/ui/SectionCard'
 import { useAction } from '../../../shared/hooks/useAction'
 import { useRequest } from '../../../shared/hooks/useRequest'
-import { formatDateTime } from '../../../shared/utils/format'
+import { formatNumber } from '../../../shared/utils/format'
 import { useProject } from '../../projects/projectContext'
-import { listAnnotatorJobs, startAnnotatorJob, submitAnnotatorJob } from '../api'
-import AnnotatorJobPanel from '../components/AnnotatorJobPanel'
-import JobStatusBadge from '../components/JobStatusBadge'
-import type { AnnotatorJobTab, Job } from '../types'
+import { claimAnnotatorJob, getAnnotatorDashboard, listAnnotatorJobs } from '../api'
+import AnnotatorBreadcrumb from '../components/AnnotatorBreadcrumb'
+import AnnotatorJobDrawer from '../components/AnnotatorJobDrawer'
+import { formatDeadlineCountdown, JOB_STATUS_LABELS } from '../constants'
+import type { AnnotatorJobTab } from '../types'
 
 const TABS: { id: AnnotatorJobTab; label: string }[] = [
-  { id: 'todo', label: 'Cần làm' },
-  { id: 'rework', label: 'Rework' },
+  { id: 'active', label: 'Đang giữ' },
+  { id: 'rework', label: 'Cần sửa' },
   { id: 'submitted', label: 'Đã nộp' },
   { id: 'done', label: 'Hoàn tất' },
   { id: 'all', label: 'Tất cả' },
 ]
 
-/** Danh sách job được giao cho Annotator: bắt đầu làm, mở CVAT, nộp bài sang QC1 và xử lý Rework. */
+/** Trang "Job của tôi": hàng đợi ưu tiên DB06, nhận job mới (GV02), tiến độ TD03 và drawer xem nhanh. */
 export default function AnnotatorJobsPage() {
-  const { projectId } = useProject()
-  const [tab, setTab] = useState<AnnotatorJobTab>('todo')
+  const { projectId, project } = useProject()
+  const navigate = useNavigate()
+  const [tab, setTab] = useState<AnnotatorJobTab>('active')
   const [search, setSearch] = useState('')
   const [query, setQuery] = useState('')
   const [page, setPage] = useState(1)
   const [version, setVersion] = useState(0)
-  const [selectedId, setSelectedId] = useState<number | null>(null)
-  const { run } = useAction()
+  const [drawerJobId, setDrawerJobId] = useState<number | null>(null)
+  const { run, pending } = useAction()
 
   const jobs = useRequest(`annotator-jobs:${projectId}:${tab}:${query}:${page}:${version}`, () =>
     listAnnotatorJobs(projectId, { tab, search: query || undefined, page }),
   )
+  const dash = useRequest(`annotator-wip:${projectId}:${version}`, () => getAnnotatorDashboard(projectId, 'week'))
+
   const rows = jobs.data?.results ?? []
-  const selected = rows.find((j) => j.id === selectedId) ?? rows[0]
+  const activeCount = dash.data?.meta?.active_jobs_count ?? rows.filter((j) => ['pending_annotation', 'annotating', 'rework'].includes(j.status)).length
+  const wipLimit = dash.data?.meta?.wip_limit ?? 2
   const reload = () => setVersion((v) => v + 1)
-  const reset = (fn: () => void) => {
-    fn()
-    setPage(1)
-    setSelectedId(null)
-  }
 
-  async function quickStart(job: Job) {
-    if (await run(() => startAnnotatorJob(projectId, job.id), `Đã bắt đầu ${job.name}`)) reload()
-  }
-
-  async function quickSubmit(job: Job) {
-    if (await run(() => submitAnnotatorJob(projectId, job.id), `Đã nộp ${job.name} sang QC1`)) reload()
+  async function handleClaimNewJob() {
+    const claimed = await run(() => claimAnnotatorJob(projectId), 'Đã nhận job mới từ hàng chờ')
+    if (claimed) {
+      setTab('active')
+      setPage(1)
+      reload()
+    }
   }
 
   return (
-    <div className="mx-auto flex max-w-7xl flex-col gap-5 p-4 md:p-6">
-      <header>
-        <h1 className="text-display-xs font-semibold text-primary">Job của tôi</h1>
-        <p className="mt-1 text-sm text-tertiary">Bắt đầu làm, mở CVAT để gán nhãn, sau đó nộp bài sang hàng chờ QC1.</p>
+    <div className="mx-auto flex max-w-[1160px] flex-col gap-6 px-6 py-7">
+      <AnnotatorBreadcrumb projectId={projectId} items={[{ label: 'Job của tôi' }]} />
+
+      <header className="flex flex-wrap items-start justify-between gap-4">
+        <div>
+          <h1 className="text-[30px] leading-tight font-bold text-[#101828]">Job của tôi</h1>
+          <p className="mt-1 text-base text-[#475467]">
+            {project.name} · Đang giữ {activeCount}/{wipLimit} job
+          </p>
+        </div>
+
+        <Button
+          color="primary"
+          size="md"
+          iconLeading={Plus}
+          isLoading={pending}
+          onPress={handleClaimNewJob}
+        >
+          Nhận job mới
+        </Button>
       </header>
 
-      <div className="flex items-start gap-3 rounded-xl bg-brand-primary_alt p-4 ring-1 ring-brand ring-inset">
-        <InfoCircle className="mt-0.5 size-5 shrink-0 text-fg-brand-primary" />
-        <p className="text-sm text-secondary">
-          <span className="font-semibold">Quy trình:</span> Bắt đầu làm → gán nhãn trên CVAT → Nộp bài sang QC1.
-          Nếu bị trả Rework, mở chi tiết job để xem danh sách lỗi cần sửa trước khi nộp lại.
-        </p>
-      </div>
-
-      {jobs.error != null ? (
-        <SectionCard><PageState kind="error" description={getErrorMessage(jobs.error)} onRetry={jobs.retry} /></SectionCard>
-      ) : (
-        <div className="grid items-start gap-5 xl:grid-cols-5">
-          <SectionCard className="xl:col-span-3" bodyClassName="p-0">
-            <div className="flex flex-wrap items-center gap-3 border-b border-secondary p-4">
-              <Tabs selectedKey={tab} onSelectionChange={(k) => reset(() => setTab(k as AnnotatorJobTab))} className="w-auto">
-                <Tabs.List type="button-gray" size="sm" aria-label="Lọc trạng thái">
-                  {TABS.map((t) => <Tabs.Item key={t.id} id={t.id} label={t.label} />)}
-                </Tabs.List>
-              </Tabs>
-              <form className="min-w-48 flex-1" onSubmit={(e) => { e.preventDefault(); reset(() => setQuery(search.trim())) }}>
-                <Input size="sm" icon={SearchLg} aria-label="Tìm kiếm" placeholder="Tìm job, batch… (Enter)" value={search} onChange={setSearch} />
-              </form>
-            </div>
-
-            <Table
-              aria-label="Bảng job của annotator"
-              size="sm"
-              selectionMode="single"
-              selectionBehavior="replace"
-              selectedKeys={selected ? [selected.id] : []}
-              onSelectionChange={(keys) => keys !== 'all' && keys.size && setSelectedId(Number([...keys][0]))}
+      <section className="overflow-hidden rounded-xl border border-[#EAECF0] bg-white">
+        <div className="flex flex-wrap items-center justify-between gap-4 border-b border-[#EAECF0] px-6 py-5">
+          <div>
+            <h2 className="text-lg font-bold text-[#101828]">Hàng đợi của tôi</h2>
+            <p className="mt-0.5 text-sm text-[#475467]">Quá hạn → sắp hạn → còn lại · DB06</p>
+          </div>
+          <div className="flex flex-wrap items-center gap-3">
+            <Tabs
+              selectedKey={tab}
+              onSelectionChange={(k) => {
+                setTab(k as AnnotatorJobTab)
+                setPage(1)
+              }}
+              className="w-auto"
             >
-              <Table.Header>
-                <Table.Head id="job" label="Job" isRowHeader />
-                <Table.Head id="status" label="Trạng thái" />
-                <Table.Head id="deadline" label="Deadline" />
-                <Table.Head id="rework" label="Rework" />
-                <Table.Head id="actions" label="Thao tác" />
-              </Table.Header>
-              <Table.Body items={rows} renderEmptyState={() => (
-                <EmptyRow text={jobs.isLoading ? 'Đang tải…' : 'Không có job nào trong mục này'} />
-              )}>
-                {(job) => {
-                  const blocked = job.is_locked || job.is_escalated
-                  return (
-                    <Table.Row id={job.id} className="cursor-pointer">
-                      <Table.Cell>
-                        <div className="font-medium text-primary">{job.name}</div>
-                        <div className="text-xs text-tertiary">{job.dataset_name} / {job.batch_name}</div>
-                      </Table.Cell>
-                      <Table.Cell>
-                        <JobStatusBadge status={job.status} escalated={job.is_escalated} overdue={job.is_overdue} locked={job.is_locked} />
-                      </Table.Cell>
-                      <Table.Cell className="whitespace-nowrap">{formatDateTime(job.deadline)}</Table.Cell>
-                      <Table.Cell className="tabular-nums">{job.rework_round}/{job.max_rework_rounds}</Table.Cell>
-                      <Table.Cell>
-                        {!blocked && (job.status === 'pending_annotation' || job.status === 'rework') ? (
-                          <Button size="xs" color="secondary" onPress={() => quickStart(job)}>
-                            {job.status === 'rework' ? 'Sửa Rework' : 'Bắt đầu'}
-                          </Button>
-                        ) : !blocked && job.status === 'annotating' ? (
-                          <Button size="xs" color="primary" onPress={() => quickSubmit(job)}>Nộp QC1</Button>
-                        ) : (
-                          <span className="text-quaternary">—</span>
-                        )}
-                      </Table.Cell>
-                    </Table.Row>
-                  )
-                }}
-              </Table.Body>
-            </Table>
-
-            {jobs.data && jobs.data.count > rows.length && (
-              <div className="flex items-center justify-between border-t border-secondary px-4 py-3 text-sm text-tertiary">
-                <span>Trang {page} · {jobs.data.count} job</span>
-                <div className="flex gap-2">
-                  <Button size="xs" color="secondary" isDisabled={!jobs.data.previous} onPress={() => setPage((p) => p - 1)}>Trước</Button>
-                  <Button size="xs" color="secondary" isDisabled={!jobs.data.next} onPress={() => setPage((p) => p + 1)}>Sau</Button>
-                </div>
-              </div>
-            )}
-          </SectionCard>
-
-          <div className="xl:sticky xl:top-20 xl:col-span-2">
-            {selected ? (
-              <AnnotatorJobPanel key={selected.id} projectId={projectId} jobId={selected.id} version={version} onDone={reload} />
-            ) : (
-              <SectionCard><PageState kind="empty" title="Chọn một job" description="Chọn job trong bảng để mở CVAT, xem lỗi và nộp bài." /></SectionCard>
-            )}
+              <Tabs.List type="button-gray" size="sm" aria-label="Lọc hàng đợi">
+                {TABS.map((t) => (
+                  <Tabs.Item key={t.id} id={t.id} label={t.label} />
+                ))}
+              </Tabs.List>
+            </Tabs>
+            <form
+              className="w-56"
+              onSubmit={(e) => {
+                e.preventDefault()
+                setQuery(search.trim())
+                setPage(1)
+              }}
+            >
+              <Input
+                size="sm"
+                icon={SearchLg}
+                aria-label="Tìm job"
+                placeholder="Tìm mã job, batch…"
+                value={search}
+                onChange={setSearch}
+              />
+            </form>
           </div>
         </div>
-      )}
+
+        {jobs.error != null ? (
+          <div className="p-6">
+            <PageState kind="error" description={getErrorMessage(jobs.error)} onRetry={jobs.retry} />
+          </div>
+        ) : jobs.isLoading ? (
+          <div className="p-6">
+            <PageState kind="loading" />
+          </div>
+        ) : rows.length === 0 ? (
+          <div className="p-8">
+            <PageState
+              kind="empty"
+              title="Chưa có job nào trong mục này"
+              description='Bạn có thể đổi bộ lọc hoặc bấm "Nhận job mới" để nhận việc từ hàng chờ dự án.'
+            />
+          </div>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full min-w-[820px] text-left">
+              <thead className="border-b border-[#EAECF0] bg-[#F9FAFB] text-xs font-medium text-[#475467]">
+                <tr>
+                  <th className="px-6 py-3">Job</th>
+                  <th className="px-4 py-3">Trạng thái</th>
+                  <th className="px-4 py-3">Tiến độ · TD03</th>
+                  <th className="px-4 py-3">Hạn · DH02/DH04</th>
+                  <th className="px-4 py-3">Vòng sửa · RW01</th>
+                  <th className="px-6 py-3 text-right">Thao tác</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-[#EAECF0]">
+                {rows.map((job) => {
+                  const target = job.target_object_count || job.object_count
+                  const pct = job.progress_percent ?? 0
+                  const countdown = formatDeadlineCountdown(job.hours_remaining)
+                  const isRework = job.status === 'rework'
+                  const statusColor =
+                    isRework
+                      ? 'warning'
+                      : job.status === 'annotating'
+                        ? 'blue'
+                        : job.status === 'approved' || job.status === 'delivered'
+                          ? 'success'
+                          : 'gray'
+
+                  return (
+                    <tr
+                      key={job.id}
+                      onClick={() => setDrawerJobId(job.id)}
+                      className="cursor-pointer transition hover:bg-[#F9FAFB]"
+                    >
+                      <td className="px-6 py-4">
+                        <div className="text-sm font-bold text-[#101828]">{job.name}</div>
+                        <div className="mt-0.5 text-xs text-[#475467]">{job.batch_name}</div>
+                      </td>
+                      <td className="px-4 py-4">
+                        <div className="flex flex-wrap gap-1.5">
+                          <BadgeWithDot size="sm" type="pill-color" color={statusColor}>
+                            {isRework ? 'Cần sửa' : job.status === 'annotating' ? 'Đang làm' : JOB_STATUS_LABELS[job.status]}
+                          </BadgeWithDot>
+                          {job.is_escalated && (
+                            <Badge size="sm" type="pill-color" color="error">
+                              Cảnh báo vòng {job.rework_round}
+                            </Badge>
+                          )}
+                        </div>
+                      </td>
+                      <td className="w-60 px-4 py-4">
+                        <div className="mb-1.5 text-xs text-[#344054] tabular-nums">
+                          {pct}% · {formatNumber(job.object_count)}/{formatNumber(target)} object-frame
+                        </div>
+                        <ProgressBarBase value={pct} className="bg-[#EAECF0]" progressClassName="bg-[#7F56D9]" />
+                      </td>
+                      <td className="px-4 py-4">
+                        <div className="text-xs font-medium text-[#344054]">
+                          {job.deadline ? dayjs(job.deadline).format('DD/MM HH:mm') : 'Chưa đặt'}
+                        </div>
+                        {countdown && (
+                          <div className="mt-1">
+                            <Badge size="sm" type="pill-color" color={countdown.tone}>
+                              {countdown.text}
+                            </Badge>
+                          </div>
+                        )}
+                      </td>
+                      <td className="px-4 py-4">
+                        <BadgeWithDot size="sm" type="pill-color" color={job.rework_round > 0 ? 'warning' : 'gray'}>
+                          {job.rework_round}/{job.max_rework_rounds}
+                        </BadgeWithDot>
+                      </td>
+                      <td className="px-6 py-4 text-right" onClick={(e) => e.stopPropagation()}>
+                        <button
+                          type="button"
+                          onClick={() => navigate(`/projects/${projectId}/annotator/jobs/${job.id}`)}
+                          className="inline-flex cursor-pointer items-center gap-2 rounded-lg border border-[#E9D7FE] bg-[#F9F5FF] px-3.5 py-2 text-sm font-semibold text-[#6941C6] transition hover:bg-[#F4EBFF]"
+                        >
+                          Tiếp tục làm
+                          <ArrowRight className="size-4" />
+                        </button>
+                      </td>
+                    </tr>
+                  )
+                })}
+              </tbody>
+            </table>
+          </div>
+        )}
+
+        {jobs.data && jobs.data.count > rows.length && (
+          <div className="flex items-center justify-between border-t border-[#EAECF0] px-6 py-3.5 text-sm text-[#475467]">
+            <span>
+              Trang {page} · {jobs.data.count} job
+            </span>
+            <div className="flex gap-2">
+              <Button size="xs" color="secondary" isDisabled={!jobs.data.previous} onPress={() => setPage((p) => p - 1)}>
+                Trước
+              </Button>
+              <Button size="xs" color="secondary" isDisabled={!jobs.data.next} onPress={() => setPage((p) => p + 1)}>
+                Sau
+              </Button>
+            </div>
+          </div>
+        )}
+      </section>
+
+      <AnnotatorJobDrawer projectId={projectId} jobId={drawerJobId} onClose={() => setDrawerJobId(null)} />
     </div>
   )
 }

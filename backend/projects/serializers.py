@@ -6,7 +6,7 @@ from accounts.models import Role, expand_roles
 from accounts.permissions import get_project_capabilities
 from accounts.serializers import UserBriefSerializer
 
-from .models import ActivityLog, Announcement, Batch, Dataset, Delivery, Guideline, Project
+from .models import ActivityLog, Announcement, Batch, Dataset, Delivery, Guideline, Project, UserNotification
 
 
 class ProjectScopedSerializer(serializers.ModelSerializer):
@@ -68,7 +68,8 @@ class ProjectSettingsSerializer(serializers.ModelSerializer):
     class Meta:
         model = Project
         fields = [
-            "cvat_project_id", "max_rework_rounds", "sampling_method", "sampling_rate", "stratify_by",
+            "cvat_project_id", "max_rework_rounds", "annotator_wip_limit",
+            "sampling_method", "sampling_rate", "stratify_by",
             "quality_cl_threshold", "defect_rate_threshold",
             "kpi_annotation_target", "kpi_qc1_target", "kpi_qc2_target",
         ]
@@ -76,6 +77,11 @@ class ProjectSettingsSerializer(serializers.ModelSerializer):
     def validate_max_rework_rounds(self, value):
         if value < 1:
             raise serializers.ValidationError("Số vòng rework tối đa phải ≥ 1.")
+        return value
+
+    def validate_annotator_wip_limit(self, value):
+        if value < 1:
+            raise serializers.ValidationError("Giới hạn số job giữ cùng lúc phải ≥ 1.")
         return value
 
 
@@ -201,3 +207,20 @@ class GuidelineSerializer(serializers.ModelSerializer):
         model = Guideline
         fields = ["id", "version", "title", "content", "created_by", "created_at"]
         read_only_fields = ["version"]
+
+
+class UserNotificationSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = UserNotification
+        fields = [
+            "id",
+            "category",
+            "title",
+            "body",
+            "job",
+            "action_url",
+            "is_read",
+            "is_pinned_pending",
+            "created_at",
+        ]
+        read_only_fields = fields

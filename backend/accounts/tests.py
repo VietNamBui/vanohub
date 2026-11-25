@@ -73,3 +73,41 @@ class AuthApiTests(TestCase):
 
     def test_me_requires_authentication(self):
         self.assertEqual(self.client.get(reverse("me")).status_code, 401)
+
+    def test_patch_me_updates_profile_and_notification_preferences(self):
+        self.client.force_authenticate(self.user)
+        res = self.client.patch(
+            reverse("me"),
+            {
+                "full_name": "Hà Thị Lan",
+                "email": "lan.ha@annota.vn",
+                "timezone_name": "Asia/Ho_Chi_Minh",
+                "notify_rework": False,
+                "notify_qc_pass": True,
+            },
+            format="json",
+        )
+        self.assertEqual(res.status_code, 200, res.data)
+        self.assertEqual(res.data["first_name"], "Hà")
+        self.assertEqual(res.data["last_name"], "Thị Lan")
+        self.assertEqual(res.data["email"], "lan.ha@annota.vn")
+        self.assertEqual(res.data["timezone_name"], "Asia/Ho_Chi_Minh")
+        self.assertFalse(res.data["notify_rework"])
+
+    def test_change_password_validates_current_password(self):
+        self.client.force_authenticate(self.user)
+        bad = self.client.post(
+            reverse("change_password"),
+            {"current_password": "wrong", "new_password": "NewStrongPassword#2026"},
+            format="json",
+        )
+        self.assertEqual(bad.status_code, 400)
+
+        ok = self.client.post(
+            reverse("change_password"),
+            {"current_password": "secret-pw", "new_password": "NewStrongPassword#2026"},
+            format="json",
+        )
+        self.assertEqual(ok.status_code, 200, ok.data)
+        self.user.refresh_from_db()
+        self.assertTrue(self.user.check_password("NewStrongPassword#2026"))

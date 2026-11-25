@@ -3,8 +3,9 @@ from rest_framework import serializers
 from accounts.models import Role, User
 from accounts.serializers import UserBriefSerializer
 from projects.serializers import ActivityLogSerializer
+from quality.models import ReviewError
 
-from .models import Job
+from .models import AnnotatorRequest, Job
 
 
 class JobSerializer(serializers.ModelSerializer):
@@ -16,17 +17,53 @@ class JobSerializer(serializers.ModelSerializer):
     annotator = UserBriefSerializer(read_only=True)
     qc1_reviewer = UserBriefSerializer(read_only=True)
     is_overdue = serializers.BooleanField(read_only=True)
+    due_state = serializers.CharField(read_only=True)
+    hours_remaining = serializers.FloatField(read_only=True)
     max_rework_rounds = serializers.IntegerField(source="project.max_rework_rounds", read_only=True)
+    rework_scope_label = serializers.CharField(source="get_rework_scope_display", read_only=True)
+    progress_percent = serializers.IntegerField(read_only=True)
+    open_error_count = serializers.SerializerMethodField()
     cvat_url = serializers.CharField(read_only=True)
     qc2 = serializers.SerializerMethodField()
 
     class Meta:
         model = Job
         fields = [
-            "id", "name", "status", "status_label", "stage", "batch", "batch_name", "dataset", "dataset_name",
-            "annotator", "qc1_reviewer", "qc2", "deadline", "is_overdue", "rework_round", "max_rework_rounds",
-            "is_escalated", "is_locked", "frame_count", "object_count",
-            "cvat_job_id", "cvat_task_id", "cvat_stage", "cvat_state", "cvat_url", "updated_at",
+            "id",
+            "name",
+            "status",
+            "status_label",
+            "stage",
+            "batch",
+            "batch_name",
+            "dataset",
+            "dataset_name",
+            "annotator",
+            "qc1_reviewer",
+            "qc2",
+            "deadline",
+            "is_overdue",
+            "due_state",
+            "hours_remaining",
+            "rework_round",
+            "max_rework_rounds",
+            "rework_scope",
+            "rework_scope_label",
+            "is_escalated",
+            "is_locked",
+            "frame_count",
+            "object_count",
+            "target_object_count",
+            "progress_percent",
+            "open_error_count",
+            "started_at",
+            "submitted_at",
+            "cvat_job_id",
+            "cvat_task_id",
+            "cvat_stage",
+            "cvat_state",
+            "cvat_url",
+            "updated_at",
         ]
         read_only_fields = fields
 
@@ -41,6 +78,14 @@ class JobSerializer(serializers.ModelSerializer):
             "result": sample.result,
             "auditor": UserBriefSerializer(sample.auditor).data if sample.auditor else None,
         }
+
+    def get_open_error_count(self, job):
+        annotated = getattr(job, "_open_error_count", None)
+        if annotated is not None:
+            return annotated
+        if hasattr(job, "_prefetched_objects_cache") and "review_errors" in job._prefetched_objects_cache:
+            return len(job._prefetched_objects_cache["review_errors"])
+        return job.review_errors.count()
 
 
 def _open_sample(job):
@@ -122,3 +167,89 @@ class AnnotatorStartSerializer(serializers.Serializer):
 class AnnotatorSubmitSerializer(serializers.Serializer):
     note = serializers.CharField(allow_blank=True, required=False, default="")
     object_count = serializers.IntegerField(min_value=0, required=False, allow_null=True)
+
+
+class AnnotatorRequestSerializer(serializers.ModelSerializer):
+    job_name = serializers.CharField(source="job.name", read_only=True)
+    batch_name = serializers.CharField(source="job.batch.name", read_only=True)
+    request_type_label = serializers.CharField(source="get_request_type_display", read_only=True)
+    status_label = serializers.CharField(source="get_status_display", read_only=True)
+    error_category = serializers.CharField(source="review_error.category.name", read_only=True, default=None)
+    error_location = serializers.CharField(source="review_error.location", read_only=True, default="")
+    created_by = UserBriefSerializer(read_only=True)
+    handler = UserBriefSerializer(read_only=True)
+
+    class Meta:
+        model = AnnotatorRequest
+        fields = [
+            "id",
+            "job",
+            "job_name",
+            "batch_name",
+            "review_error",
+            "error_category",
+            "error_location",
+            "request_type",
+            "request_type_label",
+            "status",
+            "status_label",
+            "title",
+            "reason",
+            "progress_note",
+            "resolution_note",
+            "created_by",
+            "handler",
+            "handler_role",
+            "created_at",
+            "updated_at",
+            "resolved_at",
+        ]
+        read_only_fields = fields
+
+
+class AnnotatorRequestCreateSerializer(serializers.Serializer):
+    job = serializers.IntegerField()
+    review_error = serializers.IntegerField(required=False, allow_null=True)
+    request_type = serializers.ChoiceField(choices=AnnotatorRequest.RequestType.choices)
+    title = serializers.CharField(max_length=255, required=False, allow_blank=True, default="")
+    reason = serializers.CharField(min_length=3, max_length=2000)
+
+    def validate(self, attrs):
+        project = self.context["project"]
+        user = self.context["request"].user
+        job = Job.objects.select_related("batch").filter(pk=attrs["job"], project=project).first()
+        if not job:
+            raise serializers.ValidationError({"job": "Không tìm thấy job trong dự án."})
+        if job.annotator_id != user.id:
+            raise serializers.ValidationError({"job": "Bạn chỉ có thể gửi yêu cầu trên job được giao cho mình."})
+        attrs["job_obj"] = job
+
+        error_id = attrs.get("review_error")
+        review_error = None
+        if error_id is not None:
+            review_error = ReviewError.objects.select_related("category").filter(pk=error_id, job=job).first()
+            if not review_error:
+                raise serializers.ValidationError({"review_error": "Lỗi không thuộc job này."})
+        attrs["review_error_obj"] = review_error
+
+        if not attrs.get("title"):
+            if review_error:
+                loc = f" {review_error.location}" if review_error.location else ""
+                attrs["title"] = f"Không đồng ý lỗi '{review_error.category.name}'{loc}"[:255]
+            elif attrs["request_type"] == AnnotatorRequest.RequestType.ERROR_DISPUTE:
+                attrs["title"] = f"Phản hồi lỗi QC1 · {job.name}"
+            else:
+                attrs["title"] = attrs["reason"].strip().splitlines()[0][:255]
+        return attrs
+
+
+class AnnotatorRequestResolveSerializer(serializers.Serializer):
+    status = serializers.ChoiceField(
+        choices=[
+            AnnotatorRequest.Status.PENDING_PM,
+            AnnotatorRequest.Status.RESOLVED,
+            AnnotatorRequest.Status.REJECTED,
+        ]
+    )
+    progress_note = serializers.CharField(required=False, allow_blank=True, default="")
+    resolution_note = serializers.CharField(required=False, allow_blank=True, default="")
