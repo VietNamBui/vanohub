@@ -53,11 +53,11 @@ export default function BatchesPage() {
     let ok: unknown
     if (modal?.type === 'create') {
       ok = await run(() => createBatch(projectId, {
-        dataset: values.dataset!, name: values.name!, deadline: values.deadline?.toISOString() ?? null,
+        dataset: values.dataset!, name: values.name!, deadline: values.deadline?.isValid() ? values.deadline.toISOString() : null,
       }), 'Đã tạo batch')
     } else if (modal?.type === 'edit') {
       ok = await run(() => updateBatch(projectId, modal.batch.id, {
-        name: values.name, deadline: values.deadline?.toISOString() ?? null,
+        name: values.name, deadline: values.deadline?.isValid() ? values.deadline.toISOString() : null,
       }), 'Đã lưu batch')
     } else if (modal?.type === 'import') {
       const result = await run(() => importBatchFromCvat(projectId, modal.batch.id, values.cvat_task_id!))
@@ -80,7 +80,10 @@ export default function BatchesPage() {
 
   function open(state: ModalState) {
     form.resetFields()
-    if (state?.type === 'edit') form.setFieldsValue({ name: state.batch.name, deadline: state.batch.deadline ? dayjs(state.batch.deadline) : null })
+    if (state?.type === 'edit') {
+      const parsed = state.batch.deadline ? dayjs(state.batch.deadline) : null
+      form.setFieldsValue({ name: state.batch.name, deadline: parsed?.isValid() ? parsed : null })
+    }
     if (state?.type === 'create') form.setFieldsValue({ dataset })
     setModal(state)
   }
@@ -181,7 +184,21 @@ export default function BatchesPage() {
           {modal?.type !== 'import' && (
             <>
               <Form.Item name="name" label="Tên batch" rules={[{ required: true, message: 'Nhập tên' }]}><Input /></Form.Item>
-              <Form.Item name="deadline" label="Deadline"><DatePicker showTime={{ format: 'HH:mm' }} format="DD/MM/YYYY HH:mm" style={{ width: '100%' }} /></Form.Item>
+              <Form.Item
+                name="deadline"
+                label="Deadline"
+                extra="Giờ Việt Nam (UTC+7)."
+                rules={[
+                  {
+                    validator: (_, value) =>
+                      value == null || (dayjs.isDayjs(value) && value.isValid())
+                        ? Promise.resolve()
+                        : Promise.reject(new Error('Thời gian deadline không hợp lệ.')),
+                  },
+                ]}
+              >
+                <DatePicker showTime={{ format: 'HH:mm' }} format="DD/MM/YYYY HH:mm" style={{ width: '100%' }} />
+              </Form.Item>
             </>
           )}
           {modal?.type === 'import' && (

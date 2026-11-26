@@ -6,7 +6,6 @@ Chỉ số "tạm tính" (provisional) có ghi công thức đang dùng để nh
 
 from bisect import bisect_right
 from datetime import timedelta
-from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from django.db.models import Count, Q, Sum
 from django.db.models.functions import TruncDate
@@ -14,6 +13,7 @@ from django.utils import timezone
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
+from accounts.datetime_utils import app_timezone, format_rfc3339_utc
 from accounts.models import Role, RoleAssignment, User
 from accounts.permissions import Cap, ProjectScopedViewMixin
 from accounts.serializers import UserBriefSerializer
@@ -42,12 +42,8 @@ def _period_start(request):
     return timezone.now() - timedelta(days=days)
 
 
-def _user_timezone(user):
-    name = (getattr(user, "timezone_name", "") or "Asia/Ho_Chi_Minh").strip()
-    try:
-        return ZoneInfo(name)
-    except ZoneInfoNotFoundError:
-        return ZoneInfo("Asia/Ho_Chi_Minh")
+def _user_timezone(user=None):
+    return app_timezone()
 
 
 class ProjectOverviewView(ProjectScopedViewMixin, APIView):
@@ -89,11 +85,11 @@ class ProjectOverviewView(ProjectScopedViewMixin, APIView):
                            "message": f"{job.name} vượt số vòng rework ({job.rework_round})"})
         for job in jobs.filter(deadline__lt=now, status__in=OPEN_STATUSES).order_by("deadline")[:10]:
             alerts.append({"level": "warning", "type": "overdue", "job": job.id,
-                           "message": f"{job.name} quá hạn từ {timezone.localtime(job.deadline):%d/%m %H:%M}"})
+                           "message": f"{job.name} quá hạn từ {timezone.localtime(job.deadline, app_timezone()):%d/%m %H:%M}"})
         for job in jobs.filter(deadline__gte=now, deadline__lte=now + timedelta(hours=24),
                                status__in=OPEN_STATUSES).order_by("deadline")[:10]:
             alerts.append({"level": "info", "type": "due_soon", "job": job.id,
-                           "message": f"{job.name} đến hạn lúc {timezone.localtime(job.deadline):%d/%m %H:%M}"})
+                           "message": f"{job.name} đến hạn lúc {timezone.localtime(job.deadline, app_timezone()):%d/%m %H:%M}"})
 
         return Response({
             "counts": {
@@ -393,7 +389,7 @@ class AnnotatorDashboardView(ProjectScopedViewMixin, APIView):
                 "job_id": rework_job.id,
                 "job_name": rework_job.name,
                 "batch_name": rework_job.batch.name,
-                "deadline": rework_job.deadline,
+                "deadline": format_rfc3339_utc(rework_job.deadline),
                 "rework_round": rework_job.rework_round,
                 "max_rework_rounds": project.max_rework_rounds,
                 "rework_scope": rework_job.rework_scope,
@@ -516,7 +512,7 @@ class AnnotatorDashboardView(ProjectScopedViewMixin, APIView):
                     "name": j.name,
                     "batch_name": j.batch.name,
                     "status": j.status,
-                    "deadline": j.deadline,
+                    "deadline": format_rfc3339_utc(j.deadline),
                     "is_overdue": j.deadline < now,
                 }
                 for j in due_soon
@@ -524,7 +520,7 @@ class AnnotatorDashboardView(ProjectScopedViewMixin, APIView):
             "meta": {
                 "team_name": team_name,
                 "project_name": project.name,
-                "last_cvat_sync_at": last_sync,
+                "last_cvat_sync_at": format_rfc3339_utc(last_sync),
                 "wip_limit": project.annotator_wip_limit,
                 "active_jobs_count": active_jobs_count,
                 "active_object_frames": active_object_frames,

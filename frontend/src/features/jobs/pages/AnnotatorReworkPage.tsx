@@ -1,5 +1,4 @@
 import { ArrowRight } from '@untitledui/icons'
-import dayjs from 'dayjs'
 import { useState } from 'react'
 import { useNavigate } from 'react-router'
 import { Badge, BadgeWithDot } from '@/components/base/badges/badges'
@@ -7,6 +6,7 @@ import { Button } from '@/components/base/buttons/button'
 import { getErrorMessage } from '../../../shared/api/errors'
 import PageState from '../../../shared/components/ui/PageState'
 import { useRequest } from '../../../shared/hooks/useRequest'
+import { formatShortDateTime } from '../../../shared/utils/format'
 import { useProject } from '../../projects/projectContext'
 import { SEVERITY_LABELS } from '../../quality/constants'
 import type { Severity } from '../../quality/types'
@@ -84,7 +84,7 @@ export default function AnnotatorReworkPage() {
                       <h2 className="text-lg font-bold text-[#101828]">{job.name}</h2>
                       <p className="mt-1 text-sm text-[#475467]">
                         {job.batch_name}
-                        {job.deadline ? ` · Hạn sửa ${dayjs(job.deadline).format('DD/MM HH:mm')}` : ''}
+                        {job.deadline ? ` · Hạn sửa ${formatShortDateTime(job.deadline)}` : ''}
                         {countdown ? ` · ${countdown.text}` : ''}
                       </p>
                     </div>

@@ -1,5 +1,4 @@
 import { AlertTriangle, Check, CheckCircle, LinkExternal01 } from '@untitledui/icons'
-import dayjs from 'dayjs'
 import { useState } from 'react'
 import { useNavigate, useParams } from 'react-router'
 import { Badge, BadgeWithDot } from '@/components/base/badges/badges'
@@ -12,7 +11,7 @@ import FormDialog from '../../../shared/components/ui/FormDialog'
 import PageState from '../../../shared/components/ui/PageState'
 import { useAction } from '../../../shared/hooks/useAction'
 import { useRequest } from '../../../shared/hooks/useRequest'
-import { formatDateTime, formatNumber } from '../../../shared/utils/format'
+import { formatDateTime, formatNumber, formatShortDateTime } from '../../../shared/utils/format'
 import { listGuidelines } from '../../projects/api'
 import { useProject } from '../../projects/projectContext'
 import { SEVERITY_LABELS } from '../../quality/constants'
@@ -215,7 +214,7 @@ export default function AnnotatorJobDetailPage() {
               <div className="flex flex-wrap items-center gap-2.5">
                 <span className="text-xs text-[#344054]">
                   {job.deadline
-                    ? `Hạn sửa ${dayjs(job.deadline).format('DD/MM HH:mm')} · DH01/02`
+                    ? `Hạn sửa ${formatShortDateTime(job.deadline)} · DH01/02`
                     : 'Chưa đặt hạn · DH01/02'}
                 </span>
                 {countdown && (

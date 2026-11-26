@@ -2,6 +2,7 @@ from collections import Counter, defaultdict
 
 from rest_framework import serializers
 
+from accounts.datetime_utils import RFC3339DateTimeField
 from accounts.models import Role, User, expand_roles
 from accounts.permissions import get_project_capabilities
 from accounts.serializers import UserBriefSerializer
@@ -202,6 +203,7 @@ class DatasetSerializer(ProjectScopedSerializer):
 
 class BatchSerializer(ProjectScopedSerializer):
     dataset_name = serializers.CharField(source="dataset.name", read_only=True)
+    deadline = RFC3339DateTimeField(allow_null=True, required=False)
     job_count = serializers.IntegerField(read_only=True)
     done_count = serializers.IntegerField(read_only=True)
     qc1_passed_count = serializers.IntegerField(read_only=True, default=0)
@@ -322,6 +324,7 @@ class DeliverySerializer(ProjectScopedSerializer):
 
 class ActivityLogSerializer(serializers.ModelSerializer):
     actor = UserBriefSerializer(read_only=True)
+    created_at = RFC3339DateTimeField(read_only=True)
 
     class Meta:
         model = ActivityLog

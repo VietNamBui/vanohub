@@ -120,3 +120,11 @@ class AuthApiTests(TestCase):
             reverse("me"), {"avatar_url": "data:image/png;base64,iVBORw0KGgo="}, format="json"
         )
         self.assertEqual(ok_data.status_code, 200)
+
+    def test_patch_me_keeps_fixed_vietnam_timezone(self):
+        self.client.force_authenticate(self.user)
+        res = self.client.patch(reverse("me"), {"timezone_name": "Asia/Tokyo"}, format="json")
+        self.assertEqual(res.status_code, 200, res.data)
+        self.assertEqual(res.data["timezone_name"], "Asia/Ho_Chi_Minh")
+        self.user.refresh_from_db()
+        self.assertEqual(self.user.timezone_name, "Asia/Ho_Chi_Minh")

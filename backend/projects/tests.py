@@ -321,3 +321,37 @@ class ProjectCreateAndBatchConfirmQc2Tests(TestCase):
                 recipient=self.f.qc2, category=UserNotification.Category.REVIEW_NEEDED
             ).exists()
         )
+
+    def test_batch_deadline_activity_filters_and_notifications_use_rfc3339_utc(self):
+        # Batch deadline yêu cầu RFC 3339 kèm múi giờ và trả về UTC 'Z'
+        bad_batch = self.pm_client.post(
+            self.f.url("batches/"),
+            {"dataset": self.f.dataset.id, "name": "Batch Naive", "deadline": "2026-11-26T15:30:00"},
+            format="json",
+        )
+        self.assertEqual(bad_batch.status_code, 400)
+
+        ok_batch = self.pm_client.post(
+            self.f.url("batches/"),
+            {"dataset": self.f.dataset.id, "name": "Batch RFC", "deadline": "2026-11-26T15:30:00+07:00"},
+            format="json",
+        )
+        self.assertEqual(ok_batch.status_code, 201, ok_batch.data)
+        self.assertEqual(ok_batch.data["deadline"], "2026-11-26T08:30:00Z")
+
+        # ActivityLog filter trả 400 khi date_from/date_to sai định dạng hoặc ngược khoảng
+        self.assertEqual(self.pm_client.get(self.f.url("activity/?date_from=26/11/2026")).status_code, 400)
+        self.assertEqual(
+            self.pm_client.get(self.f.url("activity/?date_from=2026-11-28&date_to=2026-11-26")).status_code,
+            400,
+        )
+        ok_logs = self.pm_client.get(self.f.url("activity/?date_from=2026-01-01&date_to=2099-12-31"))
+        self.assertEqual(ok_logs.status_code, 200, ok_logs.data)
+
+        # Notifications API trả created_at dạng RFC 3339 UTC kết thúc bằng 'Z'
+        self.pm_client.post(self.f.url("announcements/"), {"content": "Kiểm tra UTC"}, format="json")
+        notifs = self.pm_client.get(self.f.url("notifications/"))
+        self.assertEqual(notifs.status_code, 200, notifs.data)
+        self.assertTrue(notifs.data["items"])
+        for item in notifs.data["items"]:
+            self.assertTrue(item["created_at"].endswith("Z"), item["created_at"])

@@ -53,6 +53,60 @@ class JobManagementTests(TestCase):
         self.assertEqual(self.pm.post(self.f.url("jobs/bulk-deadline/"), body, format="json").status_code, 200)
         self.assertEqual(self.pm.get(self.f.url("jobs/?overdue=1")).data["count"], 2)
 
+    def test_deadline_enforces_strict_rfc3339_and_normalizes_to_utc(self):
+        # Chấp nhận RFC 3339 kèm offset +07:00 và chuẩn hóa về UTC kết thúc bằng 'Z'
+        ok = self.pm.post(
+            self.f.url(f"jobs/{self.job.id}/deadline/"),
+            {"deadline": "2026-11-26T15:30:00+07:00", "note": "Gia hạn"},
+            format="json",
+        )
+        self.assertEqual(ok.status_code, 200, ok.data)
+        self.assertEqual(ok.data["deadline"], "2026-11-26T08:30:00Z")
+        log = ActivityLog.objects.filter(job=self.job, action="job.deadline").latest("id")
+        self.assertEqual(log.after["deadline"], "2026-11-26T08:30:00Z")
+
+        # Từ chối datetime thiếu múi giờ (naive), dấu cách, date-only, hoặc DD/MM/YYYY
+        for invalid in (
+            "2026-11-26T15:30:00",
+            "2026-11-26 15:30:00Z",
+            "2026-11-26",
+            "26/11/2026 15:30",
+        ):
+            res = self.pm.post(
+                self.f.url(f"jobs/{self.job.id}/deadline/"),
+                {"deadline": invalid},
+                format="json",
+            )
+            self.assertEqual(res.status_code, 400, f"Expected 400 for {invalid!r}, got {res.status_code}")
+
+    def test_deadline_query_filters_validate_iso_and_respect_user_timezone(self):
+        # 2026-11-26T18:00:00Z == 2026-11-27 01:00 ở Asia/Ho_Chi_Minh (UTC+7)
+        self.pm.post(
+            self.f.url(f"jobs/{self.job.id}/deadline/"),
+            {"deadline": "2026-11-26T18:00:00Z"},
+            format="json",
+        )
+        self.f.pm.timezone_name = "Asia/Ho_Chi_Minh"
+        self.f.pm.save(update_fields=["timezone_name"])
+
+        # Theo UTC+7, mốc này thuộc ngày 2026-11-27, không thuộc 2026-11-26
+        in_vn_27 = self.pm.get(self.f.url("jobs/?deadline_from=2026-11-27&deadline_to=2026-11-27"))
+        self.assertEqual(in_vn_27.status_code, 200, in_vn_27.data)
+        self.assertEqual(in_vn_27.data["count"], 1)
+        in_vn_26 = self.pm.get(self.f.url("jobs/?deadline_from=2026-11-26&deadline_to=2026-11-26"))
+        self.assertEqual(in_vn_26.status_code, 200, in_vn_26.data)
+        self.assertEqual(in_vn_26.data["count"], 0)
+
+        # Tham số sai định dạng / naive / ngược khoảng đều trả 400 (không bỏ qua âm thầm)
+        for qs in (
+            "deadline_from=not-a-date",
+            "deadline_from=2026-11-26T15:30:00",
+            "deadline_to=26/11/2026",
+            "deadline_from=2026-11-28&deadline_to=2026-11-27",
+        ):
+            res = self.pm.get(self.f.url(f"jobs/?{qs}"))
+            self.assertEqual(res.status_code, 400, f"Expected 400 for {qs!r}, got {res.status_code}")
+
     def test_resolve_escalation(self):
         self.job.is_escalated, self.job.rework_round = True, 3
         self.job.save()

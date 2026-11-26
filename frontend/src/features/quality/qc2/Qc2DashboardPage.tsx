@@ -1,5 +1,4 @@
 import { ArrowDown, ArrowUp, Download01 } from '@untitledui/icons'
-import dayjs from 'dayjs'
 import { useState } from 'react'
 import { Tabs } from '@/components/application/tabs/tabs'
 import { Button } from '@/components/base/buttons/button'
@@ -11,6 +10,7 @@ import PageState from '../../../shared/components/ui/PageState'
 import SectionCard from '../../../shared/components/ui/SectionCard'
 import StatCard from '../../../shared/components/ui/StatCard'
 import { useRequest } from '../../../shared/hooks/useRequest'
+import { formatCsvFileDate, formatCsvTimestamp, formatShortDate } from '../../../shared/utils/format'
 import { useProject } from '../../projects/projectContext'
 import { getQc2Summary } from '../api'
 import type { Qc2Summary, Qc2Window } from '../types'
@@ -146,7 +146,7 @@ export default function Qc2DashboardPage() {
               <BarChart
                 ariaLabel="Số job bị reject theo ngày"
                 data={data.trend.map((d) => ({
-                  label: dayjs(d.date).format('DD/MM'),
+                  label: formatShortDate(d.date),
                   value: d.rejected,
                   details: [`Reject: ${d.rejected}`, `Đã audit: ${d.audited}`, `Lỗi ghi nhận: ${d.errors}`],
                 }))}
@@ -197,7 +197,7 @@ function Delta({ current, previous, unit }: { current: number | null; previous: 
 /** Xuất bảng KPI + xu hướng ra CSV (mở được bằng Excel). */
 function exportCsv(data: Qc2Summary, projectName: string, periodLabel: string) {
   const rows: (string | number)[][] = [
-    ['Báo cáo QC2', projectName, `Kỳ: ${periodLabel}`, `Xuất lúc ${dayjs().format('DD/MM/YYYY HH:mm')}`],
+    ['Báo cáo QC2', projectName, `Kỳ: ${periodLabel}`, `Xuất lúc ${formatCsvTimestamp()}`],
     [],
     ['Chỉ số', 'Kỳ này', 'Kỳ trước'],
     ...KPI_ROWS.map((r) => [r.label, data.kpi.current[r.key] ?? '', data.kpi.previous[r.key] ?? '']),
@@ -209,8 +209,8 @@ function exportCsv(data: Qc2Summary, projectName: string, periodLabel: string) {
     ...data.progress_by_batch.map((b) => [b.batch, b.done, b.total]),
   ]
   const csv = rows.map((r) => r.map((c) => `"${String(c).replace(/"/g, '""')}"`).join(',')).join('\r\n')
-  const url = URL.createObjectURL(new Blob(['﻿' + csv], { type: 'text/csv;charset=utf-8' }))
-  const link = Object.assign(document.createElement('a'), { href: url, download: `bao-cao-qc2-${dayjs().format('YYYYMMDD')}.csv` })
+  const url = URL.createObjectURL(new Blob(['\ufeff' + csv], { type: 'text/csv;charset=utf-8' }))
+  const link = Object.assign(document.createElement('a'), { href: url, download: `bao-cao-qc2-${formatCsvFileDate()}.csv` })
   link.click()
   URL.revokeObjectURL(url)
 }

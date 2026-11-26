@@ -75,7 +75,6 @@ class ProfileUpdateSerializer(serializers.ModelSerializer):
             "email",
             "avatar_url",
             "cvat_username",
-            "timezone_name",
             "notify_rework",
             "notify_deadline",
             "notify_request_updates",

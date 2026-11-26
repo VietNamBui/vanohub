@@ -5,7 +5,6 @@ from datetime import timedelta
 from django.db import transaction
 from django.db.models import Count, Max, Prefetch, Q
 from django.utils import timezone
-from django.utils.dateparse import parse_date
 from rest_framework import mixins, status, viewsets
 from rest_framework.decorators import action
 from rest_framework.exceptions import NotFound, PermissionDenied, ValidationError
@@ -13,6 +12,7 @@ from rest_framework.pagination import PageNumberPagination
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
+from accounts.datetime_utils import format_rfc3339_utc, parse_query_date_range
 from accounts.models import Role, RoleAssignment, expand_roles
 from accounts.permissions import CAPABILITY_ROLES, Cap, ProjectScopedViewMixin
 from accounts.serializers import UserBriefSerializer
@@ -364,8 +364,8 @@ class BatchViewSet(ProjectScopedViewMixin, mixins.ListModelMixin, mixins.Retriev
                                after={"team": batch.team and batch.team.name})
         if batch.deadline != before_deadline:
             ActivityLog.record(project=self.project, actor=self.request.user, action="batch.deadline", target=batch,
-                               before={"deadline": before_deadline and before_deadline.isoformat()},
-                               after={"deadline": batch.deadline and batch.deadline.isoformat()})
+                               before={"deadline": format_rfc3339_utc(before_deadline)},
+                               after={"deadline": format_rfc3339_utc(batch.deadline)})
 
     @action(detail=True, methods=["post"])
     def lock(self, request, project_id, pk=None):
@@ -543,10 +543,16 @@ class ActivityLogViewSet(ProjectScopedViewMixin, viewsets.ReadOnlyModelViewSet):
             queryset = queryset.filter(actor_id=params["actor"])
         if params.get("action"):
             queryset = queryset.filter(action__startswith=params["action"])
-        if params.get("date_from") and parse_date(params["date_from"]):
-            queryset = queryset.filter(created_at__date__gte=parse_date(params["date_from"]))
-        if params.get("date_to") and parse_date(params["date_to"]):
-            queryset = queryset.filter(created_at__date__lte=parse_date(params["date_to"]))
+        date_from, date_to = parse_query_date_range(
+            params,
+            from_key="date_from",
+            to_key="date_to",
+            allow_datetime=True,
+        )
+        if date_from is not None:
+            queryset = queryset.filter(created_at__gte=date_from)
+        if date_to is not None:
+            queryset = queryset.filter(created_at__lte=date_to)
         return queryset
 
 
@@ -627,7 +633,7 @@ class ProjectNotificationsView(ProjectScopedViewMixin, APIView):
                 "action_url": n.action_url or (f"/projects/{self.project.id}/annotator/jobs/{n.job_id}" if n.job_id else ""),
                 "is_read": n.is_read,
                 "is_pinned_pending": n.is_pinned_pending,
-                "created_at": n.created_at.isoformat(),
+                "created_at": format_rfc3339_utc(n.created_at),
             })
 
         # 2. Cảnh báo job sắp / quá hạn (<= 24h) theo phạm vi từng vai trò
@@ -656,7 +662,7 @@ class ProjectNotificationsView(ProjectScopedViewMixin, APIView):
                     "action_url": action_url,
                     "is_read": False,
                     "is_pinned_pending": True,
-                    "created_at": job.updated_at.isoformat(),
+                    "created_at": format_rfc3339_utc(job.updated_at),
                 })
 
             if self.has_cap(Cap.ANNOTATE_JOBS):
@@ -731,7 +737,7 @@ class ProjectNotificationsView(ProjectScopedViewMixin, APIView):
                 "action_url": f"/projects/{self.project.id}/announcements",
                 "is_read": a.sender_id == user.id,
                 "is_pinned_pending": False,
-                "created_at": a.created_at.isoformat(),
+                "created_at": format_rfc3339_utc(a.created_at),
             })
 
         items.sort(key=lambda x: x["created_at"], reverse=True)

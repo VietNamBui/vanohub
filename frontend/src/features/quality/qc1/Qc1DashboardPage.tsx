@@ -1,5 +1,4 @@
 import { ArrowDown, ArrowUp, Download01 } from '@untitledui/icons'
-import dayjs from 'dayjs'
 import { useState } from 'react'
 import { Tabs } from '@/components/application/tabs/tabs'
 import { Button } from '@/components/base/buttons/button'
@@ -9,6 +8,7 @@ import PageState from '../../../shared/components/ui/PageState'
 import SectionCard from '../../../shared/components/ui/SectionCard'
 import StatCard from '../../../shared/components/ui/StatCard'
 import { useRequest } from '../../../shared/hooks/useRequest'
+import { formatCsvFileDate, formatCsvTimestamp, formatShortDate } from '../../../shared/utils/format'
 import { useProject } from '../../projects/projectContext'
 import { getQc1Summary } from '../api'
 import type { Qc1Summary, Qc1Window } from '../types'
@@ -130,7 +130,7 @@ export default function Qc1DashboardPage() {
               <BarChart
                 ariaLabel="Số job đã kiểm tra QC1 theo ngày"
                 data={data.trend.map((d) => ({
-                  label: dayjs(d.date).format('DD/MM'),
+                  label: formatShortDate(d.date),
                   value: d.reviewed,
                   details: [`Đã kiểm tra: ${d.reviewed}`, `Reject: ${d.rejected}`, `Lỗi ghi nhận: ${d.errors}`],
                 }))}
@@ -180,7 +180,7 @@ function Delta({ current, previous, unit }: { current: number | null; previous: 
 
 function exportCsv(data: Qc1Summary, projectName: string, periodLabel: string) {
   const rows: (string | number)[][] = [
-    ['Báo cáo QC1', projectName, `Kỳ: ${periodLabel}`, `Xuất lúc ${dayjs().format('DD/MM/YYYY HH:mm')}`],
+    ['Báo cáo QC1', projectName, `Kỳ: ${periodLabel}`, `Xuất lúc ${formatCsvTimestamp()}`],
     [],
     ['Chỉ số', 'Kỳ này', 'Kỳ trước'],
     ...KPI_ROWS.map((r) => [r.label, data.kpi.current[r.key] ?? '', data.kpi.previous[r.key] ?? '']),
@@ -190,7 +190,7 @@ function exportCsv(data: Qc1Summary, projectName: string, periodLabel: string) {
   ]
   const csv = rows.map((r) => r.map((c) => `"${String(c).replace(/"/g, '""')}"`).join(',')).join('\r\n')
   const url = URL.createObjectURL(new Blob(['\ufeff' + csv], { type: 'text/csv;charset=utf-8' }))
-  const link = Object.assign(document.createElement('a'), { href: url, download: `bao-cao-qc1-${dayjs().format('YYYYMMDD')}.csv` })
+  const link = Object.assign(document.createElement('a'), { href: url, download: `bao-cao-qc1-${formatCsvFileDate()}.csv` })
   link.click()
   URL.revokeObjectURL(url)
 }

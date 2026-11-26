@@ -11,6 +11,7 @@ from rest_framework.exceptions import PermissionDenied, ValidationError
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
+from accounts.datetime_utils import format_rfc3339_utc
 from accounts.models import Role, User
 from accounts.permissions import Cap, ProjectScopedViewMixin
 from accounts.serializers import UserBriefSerializer
@@ -505,7 +506,7 @@ class AuditStrategyView(ProjectScopedViewMixin, APIView):
             after = {k: v for k, v in (log.after or {}).items() if k in SAMPLING_FIELDS}
             if after:
                 before = {k: (log.before or {}).get(k) for k in after}
-                history.append({"at": log.created_at, "actor": UserBriefSerializer(log.actor).data if log.actor else None,
+                history.append({"at": format_rfc3339_utc(log.created_at), "actor": UserBriefSerializer(log.actor).data if log.actor else None,
                                 "before": before, "after": after})
         batches = (
             Batch.objects.filter(dataset__project=project, status=DataStatus.ACTIVE)

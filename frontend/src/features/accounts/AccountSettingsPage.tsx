@@ -3,7 +3,6 @@ import { useParams, useSearchParams } from 'react-router'
 import { Badge } from '@/components/base/badges/badges'
 import { Button } from '@/components/base/buttons/button'
 import { Input } from '@/components/base/input/input'
-import { NativeSelect } from '@/components/base/select/select-native'
 import { Toggle } from '@/components/base/toggle/toggle'
 import { useAction } from '../../shared/hooks/useAction'
 import { ROLE_LABELS, type Role } from '../../shared/types/roles'
@@ -14,14 +13,6 @@ import { useAuth } from '../auth/useAuth'
 import ProjectBreadcrumb from '../../shared/components/ui/ProjectBreadcrumb'
 
 type SettingsTab = 'profile' | 'security' | 'notifications'
-
-const TIMEZONE_OPTIONS = [
-  { value: 'Asia/Ho_Chi_Minh', label: '(GMT+07:00) Hà Nội' },
-  { value: 'Asia/Bangkok', label: '(GMT+07:00) Bangkok' },
-  { value: 'Asia/Singapore', label: '(GMT+08:00) Singapore' },
-  { value: 'Asia/Tokyo', label: '(GMT+09:00) Tokyo' },
-  { value: 'UTC', label: '(GMT+00:00) UTC' },
-]
 
 function initialsOf(name?: string) {
   if (!name) return '?'
@@ -48,7 +39,7 @@ export default function AccountSettingsPage() {
     setSearchParams({ tab: next }, { replace: true })
   }
 
-  const userSyncKey = `${user?.id ?? 0}:${user?.email ?? ''}:${user?.timezone_name ?? ''}:${user?.avatar_url ?? ''}:${getFullName(user)}`
+  const userSyncKey = `${user?.id ?? 0}:${user?.email ?? ''}:${user?.avatar_url ?? ''}:${getFullName(user)}`
   const notifSyncKey = `${user?.id ?? 0}:${user?.notify_rework}:${user?.notify_deadline}:${user?.notify_request_updates}:${user?.notify_qc_pass}`
 
   const scopedRoles: Role[] = (user?.role_assignments ?? [])
@@ -134,7 +125,6 @@ function ProfileTab({
   const [email, setEmail] = useState(user?.email ?? '')
   const [avatarUrl, setAvatarUrl] = useState(user?.avatar_url ?? '')
   const [avatarError, setAvatarError] = useState<string | null>(null)
-  const [timezoneName, setTimezoneName] = useState(user?.timezone_name || 'Asia/Ho_Chi_Minh')
 
   function handleAvatarFile(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0]
@@ -170,7 +160,6 @@ function ProfileTab({
           full_name: fullName.trim(),
           email: email.trim(),
           avatar_url: avatarUrl,
-          timezone_name: timezoneName,
         }),
       'Đã lưu thay đổi hồ sơ',
     )
@@ -181,7 +170,6 @@ function ProfileTab({
     setFullName(initialName)
     setEmail(user?.email ?? '')
     setAvatarUrl(user?.avatar_url ?? '')
-    setTimezoneName(user?.timezone_name || 'Asia/Ho_Chi_Minh')
   }
 
   return (
@@ -251,12 +239,11 @@ function ProfileTab({
 
         <div className="grid grid-cols-1 gap-4 py-5 md:grid-cols-12 md:items-center">
           <label className="text-sm font-semibold text-[#344054] md:col-span-4">Múi giờ</label>
-          <div className="max-w-[480px] md:col-span-8">
-            <NativeSelect
-              value={timezoneName}
-              onChange={(e) => setTimezoneName(e.target.value)}
-              options={TIMEZONE_OPTIONS}
-            />
+          <div className="flex flex-wrap items-center gap-3 md:col-span-8">
+            <Badge size="md" type="pill-color" color="gray">
+              (UTC+07:00) Việt Nam
+            </Badge>
+            <span className="text-sm text-[#475467]">Asia/Ho_Chi_Minh · cố định toàn hệ thống</span>
           </div>
         </div>
       </div>

@@ -1,5 +1,4 @@
 import { ArrowRight, Plus, SearchLg } from '@untitledui/icons'
-import dayjs from 'dayjs'
 import { useState } from 'react'
 import { useNavigate } from 'react-router'
 import { Tabs } from '@/components/application/tabs/tabs'
@@ -11,7 +10,7 @@ import { getErrorMessage } from '../../../shared/api/errors'
 import PageState from '../../../shared/components/ui/PageState'
 import { useAction } from '../../../shared/hooks/useAction'
 import { useRequest } from '../../../shared/hooks/useRequest'
-import { formatNumber } from '../../../shared/utils/format'
+import { formatNumber, formatShortDateTime } from '../../../shared/utils/format'
 import { useProject } from '../../projects/projectContext'
 import { claimAnnotatorJob, getAnnotatorDashboard, listAnnotatorJobs } from '../api'
 import AnnotatorBreadcrumb from '../components/AnnotatorBreadcrumb'
@@ -196,7 +195,7 @@ export default function AnnotatorJobsPage() {
                       </td>
                       <td className="px-4 py-4">
                         <div className="text-xs font-medium text-[#344054]">
-                          {job.deadline ? dayjs(job.deadline).format('DD/MM HH:mm') : 'Chưa đặt'}
+                          {job.deadline ? formatShortDateTime(job.deadline) : 'Chưa đặt'}
                         </div>
                         {countdown && (
                           <div className="mt-1">

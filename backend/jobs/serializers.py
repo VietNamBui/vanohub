@@ -1,5 +1,6 @@
 from rest_framework import serializers
 
+from accounts.datetime_utils import RFC3339DateTimeField
 from accounts.models import Role, User
 from accounts.serializers import UserBriefSerializer
 from projects.serializers import ActivityLogSerializer
@@ -16,6 +17,10 @@ class JobSerializer(serializers.ModelSerializer):
     dataset_name = serializers.CharField(source="batch.dataset.name", read_only=True)
     annotator = UserBriefSerializer(read_only=True)
     qc1_reviewer = UserBriefSerializer(read_only=True)
+    deadline = RFC3339DateTimeField(read_only=True)
+    started_at = RFC3339DateTimeField(read_only=True)
+    submitted_at = RFC3339DateTimeField(read_only=True)
+    updated_at = RFC3339DateTimeField(read_only=True)
     is_overdue = serializers.BooleanField(read_only=True)
     due_state = serializers.CharField(read_only=True)
     hours_remaining = serializers.FloatField(read_only=True)
@@ -107,7 +112,7 @@ class ReviewErrorBriefSerializer(serializers.Serializer):
     location = serializers.CharField()
     description = serializers.CharField()
     reported_by = UserBriefSerializer()
-    created_at = serializers.DateTimeField()
+    created_at = RFC3339DateTimeField()
 
 
 class JobWithErrorsSerializer(JobSerializer):
@@ -169,7 +174,7 @@ class AssignSerializer(serializers.Serializer):
 
 
 class DeadlineSerializer(serializers.Serializer):
-    deadline = serializers.DateTimeField(allow_null=True)
+    deadline = RFC3339DateTimeField(allow_null=True)
     note = serializers.CharField(allow_blank=True, required=False, default="")
 
 
@@ -212,6 +217,9 @@ class AnnotatorRequestSerializer(serializers.ModelSerializer):
     error_location = serializers.CharField(source="review_error.location", read_only=True, default="")
     created_by = UserBriefSerializer(read_only=True)
     handler = UserBriefSerializer(read_only=True)
+    created_at = RFC3339DateTimeField(read_only=True)
+    updated_at = RFC3339DateTimeField(read_only=True)
+    resolved_at = RFC3339DateTimeField(read_only=True)
 
     class Meta:
         model = AnnotatorRequest

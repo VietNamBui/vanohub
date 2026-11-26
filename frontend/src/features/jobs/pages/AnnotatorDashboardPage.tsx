@@ -1,5 +1,4 @@
 import { AlertTriangle, ArrowRight, CheckCircle, Clock } from '@untitledui/icons'
-import dayjs from 'dayjs'
 import { useState } from 'react'
 import { Link, useNavigate } from 'react-router'
 import { Badge, BadgeWithDot } from '@/components/base/badges/badges'
@@ -8,7 +7,12 @@ import { ProgressBarBase } from '@/components/base/progress-indicators/progress-
 import { getErrorMessage } from '../../../shared/api/errors'
 import PageState from '../../../shared/components/ui/PageState'
 import { useRequest } from '../../../shared/hooks/useRequest'
-import { formatNumber } from '../../../shared/utils/format'
+import {
+  formatNumber,
+  formatShortDateTime,
+  formatTimeFirstDateTime,
+  getCurrentHourVN,
+} from '../../../shared/utils/format'
 import { useAuth } from '../../auth/useAuth'
 import { useProject } from '../../projects/projectContext'
 import { SEVERITY_LABELS } from '../../quality/constants'
@@ -20,7 +24,7 @@ import { formatDeadlineCountdown, JOB_STATUS_LABELS } from '../constants'
 import type { AnnotatorDailyResult, AnnotatorRequestStatus } from '../types'
 
 function getGreeting() {
-  const hour = new Date().getHours()
+  const hour = getCurrentHourVN()
   if (hour < 12) return 'Chào buổi sáng'
   if (hour < 18) return 'Chào buổi chiều'
   return 'Chào buổi tối'
@@ -64,8 +68,8 @@ export default function AnnotatorDashboardPage() {
 
   const firstName = getShortName(user?.full_name, user?.first_name, user?.username)
   const syncText = data?.meta?.last_cvat_sync_at
-    ? `đồng bộ CVAT lần cuối ${dayjs(data.meta.last_cvat_sync_at).format('HH:mm · DD/MM/YYYY')}`
-    : 'giờ Việt Nam'
+    ? `đồng bộ CVAT lần cuối ${formatTimeFirstDateTime(data.meta.last_cvat_sync_at)}`
+    : 'giờ Việt Nam (UTC+7)'
 
   return (
     <div className="mx-auto flex max-w-[1160px] flex-col gap-6 px-6 py-7">
@@ -242,7 +246,7 @@ export default function AnnotatorDashboardPage() {
                           </td>
                           <td className="px-4 py-4">
                             <div className="text-xs font-medium text-[#344054]">
-                              {job.deadline ? dayjs(job.deadline).format('DD/MM HH:mm') : 'Chưa đặt'}
+                              {job.deadline ? formatShortDateTime(job.deadline) : 'Chưa đặt'}
                             </div>
                             {countdown && (
                               <div className="mt-1">
@@ -295,7 +299,7 @@ export default function AnnotatorDashboardPage() {
                   <>
                     <p className="mt-1 text-sm text-[#475467]">
                       {data.rework_focus.job_name}
-                      {data.rework_focus.deadline ? ` · hạn ${dayjs(data.rework_focus.deadline).format('DD/MM HH:mm')}` : ''} · lỗi theo object-frame (CL04 · RW01 · RW04)
+                      {data.rework_focus.deadline ? ` · hạn ${formatShortDateTime(data.rework_focus.deadline)}` : ''} · lỗi theo object-frame (CL04 · RW01 · RW04)
                     </p>
 
                     <div className="mt-4 grid grid-cols-3 gap-3">

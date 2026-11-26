@@ -127,6 +127,9 @@ LANGUAGE_CODE = 'en-us'
 
 TIME_ZONE = 'UTC'
 
+# Múi giờ nghiệp vụ cố định cho vận hành nội bộ Việt Nam (cắt ngày KPI/báo cáo).
+APP_TIME_ZONE = 'Asia/Ho_Chi_Minh'
+
 USE_I18N = True
 
 USE_TZ = True
@@ -163,6 +166,11 @@ REST_FRAMEWORK = {
     'DEFAULT_PERMISSION_CLASSES': [
         'rest_framework.permissions.IsAuthenticated',
     ],
+    # Hợp đồng API chuẩn ISO 8601 / RFC 3339, lưu trữ UTC (TIME_ZONE='UTC', USE_TZ=True).
+    'DATETIME_FORMAT': 'iso-8601',
+    'DATETIME_INPUT_FORMATS': ['iso-8601'],
+    'DATE_FORMAT': 'iso-8601',
+    'DATE_INPUT_FORMATS': ['iso-8601'],
 }
 
 SIMPLE_JWT = {

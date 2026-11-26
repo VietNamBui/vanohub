@@ -24,13 +24,26 @@ export default function DeadlineModal({ open, title, initial, confirmLoading, on
       destroyOnHidden
     >
       <Form
+        key={initial ?? ''}
         form={form}
         layout="vertical"
         preserve={false}
-        initialValues={{ deadline: initial ? dayjs(initial) : null, note: '' }}
-        onFinish={(v) => onSubmit(v.deadline ? v.deadline.toISOString() : null, v.note ?? '')}
+        initialValues={{ deadline: initial && dayjs(initial).isValid() ? dayjs(initial) : null, note: '' }}
+        onFinish={(v) => onSubmit(v.deadline?.isValid() ? v.deadline.toISOString() : null, v.note ?? '')}
       >
-        <Form.Item name="deadline" label="Deadline" extra="Để trống để bỏ deadline.">
+        <Form.Item
+          name="deadline"
+          label="Deadline"
+          extra="Giờ Việt Nam (UTC+7). Để trống để bỏ deadline."
+          rules={[
+            {
+              validator: (_, value) =>
+                value == null || (dayjs.isDayjs(value) && value.isValid())
+                  ? Promise.resolve()
+                  : Promise.reject(new Error('Thời gian deadline không hợp lệ.')),
+            },
+          ]}
+        >
           <DatePicker showTime={{ format: 'HH:mm' }} format="DD/MM/YYYY HH:mm" style={{ width: '100%' }} />
         </Form.Item>
         <Form.Item name="note" label="Ghi chú">

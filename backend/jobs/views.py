@@ -3,13 +3,13 @@ from datetime import timedelta
 from django.db import transaction
 from django.db.models import Case, Count, F, IntegerField, Prefetch, Q, When
 from django.utils import timezone
-from django.utils.dateparse import parse_date, parse_datetime
 from rest_framework import mixins, status, viewsets
 from rest_framework.decorators import action
 from rest_framework.exceptions import NotFound, PermissionDenied, ValidationError
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
+from accounts.datetime_utils import format_rfc3339_utc, parse_query_date_range
 from accounts.models import Role, RoleAssignment, User
 from accounts.permissions import Cap, ProjectScopedViewMixin
 from projects.models import ActivityLog, DataStatus, EscalationPolicy, UserNotification
@@ -43,7 +43,7 @@ from .serializers import (
 
 
 def _iso(value):
-    return value.isoformat() if value else None
+    return format_rfc3339_utc(value)
 
 
 def _base_job_queryset(project):
@@ -265,18 +265,16 @@ class JobViewSet(ProjectScopedViewMixin, mixins.ListModelMixin, mixins.RetrieveM
             queryset = queryset.filter(rework_round__gte=int(p["min_rework"]))
         if p.get("max_rework") and p["max_rework"].isdigit():
             queryset = queryset.filter(rework_round__lte=int(p["max_rework"]))
-        if p.get("deadline_from"):
-            dt = parse_datetime(p["deadline_from"])
-            if dt:
-                queryset = queryset.filter(deadline__gte=dt)
-            elif parse_date(p["deadline_from"]):
-                queryset = queryset.filter(deadline__date__gte=parse_date(p["deadline_from"]))
-        if p.get("deadline_to"):
-            dt = parse_datetime(p["deadline_to"])
-            if dt:
-                queryset = queryset.filter(deadline__lte=dt)
-            elif parse_date(p["deadline_to"]):
-                queryset = queryset.filter(deadline__date__lte=parse_date(p["deadline_to"]))
+        deadline_from, deadline_to = parse_query_date_range(
+            p,
+            from_key="deadline_from",
+            to_key="deadline_to",
+            allow_datetime=True,
+        )
+        if deadline_from is not None:
+            queryset = queryset.filter(deadline__gte=deadline_from)
+        if deadline_to is not None:
+            queryset = queryset.filter(deadline__lte=deadline_to)
         if p.get("escalated") == "1":
             queryset = queryset.filter(is_escalated=True)
         if p.get("locked") == "1":
