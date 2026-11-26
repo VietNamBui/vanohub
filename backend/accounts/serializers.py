@@ -27,12 +27,8 @@ class RoleAssignmentSerializer(serializers.ModelSerializer):
 class CurrentUserSerializer(serializers.ModelSerializer):
     """Thông tin của người đang đăng nhập, dùng cho GET /api/auth/me/."""
 
-    is_director = serializers.SerializerMethodField()
     role_assignments = RoleAssignmentSerializer(many=True, read_only=True)
 
     class Meta:
         model = User
-        fields = ["id", "username", "first_name", "last_name", "email", "is_director", "role_assignments"]
-
-    def get_is_director(self, user):
-        return user.is_director()
+        fields = ["id", "username", "first_name", "last_name", "email", "role_assignments"]

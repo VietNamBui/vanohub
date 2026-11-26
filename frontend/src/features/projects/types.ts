@@ -15,18 +15,18 @@ export interface ProjectDetail extends ProjectSummary {
   member_counts: Partial<Record<Role, number>>
   member_total: number
   my_capabilities: Capability[]
-  cvat_project_id: number | null
+  /** CVAT organization ứng với "Organization" này (model Project). */
+  cvat_org_id: number | null
+  cvat_org_slug: string
 }
 
 export type SamplingMethod = 'random' | 'stratified'
 export type StratifyBy = 'annotator' | 'qc1_reviewer' | 'dataset'
 
 export interface ProjectSettings {
-  cvat_project_id: number | null
   max_rework_rounds: number
-  sampling_method: SamplingMethod
+  /** % số frame của mỗi job QC2 kiểm (mọi job qua QC1 đều được kiểm). */
   sampling_rate: number
-  stratify_by: StratifyBy
   quality_cl_threshold: string | null
   defect_rate_threshold: string | null
   kpi_annotation_target: number | null
@@ -37,33 +37,71 @@ export interface ProjectSettings {
 export interface Member {
   user: UserBrief
   roles: Role[]
+  /** Vai trò gán trực tiếp (không gồm vai trò đi kèm như QC2 của PM) — chỉ những vai trò này gỡ được. */
+  direct_roles: Role[]
   team: { id: number; name: string } | null
   active_jobs: number
+  /** Đã liên kết tài khoản CVAT chưa — chưa thì job vẫn giao được, CVAT được đồng bộ sau. */
+  cvat_linked: boolean
+  cvat_username: string | null
+  /** Còn mật khẩu tạm do hệ thống cấp (người dùng chưa tự đổi). */
+  has_initial_password: boolean
+}
+
+export interface CreateMemberInput {
+  full_name: string
+  username?: string
+  email?: string
+  roles: Role[]
+  team?: number | null
+}
+
+/** Kết quả tạo tài khoản / cấp lại mật khẩu: mật khẩu tạm dạng rõ. */
+export interface MemberCredential {
+  username: string
+  password: string | null
+  /** initial: còn mật khẩu tạm · changed: người dùng đã tự đổi · unreadable: không giải mã được → cấp lại */
+  status: 'initial' | 'changed' | 'unreadable'
+}
+
+export interface CreatedMember {
+  user: UserBrief
+  username: string
+  password: string
+  roles: Role[]
+  team: { id: number; name: string } | null
 }
 
 export type DataStatus = 'active' | 'locked' | 'delivered'
 
+/**
+ * ÁNH XẠ (chốt 2026-11-25) — tên kiểu giữ như backend, giao diện hiển thị tên CVAT:
+ *   ProjectDetail/ProjectSummary = "Organization" · Dataset = "Project" (CVAT project) · Batch = "Task" (CVAT task)
+ */
 export interface Dataset {
   id: number
   name: string
   description: string
   status: DataStatus
+  cvat_project_id: number | null
+  last_synced_at: string | null
   created_at: string
-  batch_count: number
+  task_count: number
   job_count: number
   done_count: number
 }
 
+/** "Task" trên giao diện = một CVAT task. PM đặt deadline (job nhận theo) và team phụ trách. */
 export interface Batch {
   id: number
+  name: string
   dataset: number
   dataset_name: string
-  name: string
+  cvat_task_id: number | null
   status: DataStatus
   deadline: string | null
   team: number | null
   team_name: string | null
-  cvat_task_id: number | null
   last_synced_at: string | null
   created_at: string
   job_count: number
@@ -72,26 +110,31 @@ export interface Batch {
   escalated_count: number
 }
 
-export interface Delivery {
+export interface CvatLabel {
   id: number
-  batch: number
-  batch_name: string
-  dataset_name: string
-  note: string
-  client_feedback: string
-  delivered_by: UserBrief | null
-  delivered_at: string
-  job_count: number
+  name: string
+  color: string | null
+  type: string | null
 }
 
-export interface DeliveryCandidate {
-  batch: number
-  batch_name: string
-  dataset_name: string
-  job_count: number
-  approved_count: number
-  open_audits: number
-  ready: boolean
+export interface ProjectSyncResult {
+  projects: number
+  projects_created: number
+  tasks: number
+  tasks_created: number
+  jobs_created: number
+  jobs_updated: number
+  assignees_pushed: number
+  waiting_link: number
+  assignee_error?: string
+}
+
+export interface ProjectsSyncResult {
+  created: string[]
+  updated: string[]
+  pm_added: { organization: string; user: string }[]
+  members_added: { organization: string; user: string }[]
+  waiting: { cvat_org_id: number; name: string; reason: string }[]
 }
 
 export interface ActivityLog {
@@ -129,7 +172,6 @@ export interface Guideline {
 
 export interface PermissionMatrix {
   capabilities: Record<Capability, Role[]>
-  director_capabilities: Capability[]
   implied_roles: Partial<Record<Role, Role[]>>
 }
 

@@ -73,13 +73,14 @@ class JobQc2ColumnTests(TestCase):
     def test_job_list_exposes_open_audit_sample_auditor(self):
         from accounts.testing import ProjectFixture
 
+        from quality.qc2 import ensure_qc2_sample
+
         f = ProjectFixture()
-        jobs = [f.job() for _ in range(4)]
+        waiting = [f.job() for _ in range(2)]
+        in_qc1 = f.job(status=JobStatus.PENDING_QC1)
+        for job in waiting + [in_qc1]:
+            ensure_qc2_sample(job)
         pm = f.client(f.pm)
-        audit = pm.post(f.url("audits/"), {"batch": f.batch.id, "auditors": [f.qc2.id]}, format="json")
-        self.assertEqual(audit.status_code, 201, audit.data)
         rows = {r["id"]: r for r in pm.get(f.url("jobs/")).data["results"]}
-        sampled = [r for r in rows.values() if r["qc2"]]
-        self.assertEqual(len(sampled), 2)  # 50% của 4
-        self.assertEqual(sampled[0]["qc2"]["auditor"]["id"], f.qc2.id)
-        self.assertEqual(len([j for j in jobs if rows[j.id]["qc2"] is None]), 2)
+        self.assertEqual([rows[j.id]["qc2"]["auditor"]["id"] for j in waiting], [f.qc2.id, f.qc2.id])
+        self.assertIsNone(rows[in_qc1.id]["qc2"])  # chưa tới QC2 → chưa có lượt kiểm

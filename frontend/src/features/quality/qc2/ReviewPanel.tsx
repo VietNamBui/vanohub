@@ -39,7 +39,7 @@ export default function ReviewPanel({ projectId, sample, conflict, onDone }: Pro
   return (
     <SectionCard
       title={job.name}
-      description={`${job.batch_name} · Audit #${sample.audit}${sample.stratum ? ` · nhóm ${sample.stratum}` : ''}`}
+      description={`${job.dataset_name} / ${job.batch_name}${sample.rework_round ? ` · vòng rework ${sample.rework_round}` : ''}`}
       actions={job.cvat_url ? (
         <Button size="sm" color="secondary" iconTrailing={LinkExternal01} href={job.cvat_url} target="_blank" rel="noreferrer">Mở trong CVAT</Button>
       ) : <span className="text-sm text-quaternary">Chưa liên kết CVAT</span>}
@@ -50,6 +50,8 @@ export default function ReviewPanel({ projectId, sample, conflict, onDone }: Pro
         <Info label="Object / frame" value={`${job.object_count} / ${job.frame_count}`} />
         <Info label="Vòng rework" value={String(job.rework_round)} />
       </dl>
+
+      <FramesToCheck sample={sample} />
 
       {decided ? (
         <DecidedView sample={sample} />
@@ -185,5 +187,29 @@ function Notice({ text }: { text: string }) {
       <AlertTriangle className="mt-0.5 size-5 shrink-0 text-fg-warning-primary" />
       <p className="text-sm text-warning-primary">{text}</p>
     </div>
+  )
+}
+
+/** Các frame QC2 cần kiểm (đánh số theo task như trên CVAT). Bấm để mở CVAT đúng frame đó. */
+function FramesToCheck({ sample }: { sample: AuditSample }) {
+  const url = sample.job.cvat_url
+  return (
+    <section className="mb-5">
+      <h3 className="mb-2 text-sm font-semibold text-primary">
+        Frame cần kiểm <span className="font-normal text-tertiary">· {sample.frames.length}/{sample.job.frame_count} frame của job</span>
+      </h3>
+      <ul className="flex flex-wrap gap-1.5">
+        {sample.frames.map((frame) => (
+          <li key={frame}>
+            {url ? (
+              <a href={`${url}?frame=${frame}`} target="_blank" rel="noreferrer"
+                className="inline-flex rounded-md px-2 py-1 text-sm font-medium text-brand-secondary tabular-nums ring-1 ring-secondary ring-inset hover:bg-primary_hover">
+                #{frame}
+              </a>
+            ) : <span className="inline-flex rounded-md px-2 py-1 text-sm tabular-nums ring-1 ring-secondary ring-inset">#{frame}</span>}
+          </li>
+        ))}
+      </ul>
+    </section>
   )
 }

@@ -14,13 +14,7 @@ from rest_framework.permissions import BasePermission
 
 from .models import Role, RoleAssignment, expand_roles
 
-ALL_PROJECT_ROLES = {
-    Role.PROJECT_MANAGER,
-    Role.QC2,
-    Role.TEAM_LEADER,
-    Role.QC1,
-    Role.ANNOTATOR,
-}
+ALL_PROJECT_ROLES = set(Role)
 
 
 class Cap:
@@ -40,7 +34,6 @@ class Cap:
     MANAGE_DELIVERY = "manage_delivery"
     SEND_ANNOUNCEMENT = "send_announcement"
     VIEW_ACTIVITY = "view_activity"
-    LEAD_TEAM = "lead_team"  # TL: dashboard team, job của team, giao lại / deadline trong team, cấp QC1
 
 
 CAPABILITY_ROLES = {
@@ -58,11 +51,7 @@ CAPABILITY_ROLES = {
     Cap.MANAGE_DELIVERY: {Role.PROJECT_MANAGER},
     Cap.SEND_ANNOUNCEMENT: {Role.PROJECT_MANAGER},
     Cap.VIEW_ACTIVITY: {Role.PROJECT_MANAGER},
-    Cap.LEAD_TEAM: {Role.TEAM_LEADER},
 }
-
-# Director: theo wireframe chỉ XEM dashboard dự án, không thao tác trong dự án.
-DIRECTOR_CAPABILITIES = {Cap.VIEW_PROJECT, Cap.VIEW_DASHBOARD, Cap.VIEW_JOBS, Cap.VIEW_ACTIVITY, Cap.VIEW_GUIDELINES}
 
 
 def capabilities_for_roles(roles):
@@ -73,10 +62,7 @@ def get_project_capabilities(user, project):
     roles = expand_roles(
         RoleAssignment.objects.filter(user=user, project=project).values_list("role", flat=True)
     )
-    caps = capabilities_for_roles(roles)
-    if user.is_director():
-        caps |= DIRECTOR_CAPABILITIES
-    return caps
+    return capabilities_for_roles(roles)
 
 
 class ProjectScopedViewMixin:

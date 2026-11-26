@@ -136,7 +136,7 @@ export default function NotificationBell({ projects }: { projects: ProjectSummar
                   <div className="flex flex-col items-center gap-2 px-4 py-10 text-center">
                     <span className="flex size-10 items-center justify-center rounded-full bg-secondary text-fg-quaternary"><Bell01 className="size-5" /></span>
                     <p className="text-sm font-medium text-secondary">Chưa có thông báo nào</p>
-                    <p className="text-xs text-tertiary">Thông báo của dự án sẽ hiện ở đây.</p>
+                    <p className="text-xs text-tertiary">Thông báo của organization sẽ hiện ở đây.</p>
                   </div>
                 ) : (
                   <ul>

@@ -97,7 +97,7 @@ export default function LoginPage() {
             </form>
 
             <p className="mt-8 text-center text-sm text-tertiary">
-              Chưa có tài khoản? Liên hệ <span className="font-semibold text-secondary">Director</span> của bạn để được cấp quyền.
+              Chưa có tài khoản? Liên hệ <span className="font-semibold text-secondary">Project Manager</span> của bạn để được cấp quyền.
             </p>
           </div>
         </div>

@@ -46,8 +46,8 @@ export default function OverviewPage() {
           {data.counts.jobs === 0 && (
             <Alert
               type="info" showIcon
-              title="Dự án chưa có job. Tạo Dataset → Batch, rồi nhập job từ CVAT ở trang Batches."
-              action={<Link to="../batches" relative="path">Đến Batches</Link>}
+              title="Organization chưa có job. Tạo project và task trên CVAT, rồi bấm Đồng bộ CVAT ở trang Projects."
+              action={<Link to="../datasets" relative="path">Đến Projects</Link>}
             />
           )}
           <Row gutter={[16, 16]}>
@@ -81,8 +81,8 @@ export default function OverviewPage() {
             <Col xs={24} lg={10}>
               <Card title="Quy mô" style={{ height: '100%' }}>
                 <Row gutter={[16, 16]}>
-                  <Col span={8}><Statistic title="Dataset" value={data.counts.datasets} /></Col>
-                  <Col span={8}><Statistic title="Batch" value={data.counts.batches} /></Col>
+                  <Col span={8}><Statistic title="Project" value={data.counts.datasets} /></Col>
+                  <Col span={8}><Statistic title="Task" value={data.counts.batches} /></Col>
                   <Col span={8}><Statistic title="Job" value={data.counts.jobs} /></Col>
                   <Col span={12}><Statistic title="Escalated" value={data.counts.escalated} /></Col>
                   <Col span={12}><Statistic title="Quá hạn" value={data.counts.overdue} /></Col>

@@ -1,6 +1,8 @@
-import { DownOutlined, LogoutOutlined, UserOutlined } from '@ant-design/icons'
+import { DownOutlined, KeyOutlined, LogoutOutlined, UserOutlined } from '@ant-design/icons'
 import { Avatar, Dropdown, Layout, Space } from 'antd'
+import { useState } from 'react'
 import { Link, Outlet, useMatch } from 'react-router'
+import ChangePasswordDialog from '../features/auth/ChangePasswordDialog'
 import { useAuth } from '../features/auth/useAuth'
 import { listProjects } from '../features/projects/api'
 import ProjectSwitcher from '../features/projects/components/ProjectSwitcher'
@@ -14,6 +16,7 @@ import NotificationBell from './NotificationBell'
  */
 export default function MainLayout() {
   const { user, logout } = useAuth()
+  const [changingPassword, setChangingPassword] = useState(false)
   const projectMatch = useMatch('/projects/:projectId/*')
   const projectId = projectMatch ? Number(projectMatch.params.projectId) : null
   // Dùng chung cho vai trò + chuông. Tải lại khi đổi trang dự án → vai trò vừa được gán cũng hiện ra.
@@ -39,7 +42,8 @@ export default function MainLayout() {
           <Dropdown
             menu={{
               items: [
-                { key: 'projects', label: <Link to="/projects">Dự án của tôi</Link> },
+                { key: 'projects', label: <Link to="/projects">Organization của tôi</Link> },
+                { key: 'password', icon: <KeyOutlined />, label: 'Đổi mật khẩu', onClick: () => setChangingPassword(true) },
                 { type: 'divider' },
                 { key: 'logout', icon: <LogoutOutlined />, label: 'Đăng xuất', onClick: logout },
               ],
@@ -56,6 +60,7 @@ export default function MainLayout() {
       <Layout.Content>
         <Outlet />
       </Layout.Content>
+      {changingPassword && <ChangePasswordDialog onClose={() => setChangingPassword(false)} />}
     </Layout>
   )
 }

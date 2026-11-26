@@ -86,7 +86,7 @@ class ProjectOverviewView(ProjectScopedViewMixin, APIView):
         return Response({
             "counts": {
                 "datasets": project.datasets.count(),
-                "batches": project.datasets.aggregate(n=Count("batches"))["n"],
+                "batches": project.batches.count(),
                 "jobs": totals["total"],
                 "escalated": totals["escalated"],
                 "overdue": totals["overdue"],

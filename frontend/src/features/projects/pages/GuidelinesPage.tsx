@@ -27,7 +27,7 @@ export default function GuidelinesPage() {
     <div className="page">
       <div className="page-header">
         <div>
-          <h1>Hướng dẫn gán nhãn</h1>
+          <h1>Guidelines</h1>
           <p>Mỗi lần lưu tạo một phiên bản mới; phiên bản cũ được giữ lại.</p>
         </div>
         {can('manage_quality_catalog') && (

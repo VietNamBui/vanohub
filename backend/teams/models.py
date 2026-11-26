@@ -5,9 +5,6 @@ from django.db import models
 class Team(models.Model):
     project = models.ForeignKey("projects.Project", on_delete=models.CASCADE, related_name="teams")
     name = models.CharField(max_length=200)
-    leader = models.ForeignKey(
-        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name="led_teams"
-    )
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:

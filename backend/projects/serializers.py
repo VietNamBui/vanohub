@@ -40,7 +40,7 @@ class ProjectDetailSerializer(ProjectListSerializer):
 
     class Meta(ProjectListSerializer.Meta):
         fields = ProjectListSerializer.Meta.fields + [
-            "updated_at", "member_counts", "member_total", "my_capabilities", "cvat_project_id",
+            "updated_at", "member_counts", "member_total", "my_capabilities", "cvat_org_id", "cvat_org_slug",
         ]
 
     def _roles_by_user(self, project):
@@ -68,7 +68,7 @@ class ProjectSettingsSerializer(serializers.ModelSerializer):
     class Meta:
         model = Project
         fields = [
-            "cvat_project_id", "max_rework_rounds", "sampling_method", "sampling_rate", "stratify_by",
+            "max_rework_rounds", "sampling_rate",
             "quality_cl_threshold", "defect_rate_threshold",
             "kpi_annotation_target", "kpi_qc1_target", "kpi_qc2_target",
         ]
@@ -89,25 +89,22 @@ class MemberSerializer(serializers.Serializer):
 
 
 class DatasetSerializer(ProjectScopedSerializer):
-    batch_count = serializers.IntegerField(read_only=True)
+    """"Project" trên giao diện = một CVAT project. Tên đồng bộ từ CVAT; VanoHub chỉ sửa mô tả, khoá / mở khoá."""
+
+    task_count = serializers.IntegerField(read_only=True)
     job_count = serializers.IntegerField(read_only=True)
     done_count = serializers.IntegerField(read_only=True)
 
     class Meta:
         model = Dataset
-        fields = ["id", "name", "description", "status", "created_at", "batch_count", "job_count", "done_count"]
-        read_only_fields = ["status"]
-
-    def validate_name(self, value):
-        qs = Dataset.objects.filter(project=self.project, name=value)
-        if self.instance:
-            qs = qs.exclude(pk=self.instance.pk)
-        if qs.exists():
-            raise serializers.ValidationError("Dự án đã có dataset trùng tên.")
-        return value
+        fields = ["id", "name", "description", "status", "cvat_project_id", "last_synced_at", "created_at",
+                  "task_count", "job_count", "done_count"]
+        read_only_fields = ["name", "status", "cvat_project_id", "last_synced_at"]
 
 
 class BatchSerializer(ProjectScopedSerializer):
+    """"Task" trên giao diện = một CVAT task. Tên đồng bộ từ CVAT; PM đặt deadline và team phụ trách."""
+
     dataset_name = serializers.CharField(source="dataset.name", read_only=True)
     job_count = serializers.IntegerField(read_only=True)
     done_count = serializers.IntegerField(read_only=True)
@@ -118,48 +115,29 @@ class BatchSerializer(ProjectScopedSerializer):
     class Meta:
         model = Batch
         fields = [
-            "id", "dataset", "dataset_name", "name", "status", "deadline", "team", "team_name",
-            "cvat_task_id", "last_synced_at",
-            "created_at", "job_count", "done_count", "pending_qc2_count", "escalated_count",
+            "id", "name", "dataset", "dataset_name", "cvat_task_id", "status", "deadline", "team", "team_name",
+            "last_synced_at", "created_at", "job_count", "done_count", "pending_qc2_count", "escalated_count",
         ]
-        read_only_fields = ["status", "cvat_task_id", "last_synced_at"]
-
-    def validate_dataset(self, dataset):
-        if dataset.project_id != self.project.id:
-            raise serializers.ValidationError("Dataset không thuộc dự án này.")
-        if dataset.status != "active":
-            raise serializers.ValidationError("Dataset đã khoá hoặc đã bàn giao.")
-        return dataset
+        read_only_fields = ["name", "dataset", "cvat_task_id", "status", "last_synced_at"]
 
     def validate_team(self, team):
         if team and team.project_id != self.project.id:
-            raise serializers.ValidationError("Team không thuộc dự án này.")
+            raise serializers.ValidationError("Team không thuộc organization này.")
         return team
-
-    def validate(self, attrs):
-        dataset = attrs.get("dataset", getattr(self.instance, "dataset", None))
-        name = attrs.get("name", getattr(self.instance, "name", None))
-        qs = Batch.objects.filter(dataset=dataset, name=name)
-        if self.instance:
-            qs = qs.exclude(pk=self.instance.pk)
-        if qs.exists():
-            raise serializers.ValidationError({"name": "Dataset đã có batch trùng tên."})
-        return attrs
 
 
 class DeliverySerializer(ProjectScopedSerializer):
     batch_name = serializers.CharField(source="batch.name", read_only=True)
-    dataset_name = serializers.CharField(source="batch.dataset.name", read_only=True)
     delivered_by = UserBriefSerializer(read_only=True)
     job_count = serializers.IntegerField(source="batch.jobs.count", read_only=True)
 
     class Meta:
         model = Delivery
-        fields = ["id", "batch", "batch_name", "dataset_name", "note", "client_feedback",
+        fields = ["id", "batch", "batch_name", "note", "client_feedback",
                   "delivered_by", "delivered_at", "job_count"]
 
     def validate_batch(self, batch):
-        if batch.dataset.project_id != self.project.id:
+        if batch.project_id != self.project.id:
             raise serializers.ValidationError("Batch không thuộc dự án này.")
         return batch
 
@@ -182,7 +160,7 @@ class AnnouncementSerializer(ProjectScopedSerializer):
         fields = ["id", "sender", "target_roles", "target_team", "target_team_name", "content", "created_at"]
 
     def validate_target_roles(self, roles):
-        valid = set(Role.values) - {Role.DIRECTOR}
+        valid = set(Role.values)
         invalid = [r for r in roles if r not in valid]
         if invalid:
             raise serializers.ValidationError(f"Vai trò không hợp lệ: {', '.join(invalid)}")

@@ -8,6 +8,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from accounts.permissions import Cap, ProjectScopedViewMixin
+from cvat_integration.assignee import schedule_assignee_push
 from projects.models import ActivityLog, DataStatus
 from projects.views import StandardPagination
 from quality.models import Audit, AuditSample
@@ -25,7 +26,9 @@ def ensure_editable(job):
     if job.is_locked:
         raise ValidationError(f"Job {job} đang bị khoá.")
     if job.batch.status != DataStatus.ACTIVE:
-        raise ValidationError(f"Batch của job {job} đã khoá hoặc đã bàn giao.")
+        raise ValidationError(f"Task của job {job} đã khoá hoặc đã bàn giao.")
+    if job.dataset.status != DataStatus.ACTIVE:
+        raise ValidationError(f"Project của job {job} đã khoá.")
     if job.status == JobStatus.DELIVERED:
         raise ValidationError(f"Job {job} đã bàn giao.")
 
@@ -43,6 +46,8 @@ def assign_job(job, data, actor, project):
     job.save()
     ActivityLog.record(project=project, actor=actor, action="job.assign", target=job, job=job,
                        before=before, after=after, note=data.get("note", ""))
+    # Người nhận chưa liên kết CVAT vẫn giao được; assignee CVAT được đẩy khi họ liên kết xong.
+    schedule_assignee_push([job.pk])
 
 
 def set_job_deadline(job, deadline, note, actor, project):
@@ -65,7 +70,7 @@ class JobViewSet(ProjectScopedViewMixin, mixins.ListModelMixin, mixins.RetrieveM
 
     def get_queryset(self):
         queryset = Job.objects.filter(project=self.project).select_related(
-            "batch__dataset", "annotator", "qc1_reviewer", "project"
+            "batch", "dataset", "annotator", "qc1_reviewer", "project"
         ).prefetch_related(Prefetch(
             "audit_samples",
             queryset=AuditSample.objects.filter(audit__status=Audit.Status.IN_PROGRESS).select_related("auditor"),
@@ -79,7 +84,7 @@ class JobViewSet(ProjectScopedViewMixin, mixins.ListModelMixin, mixins.RetrieveM
         if p.get("batch"):
             queryset = queryset.filter(batch_id=p["batch"])
         if p.get("dataset"):
-            queryset = queryset.filter(batch__dataset_id=p["dataset"])
+            queryset = queryset.filter(dataset_id=p["dataset"])
         if p.get("assignee"):
             queryset = queryset.filter(Q(annotator_id=p["assignee"]) | Q(qc1_reviewer_id=p["assignee"]))
         if p.get("escalated") == "1":

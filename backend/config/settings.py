@@ -177,6 +177,9 @@ SIMPLE_JWT = {
 CVAT_URL = os.getenv('CVAT_URL', '')
 CVAT_PUBLIC_URL = os.getenv('CVAT_PUBLIC_URL', CVAT_URL)
 CVAT_ACCESS_TOKEN = os.getenv('CVAT_ACCESS_TOKEN', '')
+# Tên miền gửi kèm (header Host) khi CVAT_URL là địa chỉ IP/nội bộ mà CVAT (traefik) chỉ nhận theo tên miền.
+# Vd. CVAT_URL=http://127.0.0.1:8080 + CVAT_HOST_HEADER=localhost:8080. Để trống = không gửi.
+CVAT_HOST_HEADER = os.getenv('CVAT_HOST_HEADER', '')
 CVAT_USERNAME = os.getenv('CVAT_USERNAME', '')
 CVAT_PASSWORD = os.getenv('CVAT_PASSWORD', '')
 

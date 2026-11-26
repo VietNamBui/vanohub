@@ -1,132 +1,107 @@
-from types import SimpleNamespace
-
 from django.test import TestCase
 
 from accounts.models import Role
 from accounts.testing import ProjectFixture, make_user
 from jobs.models import Job, JobStatus
 
-from . import sampling
 from .models import Audit, AuditSample, ReviewError
+from .qc2 import ensure_qc2_sample, pick_frames
 
 
-class SamplingTests(TestCase):
-    def test_sample_size_rounds_up_and_has_minimum_one(self):
-        self.assertEqual(sampling.sample_size(10, 10), 1)
-        self.assertEqual(sampling.sample_size(11, 10), 2)
-        self.assertEqual(sampling.sample_size(3, 1), 1)
-        self.assertEqual(sampling.sample_size(0, 50), 0)
+class FrameSamplingTests(TestCase):
+    """QC2 kiểm MỌI job qua QC1, mỗi job sampling_rate % số frame (làm tròn lên, ít nhất 1)."""
 
-    def test_same_seed_gives_same_sample(self):
-        items = list(range(100))
-        self.assertEqual(sampling.random_sample(items, 10, 42), sampling.random_sample(items, 10, 42))
-
-    def test_stratified_covers_every_stratum(self):
-        items = [("a", i) for i in range(10)] + [("b", i) for i in range(2)]
-        picked = sampling.stratified_sample(items, 10, 1, key=lambda x: x[0])
-        self.assertEqual({stratum for _, stratum in picked}, {"a", "b"})
-
-    def test_assign_auditors_respects_four_eyes(self):
-        a, b = SimpleNamespace(pk=1), SimpleNamespace(pk=2)
-        result = sampling.assign_auditors(["x", "y"], [a, b], conflicts=lambda item: {1} if item == "x" else set())
-        self.assertEqual(result["x"].pk, 2)
-        only_conflicted = sampling.assign_auditors(["x"], [a], conflicts=lambda item: {1})
-        self.assertIsNone(only_conflicted["x"])
-
-
-class AuditFlowTests(TestCase):
     def setUp(self):
         self.f = ProjectFixture()
-        self.jobs = [self.f.job() for _ in range(6)]
+        self.f.project.sampling_rate = 20
+        self.f.project.save()
+
+    def test_frame_count_rounds_up_with_minimum_one(self):
+        job = self.f.job(frame_count=10, cvat_start_frame=100)
+        frames = pick_frames(job, 20)
+        self.assertEqual(len(frames), 2)
+        self.assertTrue(all(100 <= f < 110 for f in frames))  # đánh số theo task, như trên CVAT
+        self.assertEqual(len(pick_frames(self.f.job(frame_count=11), 20)), 3)
+        self.assertEqual(len(pick_frames(self.f.job(frame_count=1), 20)), 1)
+
+    def test_same_job_and_round_gives_same_frames(self):
+        job = self.f.job(frame_count=50)
+        self.assertEqual(pick_frames(job, 20), pick_frames(job, 20))
+
+    def test_every_pending_qc2_job_gets_one_open_sample_in_task_audit(self):
+        jobs = [self.f.job(frame_count=10) for _ in range(3)]
+        for job in jobs:
+            ensure_qc2_sample(job)
+            ensure_qc2_sample(job)  # gọi lại không tạo trùng
+        self.assertEqual(AuditSample.objects.count(), 3)
+        self.assertEqual(Audit.objects.filter(batch=self.f.batch).count(), 1)
+        self.assertEqual(AuditSample.objects.first().auditor, self.f.qc2)  # tự giao QC2 chuyên trách
+
+    def test_jobs_not_waiting_for_qc2_get_no_sample(self):
+        self.assertIsNone(ensure_qc2_sample(self.f.job(status=JobStatus.PENDING_QC1)))
+
+    def test_auto_assign_respects_four_eyes(self):
+        job = self.f.job(annotator=self.f.qc2, frame_count=5)
+        self.assertIsNone(ensure_qc2_sample(job).auditor)  # QC2 duy nhất đã annotate → để trống cho PM phân
+
+
+class Qc2ReviewTests(TestCase):
+    def setUp(self):
+        self.f = ProjectFixture()
         self.pm = self.f.client(self.f.pm)
         self.qc2 = self.f.client(self.f.qc2)
+        self.job = self.f.job(frame_count=10)
+        self.sample = ensure_qc2_sample(self.job)
 
-    def _create_audit(self, **data):
-        body = {"batch": self.f.batch.id, "auditors": [self.f.qc2.id], **data}
-        response = self.pm.post(self.f.url("audits/"), body, format="json")
-        self.assertEqual(response.status_code, 201, response.data)
-        return Audit.objects.get(pk=response.data["id"])
+    def test_audits_are_read_only(self):
+        response = self.pm.post(self.f.url("audits/"), {"batch": self.f.batch.id}, format="json")
+        self.assertEqual(response.status_code, 405)
+        listed = self.pm.get(self.f.url("audits/")).data
+        self.assertEqual((len(listed), listed[0]["sample_count"]), (1, 1))
 
-    def test_qc2_only_cannot_create_audit(self):
-        response = self.qc2.post(self.f.url("audits/"), {"batch": self.f.batch.id}, format="json")
-        self.assertEqual(response.status_code, 403)
-
-    def test_preview_seed_reproduces_created_sample(self):
-        preview = self.pm.post(self.f.url("audits/preview/"), {"batch": self.f.batch.id}, format="json").data
-        audit = self._create_audit(seed=preview["seed"])
-        self.assertEqual(
-            sorted(s["job"]["id"] for s in preview["samples"]),
-            sorted(audit.samples.values_list("job_id", flat=True)),
-        )
-        self.assertEqual(audit.eligible_count, 6)
-        self.assertEqual(audit.samples.count(), 3)  # 50% của 6
-
-    def test_qc2_sees_only_own_samples_and_can_pass(self):
-        audit = self._create_audit()
-        sample = audit.samples.first()
-        listed = self.qc2.get(self.f.url("audit-samples/")).data
-        self.assertEqual(len(listed), 3)
-        response = self.qc2.post(self.f.url(f"audit-samples/{sample.id}/pass/"), {}, format="json")
+    def test_qc2_passes_job(self):
+        listed = self.qc2.get(self.f.url("audit-samples/?result=pending")).data
+        self.assertEqual([s["id"] for s in listed], [self.sample.id])
+        self.assertEqual(len(listed[0]["frames"]), 5)  # fixture: sampling_rate 50% của 10 frame
+        response = self.qc2.post(self.f.url(f"audit-samples/{self.sample.id}/pass/"), {}, format="json")
         self.assertEqual(response.status_code, 200, response.data)
-        sample.job.refresh_from_db()
-        self.assertEqual(sample.job.status, JobStatus.APPROVED)
+        self.job.refresh_from_db()
+        self.assertEqual(self.job.status, JobStatus.APPROVED)
 
-    def test_reject_records_errors_and_sends_job_to_rework(self):
-        audit = self._create_audit()
-        sample = audit.samples.first()
-        body = {"errors": [{"category": self.f.category.id, "location": "frame 12 / obj 3"}], "comment": "x"}
-        response = self.qc2.post(self.f.url(f"audit-samples/{sample.id}/reject/"), body, format="json")
+    def test_reject_sends_job_to_rework_and_next_round_gets_new_sample(self):
+        body = {"errors": [{"category": self.f.category.id, "location": "frame 3"}], "comment": "x"}
+        response = self.qc2.post(self.f.url(f"audit-samples/{self.sample.id}/reject/"), body, format="json")
         self.assertEqual(response.status_code, 200, response.data)
-        job = Job.objects.get(pk=sample.job_id)
-        self.assertEqual(job.status, JobStatus.REWORK)
-        self.assertEqual(job.rework_round, 1)
+        job = Job.objects.get(pk=self.job.pk)
+        self.assertEqual((job.status, job.rework_round), (JobStatus.REWORK, 1))
         self.assertEqual(ReviewError.objects.filter(job=job, stage="qc2").count(), 1)
+        # Sửa xong, qua QC1 lại → vào Chờ QC2 → lượt QC2 mới
+        job.status = JobStatus.PENDING_QC2
+        job.save()
+        second = ensure_qc2_sample(job)
+        self.assertNotEqual(second.pk, self.sample.pk)
+        self.assertEqual(second.rework_round, 1)
 
     def test_reject_without_errors_is_refused(self):
-        sample = self._create_audit().samples.first()
-        response = self.qc2.post(self.f.url(f"audit-samples/{sample.id}/reject/"), {"errors": []}, format="json")
+        response = self.qc2.post(self.f.url(f"audit-samples/{self.sample.id}/reject/"), {"errors": []}, format="json")
         self.assertEqual(response.status_code, 400)
 
     def test_exceeding_max_rework_rounds_escalates(self):
-        Job.objects.filter(pk__in=[j.pk for j in self.jobs]).update(rework_round=2)
-        sample = self._create_audit().samples.first()
+        Job.objects.filter(pk=self.job.pk).update(rework_round=2)
         body = {"errors": [{"category": self.f.category.id}]}
-        self.qc2.post(self.f.url(f"audit-samples/{sample.id}/reject/"), body, format="json")
-        self.assertTrue(Job.objects.get(pk=sample.job_id).is_escalated)
+        self.qc2.post(self.f.url(f"audit-samples/{self.sample.id}/reject/"), body, format="json")
+        self.assertTrue(Job.objects.get(pk=self.job.pk).is_escalated)
 
     def test_four_eyes_blocks_auditing_own_annotation(self):
-        # PM vừa là annotator của job → không được audit job đó.
-        make_user("dual", Role.ANNOTATOR, project=self.f.project)
-        audit = self._create_audit()
-        sample = audit.samples.first()
-        Job.objects.filter(pk=sample.job_id).update(annotator=self.f.pm)
-        response = self.pm.post(self.f.url(f"audit-samples/{sample.id}/pass/"), {}, format="json")
+        Job.objects.filter(pk=self.job.pk).update(annotator=self.f.pm)
+        response = self.pm.post(self.f.url(f"audit-samples/{self.sample.id}/pass/"), {}, format="json")
         self.assertEqual(response.status_code, 403)
 
     def test_qc2_cannot_review_sample_assigned_to_someone_else(self):
         other = make_user("qc2_other", Role.QC2, project=self.f.project)
-        sample = self._create_audit().samples.first()
-        AuditSample.objects.filter(pk=sample.pk).update(auditor=other)
-        response = self.qc2.post(self.f.url(f"audit-samples/{sample.id}/pass/"), {}, format="json")
+        AuditSample.objects.filter(pk=self.sample.pk).update(auditor=other)
+        response = self.qc2.post(self.f.url(f"audit-samples/{self.sample.id}/pass/"), {}, format="json")
         self.assertIn(response.status_code, (403, 404))
-
-    def test_complete_requires_all_samples_and_approves_unsampled(self):
-        audit = self._create_audit()
-        self.assertEqual(self.pm.post(self.f.url(f"audits/{audit.id}/complete/")).status_code, 400)
-        for sample in audit.samples.all():
-            self.qc2.post(self.f.url(f"audit-samples/{sample.id}/pass/"), {}, format="json")
-        late_job = self.f.job()  # vào hàng chờ QC2 SAU khi tạo audit
-        response = self.pm.post(self.f.url(f"audits/{audit.id}/complete/"))
-        self.assertEqual(response.status_code, 200, response.data)
-        statuses = set(Job.objects.filter(pk__in=[j.pk for j in self.jobs]).values_list("status", flat=True))
-        self.assertEqual(statuses, {JobStatus.APPROVED})
-        late_job.refresh_from_db()
-        self.assertEqual(late_job.status, JobStatus.PENDING_QC2)
-
-    def test_cannot_open_two_audits_on_same_batch(self):
-        self._create_audit()
-        response = self.pm.post(self.f.url("audits/"), {"batch": self.f.batch.id}, format="json")
-        self.assertEqual(response.status_code, 400)
 
     def test_qc2_only_can_read_error_categories_but_not_edit(self):
         self.assertEqual(self.qc2.get(self.f.url("error-categories/")).status_code, 200)
@@ -135,7 +110,7 @@ class AuditFlowTests(TestCase):
 
 
 class DeletionRulesTests(TestCase):
-    """Loại lỗi đang được dùng không xoá riêng được, nhưng xoá cả dự án thì được."""
+    """Loại lỗi đang được dùng không xoá riêng được, nhưng xoá cả organization thì được."""
 
     def setUp(self):
         self.f = ProjectFixture()
@@ -154,41 +129,31 @@ class DeletionRulesTests(TestCase):
 
 
 class Qc2ScreensTests(TestCase):
-    """Mọi tài khoản QC2 có Tổng quan (số liệu của mình). Trong mục Chất lượng, QC2 chuyên trách chỉ có
-    danh sách job được PM phân công — chiến thuật audit / xem trước mẫu chỉ dành cho PM."""
+    """Mọi tài khoản QC2 có Tổng quan (số liệu của mình). Quy tắc QC2 (tỉ lệ frame) chỉ PM xem."""
 
     def setUp(self):
         self.f = ProjectFixture()
-        self.jobs = [self.f.job() for _ in range(6)]
+        self.jobs = [self.f.job(frame_count=10) for _ in range(3)]
+        self.samples = [ensure_qc2_sample(job) for job in self.jobs]
         self.pm = self.f.client(self.f.pm)
         self.qc2 = self.f.client(self.f.qc2)
 
-    def test_qc2_only_sees_own_dashboard_but_no_strategy_or_preview(self):
+    def test_qc2_only_sees_own_dashboard_but_no_strategy(self):
         summary = self.qc2.get(self.f.url("qc2-summary/"))
         self.assertEqual(summary.status_code, 200)
         self.assertEqual(summary.data["scope"], "mine")
         self.assertEqual(self.qc2.get(self.f.url("audit-strategy/")).status_code, 403)
-        response = self.qc2.post(self.f.url("audits/preview/"), {"batch": self.f.batch.id}, format="json")
-        self.assertEqual(response.status_code, 403)
 
-    def test_qc2_only_still_lists_assigned_samples(self):
-        self.pm.post(self.f.url("audits/"), {"batch": self.f.batch.id, "auditors": [self.f.qc2.id]}, format="json")
-        response = self.qc2.get(self.f.url("audit-samples/?open=1&result=pending"))
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(len(response.data), 3)
-
-    def test_pm_strategy_with_history(self):
-        self.pm.patch(self.f.url("settings/"), {"sampling_rate": 20}, format="json")
+    def test_pm_strategy_with_history_and_stats(self):
+        self.pm.patch(self.f.url("settings/"), {"sampling_rate": 30}, format="json")
         data = self.pm.get(self.f.url("audit-strategy/")).data
         self.assertTrue(data["can_edit"])
-        self.assertEqual(data["history"][0]["after"], {"sampling_rate": 20})
-        self.assertEqual(data["history"][0]["before"], {"sampling_rate": 50})
-        self.assertEqual([b["id"] for b in data["preview_batches"]], [self.f.batch.id])
+        self.assertEqual(data["sampling_rate"], 30)
+        self.assertEqual(data["history"][0]["after"], {"sampling_rate": 30})
+        self.assertEqual(data["stats"]["pending"], 3)
 
     def test_pm_summary_has_kpi_comparison_and_trend(self):
-        response = self.pm.post(self.f.url("audits/"), {"batch": self.f.batch.id, "auditors": [self.f.qc2.id]}, format="json")
-        sample = Audit.objects.get(pk=response.data["id"]).samples.first()
-        self.qc2.post(self.f.url(f"audit-samples/{sample.id}/pass/"), {}, format="json")
+        self.qc2.post(self.f.url(f"audit-samples/{self.samples[0].id}/pass/"), {}, format="json")
         data = self.pm.get(self.f.url("qc2-summary/?period=week")).data
         self.assertEqual(data["kpi"]["current"]["passed"], 1)
         self.assertEqual(data["kpi"]["previous"]["audited"], 0)

@@ -39,7 +39,9 @@ class ErrorCategory(models.Model):
 
 
 class Audit(models.Model):
-    """Một đợt QC2 Internal Audit trên một Batch.
+    """Nhóm các lượt QC2 của MỘT TASK (Batch). Tạo tự động khi job đầu tiên của task vào Chờ QC2;
+    chốt (completed) khi task được bàn giao. Các trường method / seed / eligible_* là của cách
+    lấy mẫu job cũ — không còn dùng (QC2 giờ kiểm mọi job, mỗi job một phần frame).
 
     Lưu lại cấu hình sampling đã dùng + seed ngẫu nhiên → có thể giải thích vì sao
     những job này được chọn (yêu cầu "lưu lịch sử Sampling").
@@ -73,7 +75,10 @@ class Audit(models.Model):
 
 
 class AuditSample(models.Model):
-    """Một job được lấy mẫu trong một Audit, và kết quả QC2 của job đó."""
+    """Một lượt QC2 của một job: các frame được chọn để kiểm + kết quả.
+
+    Mỗi lần job vào Chờ QC2 (lần đầu hoặc sau rework) có một lượt mới → cùng job có thể có nhiều lượt.
+    """
 
     class Result(models.TextChoices):
         PENDING = "pending", "Chờ audit"
@@ -83,6 +88,9 @@ class AuditSample(models.Model):
     audit = models.ForeignKey(Audit, on_delete=models.CASCADE, related_name="samples")
     job = models.ForeignKey("jobs.Job", on_delete=models.CASCADE, related_name="audit_samples")
     stratum = models.CharField(max_length=120, blank=True)
+    # Số frame (đánh số theo task, như trên CVAT) QC2 cần kiểm — sampling_rate % frame của job.
+    frames = models.JSONField(default=list)
+    rework_round = models.PositiveSmallIntegerField(default=0)
     auditor = models.ForeignKey(
         settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name="audit_samples"
     )
@@ -93,7 +101,6 @@ class AuditSample(models.Model):
 
     class Meta:
         ordering = ["id"]
-        constraints = [models.UniqueConstraint(fields=["audit", "job"], name="unique_job_per_audit")]
 
 
 class ReviewError(models.Model):

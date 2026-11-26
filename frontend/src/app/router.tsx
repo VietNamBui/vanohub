@@ -7,27 +7,20 @@ import QueuePage from '../features/jobs/pages/QueuePage'
 import AnnouncementsPage from '../features/projects/pages/AnnouncementsPage'
 import BatchesPage from '../features/projects/pages/BatchesPage'
 import DatasetsPage from '../features/projects/pages/DatasetsPage'
-import DeliveryPage from '../features/projects/pages/DeliveryPage'
 import GuidelinesPage from '../features/projects/pages/GuidelinesPage'
 import OverviewPage from '../features/projects/pages/OverviewPage'
 import ProjectListPage from '../features/projects/pages/ProjectListPage'
 import TeamRankingPage from '../features/projects/pages/TeamRankingPage'
 import ProjectLayout from '../features/projects/ProjectLayout'
 import { ProjectIndexRedirect, RequireCap } from '../features/projects/RequireCap'
-import ErrorCategoriesPage from '../features/quality/pages/ErrorCategoriesPage'
 import AuditsPage from '../features/quality/qc2/AuditsPage'
 import AuditStrategyPage from '../features/quality/qc2/AuditStrategyPage'
 import AuditWorkPage from '../features/quality/qc2/AuditWorkPage'
 import Qc2DashboardPage from '../features/quality/qc2/Qc2DashboardPage'
 import CvatLinkPage from '../features/cvat/pages/CvatLinkPage'
 import HomeRedirect from '../features/projects/HomeRedirect'
-import TeamJobsPage from '../features/teams/leader/TeamJobsPage'
-import TeamMembersPage from '../features/teams/leader/TeamMembersPage'
-import TeamOverviewPage from '../features/teams/leader/TeamOverviewPage'
-import TeamWorkloadPage from '../features/teams/leader/TeamWorkloadPage'
 import TeamDetailPage from '../features/teams/pages/TeamDetailPage'
 import TeamsPage from '../features/teams/pages/TeamsPage'
-import WorkloadPage from '../features/teams/pages/WorkloadPage'
 import MainLayout from '../layouts/MainLayout'
 import StateView from '../shared/components/StateView'
 import type { Capability } from '../shared/types/capabilities'
@@ -62,18 +55,11 @@ export const router = createBrowserRouter([
               guarded('queue', 'view_jobs', <QueuePage />),
               guarded('teams', 'manage_team', <TeamsPage />),
               guarded('teams/:teamId', 'manage_team', <TeamDetailPage />),
-              guarded('workload', ['manage_team', 'view_dashboard'], <WorkloadPage />),
               guarded('audits', 'manage_audits', <AuditsPage />),
-              guarded('leader/overview', 'lead_team', <TeamOverviewPage />),
-              guarded('leader/jobs', 'lead_team', <TeamJobsPage />),
-              guarded('leader/members', 'lead_team', <TeamMembersPage />),
-              guarded('leader/workload', 'lead_team', <TeamWorkloadPage />),
               guarded('qc2/strategy', 'manage_audits', <AuditStrategyPage />),
               guarded('qc2/work', 'perform_audit', <AuditWorkPage />),
               guarded('qc2/dashboard', 'perform_audit', <Qc2DashboardPage />),
-              guarded('error-categories', 'manage_quality_catalog', <ErrorCategoriesPage />),
               guarded('guidelines', 'view_guidelines', <GuidelinesPage />),
-              guarded('delivery', 'manage_delivery', <DeliveryPage />),
               guarded('cvat-link', 'view_project', <CvatLinkPage />),
               guarded('announcements', 'view_project', <AnnouncementsPage />),
             ],

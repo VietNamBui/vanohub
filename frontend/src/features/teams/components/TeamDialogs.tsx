@@ -52,37 +52,22 @@ export default function TeamDialogs({ state, ...props }: Props) {
 
 type DialogProps = Omit<Props, 'state'>
 
-const NO_LEADER = 0
-
 const memberItem = (m: Member): SelectItemType => ({ id: m.user.id, label: m.user.full_name, supportingText: m.user.username })
 
-function TeamFormDialog({ projectId, members, onClose, onDone, team }: DialogProps & { team?: Team }) {
+function TeamFormDialog({ projectId, onClose, onDone, team }: DialogProps & { team?: Team }) {
   const [name, setName] = useState(team?.name ?? '')
-  const [leader, setLeader] = useState<number>(team?.leader ?? NO_LEADER)
   const { run, pending } = useAction()
-  // Backend chỉ nhận leader có vai trò Team Leader trong dự án.
-  const leaders = members.filter((m) => m.roles.includes('team_leader'))
 
   async function submit() {
-    const data = { name: name.trim(), leader: leader === NO_LEADER ? null : leader }
     const ok = team
-      ? await run(() => updateTeam(projectId, team.id, data), 'Đã lưu team')
-      : await run(() => createTeam(projectId, data), 'Đã tạo team')
+      ? await run(() => updateTeam(projectId, team.id, { name: name.trim() }), 'Đã lưu team')
+      : await run(() => createTeam(projectId, { name: name.trim() }), 'Đã tạo team')
     if (ok) onDone()
   }
 
   return (
-    <FormDialog isOpen title={team ? 'Sửa team' : 'Tạo team'} onClose={onClose} onSubmit={submit} pending={pending}>
+    <FormDialog isOpen title={team ? 'Đổi tên team' : 'Tạo team'} onClose={onClose} onSubmit={submit} pending={pending}>
       <Input label="Tên team" isRequired autoFocus value={name} onChange={setName} placeholder="VD: Team Alpha" />
-      <Select
-        label="Team Leader"
-        hint="Chỉ hiện người có vai trò Team Leader trong dự án."
-        items={[{ id: NO_LEADER, label: 'Chưa có leader' }, ...leaders.map(memberItem)]}
-        selectedKey={leader}
-        onSelectionChange={(key) => setLeader(Number(key))}
-      >
-        {(item) => <Select.Item id={item.id} label={item.label} supportingText={item.supportingText} />}
-      </Select>
     </FormDialog>
   )
 }
@@ -90,14 +75,13 @@ function TeamFormDialog({ projectId, members, onClose, onDone, team }: DialogPro
 function AddMemberDialog({ projectId, teams, members, onClose, onDone, teamId }: DialogProps & { teamId?: number }) {
   const [team, setTeam] = useState<number | null>(teamId ?? teams[0]?.id ?? null)
   const [user, setUser] = useState<number | null>(null)
-  const [capacity, setCapacity] = useState(5)
   const { run, pending } = useAction()
   // Đề xuất đang dùng: mỗi người chỉ thuộc một team → chỉ thêm được người chưa có team.
   const unassigned = members.filter((m) => !m.team)
 
   async function submit() {
     if (team == null || user == null) return
-    const ok = await run(() => addTeamMember(projectId, team, user, capacity), 'Đã thêm thành viên')
+    const ok = await run(() => addTeamMember(projectId, team, user), 'Đã thêm thành viên')
     if (ok) onDone()
   }
 
@@ -127,8 +111,6 @@ function AddMemberDialog({ projectId, teams, members, onClose, onDone, teamId }:
       >
         {(item) => <Select.Item id={item.id} label={item.label} supportingText={item.supportingText} />}
       </Select>
-      <InputNumber label="Sức chứa" hint="Số job tối đa người này giữ cùng lúc." minValue={1} maxValue={100}
-        value={capacity} onChange={(v) => setCapacity(Number.isNaN(v) ? 5 : v)} />
     </FormDialog>
   )
 }

@@ -14,7 +14,6 @@ export type Capability =
   | 'manage_delivery'
   | 'send_announcement'
   | 'view_activity'
-  | 'lead_team'
 
 export const CAPABILITY_LABELS: Record<Capability, string> = {
   view_project: 'Xem dự án',
@@ -31,5 +30,4 @@ export const CAPABILITY_LABELS: Record<Capability, string> = {
   manage_delivery: 'Bàn giao',
   send_announcement: 'Gửi thông báo',
   view_activity: 'Xem nhật ký hoạt động',
-  lead_team: 'Dẫn dắt team: giao lại job, deadline, cấp QC1 trong team',
 }

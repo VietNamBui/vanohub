@@ -15,8 +15,8 @@ class ExpandRolesTests(TestCase):
     def test_qc2_does_not_imply_pm(self):
         self.assertEqual(expand_roles([Role.QC2]), {Role.QC2})
 
-    def test_team_leader_implies_qc1(self):
-        self.assertEqual(expand_roles([Role.TEAM_LEADER]), {Role.TEAM_LEADER, Role.QC1})
+    def test_only_four_roles_remain(self):
+        self.assertEqual(set(Role.values), {"project_manager", "qc2", "qc1", "annotator"})
 
 
 class RoleAssignmentConstraintTests(TestCase):
@@ -28,19 +28,10 @@ class RoleAssignmentConstraintTests(TestCase):
         with self.assertRaises(IntegrityError):
             RoleAssignment.objects.create(user=self.user, role=Role.PROJECT_MANAGER, project=None)
 
-    def test_director_must_not_have_project(self):
-        with self.assertRaises(IntegrityError):
-            RoleAssignment.objects.create(user=self.user, role=Role.DIRECTOR, project=self.project)
-
     def test_same_role_same_project_is_rejected(self):
         RoleAssignment.objects.create(user=self.user, role=Role.QC2, project=self.project)
         with self.assertRaises(IntegrityError):
             RoleAssignment.objects.create(user=self.user, role=Role.QC2, project=self.project)
-
-    def test_director_cannot_be_assigned_twice(self):
-        RoleAssignment.objects.create(user=self.user, role=Role.DIRECTOR)
-        with self.assertRaises(IntegrityError):
-            RoleAssignment.objects.create(user=self.user, role=Role.DIRECTOR)
 
 
 class AuthApiTests(TestCase):
@@ -62,7 +53,6 @@ class AuthApiTests(TestCase):
         me = self.client.get(reverse("me"))
         self.assertEqual(me.status_code, 200)
         self.assertEqual(me.data["username"], "bob")
-        self.assertFalse(me.data["is_director"])
         self.assertEqual(me.data["role_assignments"][0]["role"], Role.PROJECT_MANAGER)
 
     def test_wrong_password_is_rejected(self):

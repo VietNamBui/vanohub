@@ -3,7 +3,6 @@ import {
   BarChartOutlined,
   DatabaseOutlined,
   NotificationOutlined,
-  SendOutlined,
   SettingOutlined,
   TeamOutlined,
 } from '@ant-design/icons'
@@ -26,29 +25,24 @@ const MENU: Group[] = [
   {
     key: 'g-overview', label: 'Tổng quan', icon: <BarChartOutlined />,
     items: [
-      { key: 'overview', label: 'Tổng quan dự án', cap: 'view_dashboard' },
+      { key: 'overview', label: 'Tổng quan', cap: 'view_dashboard' },
       { key: 'team-ranking', label: 'Xếp hạng team', cap: 'view_dashboard' },
       { key: 'qc2/dashboard', label: 'Tổng quan QC2', cap: 'perform_audit' },
-      { key: 'leader/overview', label: 'Tổng quan team', cap: 'lead_team' },
     ],
   },
   {
     key: 'g-ops', label: 'Vận hành', icon: <DatabaseOutlined />,
     items: [
-      { key: 'datasets', label: 'Datasets', cap: 'view_jobs' },
-      { key: 'batches', label: 'Batches', cap: 'view_jobs' },
+      { key: 'datasets', label: 'Projects', cap: 'view_jobs' },
+      { key: 'batches', label: 'Tasks', cap: 'view_jobs' },
       { key: 'jobs', label: 'Jobs', cap: 'view_jobs' },
       { key: 'queue', label: 'Data Queue', cap: 'view_jobs' },
-      { key: 'leader/jobs', label: 'Job của team', cap: 'lead_team' },
     ],
   },
   {
     key: 'g-people', label: 'Nhân sự', icon: <TeamOutlined />,
     items: [
       { key: 'teams', label: 'Team & Members', cap: 'manage_team' },
-      { key: 'workload', label: 'Tải công việc', cap: ['manage_team', 'view_dashboard'] },
-      { key: 'leader/members', label: 'Thành viên team', cap: 'lead_team' },
-      { key: 'leader/workload', label: 'Tải công việc team', cap: 'lead_team' },
     ],
   },
   {
@@ -57,13 +51,8 @@ const MENU: Group[] = [
       { key: 'audits', label: 'Quản lý Audit', cap: 'manage_audits' },
       { key: 'qc2/strategy', label: 'Chiến thuật audit', cap: 'manage_audits' },
       { key: 'qc2/work', label: 'Job audit QC2', cap: 'perform_audit' },
-      { key: 'error-categories', label: 'Danh mục lỗi', cap: 'manage_quality_catalog' },
-      { key: 'guidelines', label: 'Hướng dẫn gán nhãn', cap: 'view_guidelines' },
+      { key: 'guidelines', label: 'Guidelines', cap: 'view_guidelines' },
     ],
-  },
-  {
-    key: 'g-delivery', label: 'Bàn giao', icon: <SendOutlined />,
-    items: [{ key: 'delivery', label: 'Delivery', cap: 'manage_delivery' }],
   },
   {
     key: 'g-settings', label: 'Cấu hình', icon: <SettingOutlined />,
@@ -73,7 +62,7 @@ const MENU: Group[] = [
   },
   {
     key: 'g-notify', label: 'Thông báo', icon: <NotificationOutlined />,
-    items: [{ key: 'announcements', label: 'Thông báo dự án', cap: 'view_project' }],
+    items: [{ key: 'announcements', label: 'Thông báo', cap: 'view_project' }],
   },
 ]
 

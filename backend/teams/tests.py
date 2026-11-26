@@ -22,17 +22,14 @@ class TeamTests(TestCase):
         self.assertEqual(moved.status_code, 200, moved.data)
         self.assertEqual(TeamMember.objects.get(user=self.f.ann1).team, self.team_b)
 
-    def test_leader_must_be_team_leader(self):
-        response = self.pm.patch(self.f.url(f"teams/{self.team_a.id}/"), {"leader": self.f.ann1.id}, format="json")
-        self.assertEqual(response.status_code, 400)
-        tl = make_user("tl", Role.TEAM_LEADER, project=self.f.project)
-        response = self.pm.patch(self.f.url(f"teams/{self.team_a.id}/"), {"leader": tl.id}, format="json")
-        self.assertEqual(response.status_code, 200)
-
-    def test_user_outside_project_cannot_join(self):
-        outsider = make_user("outsider")
-        response = self.pm.post(self.f.url(f"teams/{self.team_a.id}/add-member/"), {"user": outsider.id}, format="json")
-        self.assertEqual(response.status_code, 400)
+    def test_member_without_role_defaults_to_annotator(self):
+        newcomer = make_user("newcomer")
+        response = self.pm.post(self.f.url(f"teams/{self.team_a.id}/add-member/"), {"user": newcomer.id}, format="json")
+        self.assertEqual(response.status_code, 201, response.data)
+        self.assertEqual(newcomer.get_project_roles(self.f.project), {Role.ANNOTATOR})
+        # Người đã có vai trò thì giữ nguyên, không bị gán thêm Annotator
+        self.pm.post(self.f.url(f"teams/{self.team_b.id}/add-member/"), {"user": self.f.qc1.id}, format="json")
+        self.assertEqual(self.f.qc1.get_project_roles(self.f.project), {Role.QC1})
 
     def test_qc2_only_cannot_manage_teams(self):
         self.assertEqual(self.f.client(self.f.qc2).get(self.f.url("teams/")).status_code, 403)
@@ -63,73 +60,12 @@ class TeamDeleteTests(TestCase):
         self.assertIn(response.status_code, (403, 404))
 
 
-class LeaderApiTests(TestCase):
-    """Team Leader chỉ thấy / thao tác trong team mình phụ trách."""
-
-    def setUp(self):
-        self.f = ProjectFixture()
-        p = self.f.project
-        self.tl = make_user("tl", Role.TEAM_LEADER, project=p)
-        self.team = Team.objects.create(project=p, name="Team A", leader=self.tl)
-        self.other_team = Team.objects.create(project=p, name="Team B")
-        for user in (self.tl, self.f.ann1, self.f.qc1):
-            TeamMember.objects.create(team=self.team, user=user)
-        TeamMember.objects.create(team=self.other_team, user=self.f.ann2)
-        self.mine = self.f.job(status="annotating", annotator=self.f.ann1)
-        self.theirs = self.f.job(status="annotating", annotator=self.f.ann2)
-        self.theirs.qc1_reviewer = None
-        self.theirs.save()
-        self.client_tl = self.f.client(self.tl)
-
-    def test_pm_and_annotator_cannot_use_leader_api(self):
-        self.assertEqual(self.f.client(self.f.pm).get(self.f.url("leader/teams/")).status_code, 403)
-        self.assertEqual(self.f.client(self.f.ann1).get(self.f.url("leader/jobs/")).status_code, 403)
-
-    def test_leader_sees_only_team_jobs_and_members(self):
-        ids = [j["id"] for j in self.client_tl.get(self.f.url("leader/jobs/")).data["results"]]
-        self.assertIn(self.mine.id, ids)
-        self.assertNotIn(self.theirs.id, ids)
-        teams = self.client_tl.get(self.f.url("leader/teams/")).data
-        self.assertEqual([t["name"] for t in teams], ["Team A"])
-        self.assertEqual(self.client_tl.get(self.f.url(f"leader/dashboard/?team={self.other_team.id}")).status_code, 404)
-
-    def test_batch_assigned_to_team_counts_as_team_job(self):
-        self.f.batch.team = self.team
-        self.f.batch.save()
-        ids = [j["id"] for j in self.client_tl.get(self.f.url("leader/jobs/")).data["results"]]
-        self.assertIn(self.theirs.id, ids)
-
-    def test_reassign_only_to_team_members(self):
-        url = self.f.url(f"leader/jobs/{self.mine.id}/assign/")
-        self.assertEqual(self.client_tl.post(url, {"annotator": self.f.ann2.id}, format="json").status_code, 400)
-        self.assertEqual(self.client_tl.post(url, {"annotator": self.f.ann1.id}, format="json").status_code, 200)
-        self.assertEqual(self.client_tl.post(self.f.url(f"leader/jobs/{self.theirs.id}/assign/"),
-                                             {"annotator": self.f.ann1.id}, format="json").status_code, 404)
-
-    def test_bulk_deadline_only_touches_team_jobs(self):
-        response = self.client_tl.post(self.f.url("leader/jobs/bulk-deadline/"),
-                                       {"ids": [self.mine.id, self.theirs.id], "deadline": None}, format="json")
-        self.assertEqual(response.data["updated"], 1)
-
-    def test_grant_and_revoke_qc1(self):
-        url = self.f.url(f"leader/teams/{self.team.id}/members/{self.f.ann1.id}/qc1/")
-        self.assertEqual(self.client_tl.post(url).status_code, 201)
-        self.assertIn(Role.QC1, self.f.ann1.get_project_roles(self.f.project))
-        self.assertEqual(self.client_tl.post(url).status_code, 400)  # đã có
-        self.assertEqual(self.client_tl.delete(url).status_code, 200)
-        self.assertNotIn(Role.QC1, self.f.ann1.get_project_roles(self.f.project))
-
-    def test_cannot_revoke_implied_qc1_or_qc1_with_open_jobs(self):
-        self.assertEqual(self.client_tl.delete(self.f.url(f"leader/teams/{self.team.id}/members/{self.tl.id}/qc1/")).status_code, 400)
-        self.f.job(status="pending_qc1", annotator=self.f.ann1)  # qc1_reviewer mặc định = self.f.qc1
-        self.assertEqual(self.client_tl.delete(self.f.url(f"leader/teams/{self.team.id}/members/{self.f.qc1.id}/qc1/")).status_code, 400)
-
-    def test_cannot_grant_qc1_outside_own_team(self):
-        url = self.f.url(f"leader/teams/{self.other_team.id}/members/{self.f.ann2.id}/qc1/")
-        self.assertEqual(self.client_tl.post(url).status_code, 404)
-
-    def test_dashboard_shape(self):
-        data = self.client_tl.get(self.f.url("leader/dashboard/?period=week")).data
-        self.assertEqual(data["member_count"], 3)
-        self.assertEqual(data["kpi_quota"]["status"], "pending_definition")
-        self.assertEqual({r["user"]["username"] for r in data["ranking"]}, {"tl", self.f.ann1.username, self.f.qc1.username})
+class TeamRolesInPayloadTests(TestCase):
+    def test_team_members_include_project_roles(self):
+        f = ProjectFixture()
+        team = Team.objects.create(project=f.project, name="R")
+        TeamMember.objects.create(team=team, user=f.ann1)
+        TeamMember.objects.create(team=team, user=f.qc1)
+        data = f.client(f.pm).get(f.url(f"teams/{team.id}/")).data
+        roles = {m["user"]["username"]: m["roles"] for m in data["members"]}
+        self.assertEqual(roles, {f.ann1.username: [Role.ANNOTATOR], f.qc1.username: [Role.QC1]})

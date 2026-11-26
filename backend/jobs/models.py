@@ -32,6 +32,8 @@ OPEN_STATUSES = STAGE_STATUSES["annotation"] + STAGE_STATUSES["qc1"] + STAGE_STA
 
 class Job(models.Model):
     project = models.ForeignKey("projects.Project", on_delete=models.CASCADE, related_name="jobs")
+    # project = organization; dataset = CVAT project; batch = CVAT task (xem projects/models.py).
+    dataset = models.ForeignKey("projects.Dataset", on_delete=models.CASCADE, related_name="jobs")
     batch = models.ForeignKey("projects.Batch", on_delete=models.CASCADE, related_name="jobs")
     name = models.CharField(max_length=200)
     status = models.CharField(max_length=30, choices=JobStatus.choices, default=JobStatus.PENDING_ANNOTATION)
@@ -53,8 +55,12 @@ class Job(models.Model):
     # --- Liên kết CVAT (CVAT là nguồn dữ liệu annotation; trạng thái do Vanohub quản lý) ---
     cvat_job_id = models.PositiveIntegerField(null=True, blank=True, unique=True)
     cvat_task_id = models.PositiveIntegerField(null=True, blank=True)
+    # Frame đầu của job trong task (CVAT đánh số frame theo task) — để chỉ đúng frame cần QC2 kiểm.
+    cvat_start_frame = models.PositiveIntegerField(default=0)
     cvat_stage = models.CharField(max_length=30, blank=True)
     cvat_state = models.CharField(max_length=30, blank=True)
+    # Assignee hiện tại bên CVAT (ID user CVAT) — để biết đã đồng bộ người giữ job sang CVAT chưa.
+    cvat_assignee_id = models.PositiveIntegerField(null=True, blank=True)
 
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)

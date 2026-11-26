@@ -1,8 +1,5 @@
-import random
-
 from django.db import transaction
 from django.db.models import Count, Q
-from django.shortcuts import get_object_or_404
 from django.utils import timezone
 from rest_framework import mixins, viewsets
 from rest_framework.decorators import action
@@ -12,20 +9,18 @@ from rest_framework.views import APIView
 
 from accounts.models import Role, User
 from accounts.permissions import Cap, ProjectScopedViewMixin
-from jobs.models import Job, JobStatus
+from jobs.models import JobStatus
 from accounts.serializers import UserBriefSerializer
-from projects.models import ActivityLog, Batch, DataStatus, SamplingMethod, StratifyBy
+from cvat_integration.assignee import schedule_assignee_push
+from projects.models import ActivityLog
 
-from . import sampling
 from .models import Audit, AuditSample, ErrorCategory, ReviewError, ReviewStage
 from .serializers import (
-    AuditInputSerializer,
     AuditSampleSerializer,
     AuditSerializer,
     ErrorCategorySerializer,
     PassSerializer,
     RejectSerializer,
-    SampleJobSerializer,
 )
 
 
@@ -54,14 +49,6 @@ class ErrorCategoryViewSet(ProjectScopedViewMixin, mixins.ListModelMixin, mixins
                            target=category)
 
 
-def _strata_key(stratify_by):
-    if stratify_by == StratifyBy.QC1_REVIEWER:
-        return lambda job: job.qc1_reviewer.username if job.qc1_reviewer else "(chưa có QC1)"
-    if stratify_by == StratifyBy.DATASET:
-        return lambda job: job.batch.dataset.name
-    return lambda job: job.annotator.username if job.annotator else "(chưa có annotator)"
-
-
 def _four_eyes_conflicts(job):
     """Luật bốn mắt: không audit job mình đã annotate hoặc đã QC1."""
     return {uid for uid in (job.annotator_id, job.qc1_reviewer_id) if uid}
@@ -69,19 +56,14 @@ def _four_eyes_conflicts(job):
 
 class AuditViewSet(ProjectScopedViewMixin, mixins.ListModelMixin, mixins.RetrieveModelMixin,
                    viewsets.GenericViewSet):
-    """QC2 Internal Audit.
+    """Các đợt QC2 theo task — CHỈ ĐỌC. Đợt QC2 tự tạo khi job đầu tiên của task vào Chờ QC2
+    (quality/qc2.py) và tự chốt khi task được bàn giao.
 
-    - Quản lý audit (tạo, xem trước mẫu, chốt): PM (Cap.MANAGE_AUDITS).
-    - QC2 chuyên trách: chỉ thấy audit có mẫu được giao cho mình.
-    Cùng một bộ API phục vụ cả PM và QC2 — không viết hai hệ thống audit.
+    - PM (Cap.MANAGE_AUDITS) thấy mọi đợt; QC2 chuyên trách chỉ thấy đợt có lượt được giao cho mình.
     """
 
     serializer_class = AuditSerializer
-    required_capabilities = {
-        "list": [Cap.MANAGE_AUDITS, Cap.PERFORM_AUDIT],
-        "retrieve": [Cap.MANAGE_AUDITS, Cap.PERFORM_AUDIT],
-        "*": Cap.MANAGE_AUDITS,
-    }
+    required_capabilities = {"*": [Cap.MANAGE_AUDITS, Cap.PERFORM_AUDIT]}
 
     def get_queryset(self):
         queryset = Audit.objects.filter(project=self.project).select_related("batch__dataset", "created_by").annotate(
@@ -99,89 +81,6 @@ class AuditViewSet(ProjectScopedViewMixin, mixins.ListModelMixin, mixins.Retriev
             queryset = queryset.filter(batch_id=p["batch"])
         return queryset
 
-    def _prepare(self, request):
-        """Kiểm tra đầu vào chung cho preview và create; trả về (dữ liệu, batch, danh sách job đủ điều kiện)."""
-        serializer = AuditInputSerializer(data=request.data, context=self.get_serializer_context())
-        serializer.is_valid(raise_exception=True)
-        data = serializer.validated_data
-        batch = get_object_or_404(Batch, pk=data["batch"], dataset__project=self.project)
-        if batch.status != DataStatus.ACTIVE:
-            raise ValidationError("Batch đã khoá hoặc đã bàn giao.")
-        if batch.audits.filter(status=Audit.Status.IN_PROGRESS).exists():
-            raise ValidationError("Batch đang có một audit chưa chốt.")
-        eligible = list(
-            Job.objects.filter(batch=batch, status=JobStatus.PENDING_QC2, is_locked=False)
-            .select_related("annotator", "qc1_reviewer", "batch__dataset")
-            .order_by("id")
-        )
-        if not eligible:
-            raise ValidationError("Batch không có job nào ở trạng thái Chờ QC2.")
-        return data, batch, eligible
-
-    def _pick(self, data, eligible):
-        seed = data.get("seed") or random.SystemRandom().randrange(1, 2**53)
-        if data["method"] == SamplingMethod.STRATIFIED:
-            picked = sampling.stratified_sample(eligible, data["sampling_rate"], seed, _strata_key(data["stratify_by"]))
-        else:
-            picked = sampling.random_sample(eligible, data["sampling_rate"], seed)
-        return seed, picked
-
-    @action(detail=False, methods=["post"])
-    def preview(self, request, project_id):
-        """Xem trước mẫu (không lưu). Gửi lại `seed` khi tạo để chốt đúng mẫu đã xem."""
-        data, batch, eligible = self._prepare(request)
-        seed, picked = self._pick(data, eligible)
-        return Response({
-            "batch": batch.id, "method": data["method"], "sampling_rate": data["sampling_rate"],
-            "stratify_by": data["stratify_by"] if data["method"] == SamplingMethod.STRATIFIED else "",
-            "seed": seed, "eligible_count": len(eligible), "sample_count": len(picked),
-            "estimated_objects": sum(job.object_count for job, _ in picked),
-            "estimated_frames": sum(job.frame_count for job, _ in picked),
-            "samples": [{"stratum": stratum, "job": SampleJobSerializer(job).data} for job, stratum in picked],
-        })
-
-    def create(self, request, project_id):
-        data, batch, eligible = self._prepare(request)
-        seed, picked = self._pick(data, eligible)
-        assignment = sampling.assign_auditors([job for job, _ in picked], data["auditors"], _four_eyes_conflicts)
-        with transaction.atomic():
-            audit = Audit.objects.create(
-                project=self.project, batch=batch, method=data["method"], sampling_rate=data["sampling_rate"],
-                stratify_by=data["stratify_by"] if data["method"] == SamplingMethod.STRATIFIED else "",
-                seed=seed, eligible_count=len(eligible), eligible_job_ids=[j.id for j in eligible],
-                note=data["note"], created_by=request.user,
-            )
-            AuditSample.objects.bulk_create([
-                AuditSample(audit=audit, job=job, stratum=stratum, auditor=assignment[job]) for job, stratum in picked
-            ])
-            ActivityLog.record(project=self.project, actor=request.user, action="audit.create", target=audit,
-                               after={"method": audit.method, "rate": audit.sampling_rate,
-                                      "eligible": len(eligible), "sampled": len(picked)})
-        return Response(self.get_serializer(self.get_queryset().get(pk=audit.pk)).data, status=201)
-
-    @action(detail=True, methods=["post"])
-    def complete(self, request, project_id, pk=None):
-        """Chốt audit: job đủ điều kiện nhưng KHÔNG được lấy mẫu → Đã duyệt.
-
-        ĐỀ XUẤT (L4 bỏ qua trong MVP): không có bước PM accept/reject cả batch.
-        """
-        audit = self.get_object()
-        if audit.status != Audit.Status.IN_PROGRESS:
-            raise ValidationError("Audit đã được chốt.")
-        if audit.samples.filter(result=AuditSample.Result.PENDING).exists():
-            raise ValidationError("Còn mẫu chưa audit.")
-        sampled = set(audit.samples.values_list("job_id", flat=True))
-        with transaction.atomic():
-            approved = Job.objects.filter(
-                pk__in=set(audit.eligible_job_ids) - sampled, status=JobStatus.PENDING_QC2
-            ).update(status=JobStatus.APPROVED)
-            audit.status = Audit.Status.COMPLETED
-            audit.completed_at = timezone.now()
-            audit.save(update_fields=["status", "completed_at"])
-            ActivityLog.record(project=self.project, actor=request.user, action="audit.complete", target=audit,
-                               after={"approved_without_sampling": approved})
-        return Response(self.get_serializer(self.get_queryset().get(pk=audit.pk)).data)
-
 
 class AuditSampleViewSet(ProjectScopedViewMixin, mixins.ListModelMixin, mixins.RetrieveModelMixin,
                          viewsets.GenericViewSet):
@@ -192,7 +91,7 @@ class AuditSampleViewSet(ProjectScopedViewMixin, mixins.ListModelMixin, mixins.R
 
     def get_queryset(self):
         queryset = AuditSample.objects.filter(audit__project=self.project).select_related(
-            "audit", "job__annotator", "job__qc1_reviewer", "job__batch", "auditor", "reviewed_by"
+            "audit", "job__annotator", "job__qc1_reviewer", "job__batch", "job__dataset", "auditor", "reviewed_by"
         ).prefetch_related("errors__category", "errors__reported_by")
         p = self.request.query_params
         if not self.has_cap(Cap.MANAGE_AUDITS) or p.get("mine") == "1":
@@ -208,7 +107,7 @@ class AuditSampleViewSet(ProjectScopedViewMixin, mixins.ListModelMixin, mixins.R
     def _check_can_review(self, sample):
         user = self.request.user
         if sample.audit.status != Audit.Status.IN_PROGRESS:
-            raise ValidationError("Audit đã chốt.")
+            raise ValidationError("Task đã bàn giao, đợt QC2 đã chốt.")
         if sample.result != AuditSample.Result.PENDING:
             raise ValidationError("Mẫu này đã có kết quả.")
         if sample.auditor_id and sample.auditor_id != user.id and not self.has_cap(Cap.MANAGE_AUDITS):
@@ -238,6 +137,7 @@ class AuditSampleViewSet(ProjectScopedViewMixin, mixins.ListModelMixin, mixins.R
             self._finish(sample, AuditSample.Result.PASS, serializer.validated_data["comment"])
             job.status = JobStatus.APPROVED
             job.save(update_fields=["status", "updated_at"])
+            schedule_assignee_push([job.pk])
             ActivityLog.record(project=self.project, actor=request.user, action="qc2.pass", target=job, job=job,
                                before={"status": JobStatus.PENDING_QC2}, after={"status": JobStatus.APPROVED})
         return Response(self.get_serializer(self.get_queryset().get(pk=sample.pk)).data)
@@ -268,6 +168,7 @@ class AuditSampleViewSet(ProjectScopedViewMixin, mixins.ListModelMixin, mixins.R
             if job.rework_round > self.project.max_rework_rounds:
                 job.is_escalated = True
             job.save(update_fields=["status", "rework_round", "is_escalated", "updated_at"])
+            schedule_assignee_push([job.pk])  # Rework → job quay về annotator
             ActivityLog.record(
                 project=self.project, actor=request.user, action="qc2.reject", target=job, job=job,
                 before={"status": JobStatus.PENDING_QC2},
@@ -289,19 +190,20 @@ class AuditSampleViewSet(ProjectScopedViewMixin, mixins.ListModelMixin, mixins.R
             raise ValidationError("Luật bốn mắt: người này đã annotate hoặc QC1 job.")
         sample.auditor = auditor
         sample.save(update_fields=["auditor"])
+        schedule_assignee_push([sample.job_id])
         ActivityLog.record(project=self.project, actor=request.user, action="qc2.assign_auditor", target=sample.job,
                            job=sample.job, after={"auditor": auditor.username})
         return Response(self.get_serializer(self.get_queryset().get(pk=sample.pk)).data)
 
 
-SAMPLING_FIELDS = ("sampling_method", "sampling_rate", "stratify_by")
+SAMPLING_FIELDS = ("sampling_rate",)
 
 
 class AuditStrategyView(ProjectScopedViewMixin, APIView):
-    """GET /api/projects/{id}/audit-strategy/ — chiến thuật lấy mẫu QC2 đang áp dụng.
+    """GET /api/projects/{id}/audit-strategy/ — quy tắc QC2 đang áp dụng (chỉ PM).
 
-    Chỉ dành cho PM (PM luôn kiêm QC2); QC2 chuyên trách không có màn hình này.
-    PM sửa qua /settings/. Kèm lịch sử thay đổi và các batch có thể xem trước mẫu.
+    QC2 kiểm MỌI job qua QC1, mỗi job ngẫu nhiên sampling_rate % số frame (làm tròn lên, ít nhất 1).
+    PM sửa tỉ lệ qua /settings/. Kèm lịch sử thay đổi và thống kê lượt QC2.
     """
 
     required_capabilities = {"*": Cap.MANAGE_AUDITS}
@@ -316,21 +218,14 @@ class AuditStrategyView(ProjectScopedViewMixin, APIView):
                 before = {k: (log.before or {}).get(k) for k in after}
                 history.append({"at": log.created_at, "actor": UserBriefSerializer(log.actor).data if log.actor else None,
                                 "before": before, "after": after})
-        batches = (
-            Batch.objects.filter(dataset__project=project, status=DataStatus.ACTIVE)
-            .exclude(audits__status=Audit.Status.IN_PROGRESS)
-            .annotate(pending_qc2=Count("jobs", filter=Q(jobs__status=JobStatus.PENDING_QC2, jobs__is_locked=False)))
-            .filter(pending_qc2__gt=0)
-            .select_related("dataset")
-            .order_by("dataset__name", "name")
-        )
+        samples = AuditSample.objects.filter(audit__project=project)
         return Response({
-            "method": project.sampling_method,
             "sampling_rate": project.sampling_rate,
-            "stratify_by": project.stratify_by,
             "can_edit": self.has_cap(Cap.MANAGE_SETTINGS),
             "history": history[:20],
-            "preview_batches": [
-                {"id": b.id, "name": b.name, "dataset_name": b.dataset.name, "pending_qc2": b.pending_qc2} for b in batches
-            ],
+            "stats": {
+                "pending": samples.filter(result=AuditSample.Result.PENDING).count(),
+                "passed": samples.filter(result=AuditSample.Result.PASS).count(),
+                "rejected": samples.filter(result=AuditSample.Result.REJECT).count(),
+            },
         })
