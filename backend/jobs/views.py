@@ -1,7 +1,8 @@
 from datetime import timedelta
+from typing import Any
 
 from django.db import transaction
-from django.db.models import Case, Count, F, IntegerField, Prefetch, Q, When
+from django.db.models import Case, Count, F, IntegerField, Max, Prefetch, Q, When
 from django.utils import timezone
 from rest_framework import mixins, status, viewsets
 from rest_framework.decorators import action
@@ -12,6 +13,7 @@ from rest_framework.views import APIView
 from accounts.datetime_utils import format_rfc3339_utc, parse_query_date_range
 from accounts.models import Role, RoleAssignment, User
 from accounts.permissions import Cap, ProjectScopedViewMixin
+from accounts.validation import validated_dict
 from projects.models import ActivityLog, DataStatus, EscalationPolicy, UserNotification
 from projects.notifications import notify_assigned, notify_review_needed, project_users_with_roles
 from projects.views import StandardPagination
@@ -23,23 +25,14 @@ from .models import (
     OPEN_STATUSES,
     STAGE_STATUSES,
     AnnotatorRequest,
+    DailyOutputRecord,
     Job,
     JobStatus,
+    ReworkScope,
+    record_daily_output,
 )
-from .serializers import (
-    AnnotatorRequestCreateSerializer,
-    AnnotatorRequestResolveSerializer,
-    AnnotatorRequestSerializer,
-    AnnotatorStartSerializer,
-    AnnotatorSubmitSerializer,
-    AssignSerializer,
-    BulkMoveBatchSerializer,
-    BulkSerializer,
-    DeadlineSerializer,
-    JobDetailSerializer,
-    JobSerializer,
-    JobWithErrorsSerializer,
-)
+
+from .serializers import AnnotatorRequestCreateSerializer, AnnotatorRequestResolveSerializer, AnnotatorRequestSerializer, AnnotatorStartSerializer, AnnotatorSubmitSerializer, AssignSerializer, BulkMoveBatchSerializer, BulkSerializer, DeadlineSerializer, JobDetailSerializer, JobNoteSerializer, JobSerializer, JobWithErrorsSerializer, ResolveEscalationSerializer  # isort: skip
 
 
 def _iso(value):
@@ -50,7 +43,7 @@ def _base_job_queryset(project):
     return (
         Job.objects.filter(project=project)
         .select_related("batch__dataset", "annotator", "qc1_reviewer", "project")
-        .annotate(_open_error_count=Count("review_errors", distinct=True))
+        .annotate(_open_error_count=Count("review_errors", filter=Q(review_errors__is_voided=False), distinct=True))
         .prefetch_related(
             Prefetch(
                 "audit_samples",
@@ -59,6 +52,25 @@ def _base_job_queryset(project):
             )
         )
     )
+
+
+def _count_unique_error_targets(errors) -> tuple[int, int]:
+    """Đếm mục tiêu lỗi duy nhất, tách biệt (existing_cuboid_targets, missing_object_targets)."""
+    existing: set[tuple[object, ...]] = set()
+    missing: set[tuple[object, ...]] = set()
+    for err in errors:
+        if err.is_missing_object:
+            if err.frame_number is not None:
+                missing.add(("missing", err.frame_number, err.category_id))
+            else:
+                missing.add(("missing_err", err.id))
+        elif err.frame_number is not None and err.cvat_object_id is not None:
+            existing.add(("obj", err.frame_number, err.cvat_object_id))
+        elif err.location and err.location.strip():
+            existing.add(("loc", err.location.strip().lower()))
+        else:
+            existing.add(("err", err.id))
+    return len(existing), len(missing)
 
 
 def ensure_editable(job):
@@ -153,11 +165,48 @@ def submit_annotation(job_id, *, project, actor, note="", object_count=None):
     prev_objects = job.object_count
     job.status = JobStatus.PENDING_QC1
     job.submitted_at = timezone.now()
-    update_fields = ["status", "submitted_at", "updated_at"]
+    update_fields = ["status", "submitted_at", "last_counted_objects", "round_credited_objects", "updated_at"]
     if object_count is not None:
         job.object_count = object_count
         update_fields.append("object_count")
+
+    # Tính sản lượng cuboid cần ghi bổ sung vào DailyOutputRecord (CS02/CS03):
+    # - Không cộng đúp phần đã ghi qua đồng bộ CVAT trước QC.
+    # - Vòng partial rework: cuboid lỗi có sẵn được sửa tại chỗ + max(cuboid thiếu, phần object tăng thêm trong vòng).
+    # - Vòng full rework: ghi theo khối lượng làm lại trừ phần đã ghi trong vòng hiện tại.
+    is_rework = job.total_rework_rounds > 0 or job.rework_round > 0
+    count_delta = max(0, job.object_count - job.last_counted_objects)
+    if not is_rework:
+        credited = count_delta
+    elif job.rework_scope == ReworkScope.FULL:
+        credited = max(0, job.object_count - job.round_credited_objects)
+    else:
+        active_errs = job.review_errors.filter(is_voided=False)
+        latest_err_round = active_errs.aggregate(m=Max("rework_round"))["m"]
+        if latest_err_round is not None:
+            existing_targets, missing_targets = _count_unique_error_targets(
+                active_errs.filter(rework_round=latest_err_round)
+            )
+        else:
+            existing_targets, missing_targets = 0, 0
+        total_added_in_round = job.round_credited_objects + count_delta
+        target_round_work = existing_targets + max(missing_targets, total_added_in_round)
+        credited = max(0, target_round_work - job.round_credited_objects)
+
+    job.last_counted_objects = max(job.last_counted_objects, job.object_count)
+    job.round_credited_objects += credited
     job.save(update_fields=update_fields)
+
+    if credited > 0:
+        record_daily_output(
+            job=job,
+            user=actor,
+            object_count=credited,
+            is_rework=is_rework,
+            rework_round=max(job.total_rework_rounds, job.rework_round),
+            source=DailyOutputRecord.Source.SUBMIT,
+            at=job.submitted_at,
+        )
 
     # TB03: gỡ ghim thông báo rework/deadline của job sau khi đã nộp xử lý.
     UserNotification.objects.filter(
@@ -167,12 +216,14 @@ def submit_annotation(job_id, *, project, actor, note="", object_count=None):
         is_pinned_pending=True,
     ).update(is_pinned_pending=False)
 
-    before = {"status": prev_status}
-    after = {
+    before: dict[str, object] = {"status": prev_status}
+    after: dict[str, object] = {
         "status": JobStatus.PENDING_QC1,
-        "event": "annotator.resubmit" if job.rework_round > 0 else "annotator.submit",
+        "event": "annotator.resubmit" if is_rework else "annotator.submit",
         "rework_round": job.rework_round,
         "object_count": job.object_count,
+        "credited_objects": credited,
+        "deadline": _iso(job.deadline),
     }
     if object_count is not None and object_count != prev_objects:
         before["object_count"] = prev_objects
@@ -212,6 +263,19 @@ def assign_job(job, data, actor, project):
             after[field] = data[field].pk if data[field] else None
     if job.annotator_id and job.annotator_id == job.qc1_reviewer_id:
         raise ValidationError("Luật bốn mắt: người QC1 không được là annotator của chính job đó.")
+    if job.qc1_reviewer_id and ActivityLog.objects.filter(
+        job=job,
+        action="job.status",
+        after__status__in=[JobStatus.ANNOTATING, JobStatus.PENDING_QC1],
+        actor_id=job.qc1_reviewer_id,
+    ).exists():
+        raise ValidationError("Luật bốn mắt: người này đã từng annotate job nên không thể làm QC1.")
+    if job.annotator_id and ActivityLog.objects.filter(
+        job=job,
+        action__in=["qc1.start", "qc1.pass", "qc1.reject"],
+        actor_id=job.annotator_id,
+    ).exists():
+        raise ValidationError("Luật bốn mắt: người này đã từng QC1 job nên không thể làm annotator.")
     job.save()
     ActivityLog.record(project=project, actor=actor, action="job.assign", target=job, job=job,
                        before=before, after=after, note=data.get("note", ""))
@@ -236,10 +300,10 @@ class JobViewSet(ProjectScopedViewMixin, mixins.ListModelMixin, mixins.RetrieveM
     pagination_class = StandardPagination
     required_capabilities = {"list": Cap.VIEW_JOBS, "retrieve": Cap.VIEW_JOBS, "*": Cap.MANAGE_JOBS}
 
-    def get_serializer_class(self):
+    def get_serializer_class(self) -> Any:
         return JobDetailSerializer if self.action == "retrieve" else JobSerializer
 
-    def get_queryset(self):
+    def get_queryset(self) -> Any:
         queryset = _base_job_queryset(self.project)
         p = self.request.query_params
         now = timezone.now()
@@ -304,28 +368,26 @@ class JobViewSet(ProjectScopedViewMixin, mixins.ListModelMixin, mixins.RetrieveM
     @action(detail=True, methods=["post"])
     def assign(self, request, project_id, pk=None):
         job = self.get_object()
-        serializer = AssignSerializer(data=request.data, context=self.get_serializer_context())
-        serializer.is_valid(raise_exception=True)
-        assign_job(job, serializer.validated_data, request.user, self.project)
+        data = validated_dict(AssignSerializer(data=request.data, context=self.get_serializer_context()))
+        assign_job(job, data, request.user, self.project)
         return self._detail(job)
 
     @action(detail=True, methods=["post"])
     def deadline(self, request, project_id, pk=None):
         job = self.get_object()
-        serializer = DeadlineSerializer(data=request.data)
-        serializer.is_valid(raise_exception=True)
-        set_job_deadline(job, serializer.validated_data["deadline"], serializer.validated_data["note"],
-                         request.user, self.project)
+        data = validated_dict(DeadlineSerializer(data=request.data))
+        set_job_deadline(job, data["deadline"], data["note"], request.user, self.project)
         return self._detail(job)
 
     def _toggle_lock(self, request, locked):
         job = self.get_object()
         if job.is_locked == locked:
             raise ValidationError("Job đã ở trạng thái này.")
+        note_data = validated_dict(JobNoteSerializer(data=request.data))
         job.is_locked = locked
         job.save(update_fields=["is_locked", "updated_at"])
         ActivityLog.record(project=self.project, actor=request.user, action="job.lock" if locked else "job.unlock",
-                           target=job, job=job, note=request.data.get("note", ""))
+                           target=job, job=job, note=note_data["note"])
         return self._detail(job)
 
     @action(detail=True, methods=["post"])
@@ -345,54 +407,51 @@ class JobViewSet(ProjectScopedViewMixin, mixins.ListModelMixin, mixins.RetrieveM
         job = self.get_object()
         if not job.is_escalated:
             raise ValidationError("Job không ở trạng thái Escalated.")
+        res_data = validated_dict(ResolveEscalationSerializer(data=request.data))
         with transaction.atomic():
-            if "annotator" in request.data:
-                serializer = AssignSerializer(data={"annotator": request.data["annotator"]},
-                                              context=self.get_serializer_context())
-                serializer.is_valid(raise_exception=True)
-                assign_job(job, serializer.validated_data, request.user, self.project)
+            if "annotator" in res_data:
+                assign_data = validated_dict(
+                    AssignSerializer(data={"annotator": res_data["annotator"]}, context=self.get_serializer_context())
+                )
+                assign_job(job, assign_data, request.user, self.project)
             before_round = job.rework_round
+            job.total_rework_rounds = max(job.total_rework_rounds, before_round)
             job.is_escalated = False
             job.rework_round = 0
-            job.save(update_fields=["is_escalated", "rework_round", "updated_at"])
+            job.save(update_fields=["is_escalated", "rework_round", "total_rework_rounds", "updated_at"])
             ActivityLog.record(project=self.project, actor=request.user, action="job.resolve_escalation",
                                target=job, job=job, before={"rework_round": before_round},
-                               after={"rework_round": 0}, note=request.data.get("note", ""))
+                               after={"rework_round": 0, "total_rework_rounds": job.total_rework_rounds},
+                               note=res_data["note"])
         return self._detail(job)
 
     @action(detail=False, methods=["post"], url_path="bulk-assign")
     def bulk_assign(self, request, project_id):
-        ids = BulkSerializer(data=request.data)
-        ids.is_valid(raise_exception=True)
-        data = AssignSerializer(data=request.data, context=self.get_serializer_context())
-        data.is_valid(raise_exception=True)
-        jobs = list(self.get_queryset().filter(pk__in=ids.validated_data["ids"]))
+        ids_data = validated_dict(BulkSerializer(data=request.data))
+        assign_data = validated_dict(AssignSerializer(data=request.data, context=self.get_serializer_context()))
+        jobs = list(self.get_queryset().filter(pk__in=ids_data["ids"]))
         with transaction.atomic():  # một job lỗi → không job nào bị đổi
             for job in jobs:
-                assign_job(job, data.validated_data, request.user, self.project)
+                assign_job(job, assign_data, request.user, self.project)
         return Response({"updated": len(jobs)})
 
     @action(detail=False, methods=["post"], url_path="bulk-deadline")
     def bulk_deadline(self, request, project_id):
-        ids = BulkSerializer(data=request.data)
-        ids.is_valid(raise_exception=True)
-        data = DeadlineSerializer(data=request.data)
-        data.is_valid(raise_exception=True)
-        jobs = list(self.get_queryset().filter(pk__in=ids.validated_data["ids"]))
+        ids_data = validated_dict(BulkSerializer(data=request.data))
+        deadline_data = validated_dict(DeadlineSerializer(data=request.data))
+        jobs = list(self.get_queryset().filter(pk__in=ids_data["ids"]))
         with transaction.atomic():
             for job in jobs:
-                set_job_deadline(job, data.validated_data["deadline"], data.validated_data["note"],
-                                 request.user, self.project)
+                set_job_deadline(job, deadline_data["deadline"], deadline_data["note"], request.user, self.project)
         return Response({"updated": len(jobs)})
 
     @action(detail=False, methods=["post"], url_path="bulk-move-batch")
     def bulk_move_batch(self, request, project_id):
         """Data Query: nhóm / chuyển hàng loạt job sang một batch đích trong cùng dự án."""
-        serializer = BulkMoveBatchSerializer(data=request.data, context=self.get_serializer_context())
-        serializer.is_valid(raise_exception=True)
-        target_batch = serializer.validated_data["batch"]
-        note = serializer.validated_data["note"]
-        jobs = list(self.get_queryset().filter(pk__in=serializer.validated_data["ids"]))
+        move_data = validated_dict(BulkMoveBatchSerializer(data=request.data, context=self.get_serializer_context()))
+        target_batch = move_data["batch"]
+        note = move_data["note"]
+        jobs = list(self.get_queryset().filter(pk__in=move_data["ids"]))
         if not jobs:
             raise ValidationError("Không tìm thấy job phù hợp để chuyển batch.")
         with transaction.atomic():
@@ -485,14 +544,14 @@ class AnnotatorJobViewSet(
     lookup_value_regex = r"\d+"
     required_capabilities = {"*": Cap.ANNOTATE_JOBS}
 
-    def get_serializer_class(self):
+    def get_serializer_class(self) -> Any:
         if self.action == "retrieve":
             return JobDetailSerializer
         if self.action == "list" and self.request.query_params.get("include_errors") == "1":
             return JobWithErrorsSerializer
         return JobSerializer
 
-    def get_queryset(self):
+    def get_queryset(self) -> Any:
         queryset = _base_job_queryset(self.project).filter(annotator=self.request.user)
         p = self.request.query_params
         if self.action == "list" and p.get("include_errors") == "1":
@@ -562,6 +621,10 @@ class AnnotatorJobViewSet(
                     batch__dataset__status=DataStatus.ACTIVE,
                 )
                 .exclude(qc1_reviewer=user)
+                .exclude(
+                    events__action__in=["qc1.start", "qc1.pass", "qc1.reject"],
+                    events__actor=user,
+                )
             )
             if team_ids:
                 # Chặn chặt theo team: chỉ nhận job thuộc batch của team mình hoặc batch chung (chưa gán team).
@@ -601,13 +664,12 @@ class AnnotatorJobViewSet(
     def start(self, request, project_id, pk=None):
         """Bắt đầu gán nhãn hoặc bắt đầu sửa Rework (PENDING_ANNOTATION / REWORK -> ANNOTATING)."""
         job = self.get_object()
-        serializer = AnnotatorStartSerializer(data=request.data)
-        serializer.is_valid(raise_exception=True)
+        data = validated_dict(AnnotatorStartSerializer(data=request.data))
         updated = start_annotation(
             job.pk,
             project=self.project,
             actor=request.user,
-            note=serializer.validated_data["note"],
+            note=data["note"],
         )
         return self._detail(updated)
 
@@ -615,14 +677,13 @@ class AnnotatorJobViewSet(
     def submit(self, request, project_id, pk=None):
         """Nộp bài sang hàng chờ QC1 (ANNOTATING -> PENDING_QC1)."""
         job = self.get_object()
-        serializer = AnnotatorSubmitSerializer(data=request.data)
-        serializer.is_valid(raise_exception=True)
+        data = validated_dict(AnnotatorSubmitSerializer(data=request.data))
         updated = submit_annotation(
             job.pk,
             project=self.project,
             actor=request.user,
-            note=serializer.validated_data["note"],
-            object_count=serializer.validated_data.get("object_count"),
+            note=data["note"],
+            object_count=data.get("object_count"),
         )
         return self._detail(updated)
 
@@ -656,7 +717,7 @@ class AnnotatorRequestViewSet(
         "resolve": Cap.MANAGE_JOBS,
     }
 
-    def get_queryset(self):
+    def get_queryset(self) -> Any:
         qs = AnnotatorRequest.objects.filter(project=self.project).select_related(
             "job__batch", "review_error__category", "created_by", "handler"
         )
@@ -673,9 +734,7 @@ class AnnotatorRequestViewSet(
         return qs
 
     def create(self, request, project_id):
-        serializer = AnnotatorRequestCreateSerializer(data=request.data, context=self.get_serializer_context())
-        serializer.is_valid(raise_exception=True)
-        data = serializer.validated_data
+        data = validated_dict(AnnotatorRequestCreateSerializer(data=request.data, context=self.get_serializer_context()))
         job = data["job_obj"]
         review_error = data["review_error_obj"]
         req_type = data["request_type"]
@@ -743,15 +802,16 @@ class AnnotatorRequestViewSet(
         req = self.get_object()
         if req.status in (AnnotatorRequest.Status.RESOLVED, AnnotatorRequest.Status.REJECTED):
             raise ValidationError("Yêu cầu này đã được kết luận.")
-        serializer = AnnotatorRequestResolveSerializer(data=request.data)
-        serializer.is_valid(raise_exception=True)
-        new_status = serializer.validated_data["status"]
+        data = validated_dict(AnnotatorRequestResolveSerializer(data=request.data))
+        new_status = data["status"]
+        prev_status = req.status
+        voided_error_id = None
         with transaction.atomic():
             req.status = new_status
-            if serializer.validated_data["progress_note"]:
-                req.progress_note = serializer.validated_data["progress_note"]
-            if serializer.validated_data["resolution_note"]:
-                req.resolution_note = serializer.validated_data["resolution_note"]
+            if data["progress_note"]:
+                req.progress_note = data["progress_note"]
+            if data["resolution_note"]:
+                req.resolution_note = data["resolution_note"]
             if new_status == AnnotatorRequest.Status.PENDING_PM:
                 pm_assignment = (
                     RoleAssignment.objects.filter(project=self.project, role=Role.PROJECT_MANAGER)
@@ -765,6 +825,26 @@ class AnnotatorRequestViewSet(
                 req.handler_role = "PM"
                 req.resolved_at = timezone.now()
             req.save()
+
+            # L11/CL09: chấp nhận error_dispute → đánh dấu ReviewError đã hủy (giữ lịch sử, loại khỏi thống kê lỗi).
+            if (
+                req.request_type == AnnotatorRequest.RequestType.ERROR_DISPUTE
+                and new_status == AnnotatorRequest.Status.RESOLVED
+                and req.review_error_id
+            ):
+                ReviewError.objects.filter(pk=req.review_error_id).update(is_voided=True)
+                voided_error_id = req.review_error_id
+
+            ActivityLog.record(
+                project=self.project,
+                actor=request.user,
+                action="annotator_request.resolve",
+                target=req.job,
+                job=req.job,
+                before={"status": prev_status},
+                after={"request_id": req.id, "status": new_status, "voided_error_id": voided_error_id},
+                note=req.resolution_note or req.progress_note,
+            )
 
             if new_status in (AnnotatorRequest.Status.RESOLVED, AnnotatorRequest.Status.REJECTED):
                 UserNotification.objects.filter(

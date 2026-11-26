@@ -1,5 +1,6 @@
 import random
 from datetime import timedelta
+from typing import Any
 
 from django.db import transaction
 from django.db.models import Count, Prefetch, Q
@@ -15,33 +16,19 @@ from accounts.datetime_utils import format_rfc3339_utc
 from accounts.models import Role, User
 from accounts.permissions import Cap, ProjectScopedViewMixin
 from accounts.serializers import UserBriefSerializer
-from jobs.models import OPEN_STATUSES, Job, JobStatus, ReworkScope
+from accounts.validation import validated_dict
+from jobs.models import OPEN_STATUSES, FirstQc1Result, Job, JobStatus, ReworkScope
 from jobs.serializers import JobDetailSerializer, JobSerializer
 from jobs.views import ensure_editable, ensure_not_escalated, lock_job, order_by_db06_priority
 from projects.models import ActivityLog, Batch, DataStatus, SamplingMethod, StratifyBy, UserNotification
-from projects.notifications import (
-    notify_assigned,
-    notify_batch_ready_for_qc2,
-    notify_escalated,
-    notify_rework,
-    user_team_ids,
-)
+
+from projects.notifications import notify_assigned, notify_batch_ready_for_qc2, notify_escalated, notify_rework, user_team_ids  # isort: skip
 from projects.views import StandardPagination
 
 from . import sampling
-from .models import Audit, AuditSample, ErrorCategory, ReviewError, ReviewStage
-from .serializers import (
-    AuditCompleteSerializer,
-    AuditInputSerializer,
-    AuditSampleSerializer,
-    AuditSerializer,
-    ErrorCategorySerializer,
-    PassSerializer,
-    Qc1RejectSerializer,
-    Qc1StartSerializer,
-    RejectSerializer,
-    SampleJobSerializer,
-)
+from .models import Audit, AuditSample, ErrorCategory, ErrorVerdict, ReviewError, ReviewStage
+
+from .serializers import AssignAuditorSerializer, AuditCompleteSerializer, AuditInputSerializer, AuditSampleSerializer, AuditSerializer, ErrorCategorySerializer, PassSerializer, Qc1RejectSerializer, Qc1StartSerializer, RejectSerializer, SampleJobSerializer  # isort: skip
 
 
 class ErrorCategoryViewSet(ProjectScopedViewMixin, mixins.ListModelMixin, mixins.CreateModelMixin,
@@ -51,7 +38,7 @@ class ErrorCategoryViewSet(ProjectScopedViewMixin, mixins.ListModelMixin, mixins
     serializer_class = ErrorCategorySerializer
     required_capabilities = {"list": Cap.VIEW_PROJECT, "*": Cap.MANAGE_QUALITY_CATALOG}
 
-    def get_queryset(self):
+    def get_queryset(self) -> Any:
         queryset = ErrorCategory.objects.filter(project=self.project)
         stage = self.request.query_params.get("stage")
         if stage in ("qc1", "qc2"):
@@ -77,9 +64,61 @@ def _strata_key(stratify_by):
     return lambda job: job.annotator.username if job.annotator else "(chưa có annotator)"
 
 
-def _four_eyes_conflicts(job):
-    """Luật bốn mắt: không audit job mình đã annotate hoặc đã QC1."""
-    return {uid for uid in (job.annotator_id, job.qc1_reviewer_id) if uid}
+def _historical_annotator_ids(job) -> set[int]:
+    ids = set(
+        ActivityLog.objects.filter(
+            job_id=job.pk,
+            action="job.status",
+            after__status__in=[JobStatus.ANNOTATING, JobStatus.PENDING_QC1],
+            actor_id__isnull=False,
+        ).values_list("actor_id", flat=True)
+    )
+    if job.annotator_id:
+        ids.add(job.annotator_id)
+    return ids
+
+
+def _historical_qc1_ids(job) -> set[int]:
+    ids = set(
+        ActivityLog.objects.filter(
+            job_id=job.pk,
+            action__in=["qc1.start", "qc1.pass", "qc1.reject"],
+            actor_id__isnull=False,
+        ).values_list("actor_id", flat=True)
+    )
+    if job.qc1_reviewer_id:
+        ids.add(job.qc1_reviewer_id)
+    return ids
+
+
+def _preload_four_eyes_history(job_ids: list[int]) -> dict[int, set[int]]:
+    history: dict[int, set[int]] = {}
+    if not job_ids:
+        return history
+    rows = (
+        ActivityLog.objects.filter(job_id__in=job_ids, actor_id__isnull=False)
+        .filter(
+            Q(action="job.status", after__status__in=[JobStatus.ANNOTATING, JobStatus.PENDING_QC1])
+            | Q(action__in=["qc1.start", "qc1.pass", "qc1.reject"])
+        )
+        .values_list("job_id", "actor_id")
+    )
+    for jid, uid in rows:
+        if jid is not None and uid is not None:
+            history.setdefault(jid, set()).add(uid)
+    return history
+
+
+def _four_eyes_conflicts(job, history_map: dict[int, set[int]] | None = None) -> set[int]:
+    """Luật bốn mắt (L13): không audit job mình đang hoặc đã từng annotate / QC1."""
+    if history_map is not None:
+        ids = set(history_map.get(job.pk, ()))
+        if job.annotator_id:
+            ids.add(job.annotator_id)
+        if job.qc1_reviewer_id:
+            ids.add(job.qc1_reviewer_id)
+        return ids
+    return _historical_annotator_ids(job) | _historical_qc1_ids(job)
 
 
 class AuditViewSet(ProjectScopedViewMixin, mixins.ListModelMixin, mixins.RetrieveModelMixin,
@@ -97,7 +136,7 @@ class AuditViewSet(ProjectScopedViewMixin, mixins.ListModelMixin, mixins.Retriev
         "*": Cap.MANAGE_AUDITS,
     }
 
-    def get_queryset(self):
+    def get_queryset(self) -> Any:
         queryset = (
             Audit.objects.filter(project=self.project)
             .select_related("batch__dataset", "created_by", "decided_by")
@@ -120,9 +159,7 @@ class AuditViewSet(ProjectScopedViewMixin, mixins.ListModelMixin, mixins.Retriev
 
     def _prepare(self, request):
         """Kiểm tra đầu vào chung cho preview và create; trả về (dữ liệu, batch, danh sách job đủ điều kiện)."""
-        serializer = AuditInputSerializer(data=request.data, context=self.get_serializer_context())
-        serializer.is_valid(raise_exception=True)
-        data = serializer.validated_data
+        data = validated_dict(AuditInputSerializer(data=request.data, context=self.get_serializer_context()))
         batch = get_object_or_404(Batch, pk=data["batch"], dataset__project=self.project)
         if batch.status != DataStatus.ACTIVE:
             raise ValidationError("Batch đã khoá hoặc đã bàn giao.")
@@ -154,6 +191,7 @@ class AuditViewSet(ProjectScopedViewMixin, mixins.ListModelMixin, mixins.Retriev
             "batch": batch.id, "method": data["method"], "sampling_rate": data["sampling_rate"],
             "stratify_by": data["stratify_by"] if data["method"] == SamplingMethod.STRATIFIED else "",
             "seed": seed, "eligible_count": len(eligible), "sample_count": len(picked),
+            "actual_sampling_rate": round(len(picked) * 100 / len(eligible), 1) if eligible else 0.0,
             "estimated_objects": sum(job.object_count for job, _ in picked),
             "estimated_frames": sum(job.frame_count for job, _ in picked),
             "samples": [{"stratum": stratum, "job": SampleJobSerializer(job).data} for job, stratum in picked],
@@ -162,7 +200,11 @@ class AuditViewSet(ProjectScopedViewMixin, mixins.ListModelMixin, mixins.Retriev
     def create(self, request, project_id):
         data, batch, eligible = self._prepare(request)
         seed, picked = self._pick(data, eligible)
-        assignment = sampling.assign_auditors([job for job, _ in picked], data["auditors"], _four_eyes_conflicts)
+        picked_jobs = [job for job, _ in picked]
+        history_map = _preload_four_eyes_history([j.pk for j in picked_jobs])
+        assignment = sampling.assign_auditors(
+            picked_jobs, data["auditors"], lambda j: _four_eyes_conflicts(j, history_map)
+        )
         eligible_strata = (
             {str(j.id): _strata_key(data["stratify_by"])(j) for j in eligible}
             if data["method"] == SamplingMethod.STRATIFIED
@@ -215,11 +257,10 @@ class AuditViewSet(ProjectScopedViewMixin, mixins.ListModelMixin, mixins.Retriev
         if audit.samples.filter(result=AuditSample.Result.PENDING).exists():
             raise ValidationError("Còn mẫu chưa audit.")
 
-        serializer = AuditCompleteSerializer(data=request.data)
-        serializer.is_valid(raise_exception=True)
-        decision = serializer.validated_data["decision"]
-        reason = serializer.validated_data["reason"].strip()
-        stratum_decisions = dict(serializer.validated_data["stratum_decisions"])
+        data = validated_dict(AuditCompleteSerializer(data=request.data))
+        decision = data["decision"]
+        reason = data["reason"].strip()
+        stratum_decisions = dict(data["stratum_decisions"])
 
         eligible_ids = list(audit.eligible_job_ids or [])
         sampled_ids = set(audit.samples.values_list("job_id", flat=True))
@@ -297,11 +338,26 @@ class AuditViewSet(ProjectScopedViewMixin, mixins.ListModelMixin, mixins.Retriev
                     prev_status = job.status
                     job.status = JobStatus.REWORK
                     job.rework_round += 1
+                    job.total_rework_rounds = max(job.total_rework_rounds + 1, job.rework_round)
+                    job.rework_scope = ReworkScope.FULL
+                    job.round_credited_objects = 0
+                    job.last_counted_objects = max(job.last_counted_objects, job.object_count)
                     newly_escalated = False
                     if job.rework_round > self.project.max_rework_rounds and not job.is_escalated:
                         job.is_escalated = True
                         newly_escalated = True
-                    job.save(update_fields=["status", "rework_round", "is_escalated", "updated_at"])
+                    job.save(
+                        update_fields=[
+                            "status",
+                            "rework_round",
+                            "total_rework_rounds",
+                            "rework_scope",
+                            "round_credited_objects",
+                            "last_counted_objects",
+                            "is_escalated",
+                            "updated_at",
+                        ]
+                    )
                     returned_count += 1
                     ActivityLog.record(
                         project=self.project,
@@ -368,7 +424,7 @@ class AuditSampleViewSet(ProjectScopedViewMixin, mixins.ListModelMixin, mixins.R
     serializer_class = AuditSampleSerializer
     required_capabilities = {"assign": Cap.MANAGE_AUDITS, "*": Cap.PERFORM_AUDIT}
 
-    def get_queryset(self):
+    def get_queryset(self) -> Any:
         queryset = AuditSample.objects.filter(audit__project=self.project).select_related(
             "audit", "job__annotator", "job__qc1_reviewer", "job__batch", "auditor", "reviewed_by"
         ).prefetch_related("errors__category", "errors__reported_by")
@@ -398,6 +454,7 @@ class AuditSampleViewSet(ProjectScopedViewMixin, mixins.ListModelMixin, mixins.R
 
     def _finish(self, sample, result, comment):
         sample.result = result
+        sample.checked_object_count = sample.job.object_count
         sample.reviewed_by = self.request.user
         sample.reviewed_at = timezone.now()
         sample.comment = comment
@@ -409,11 +466,10 @@ class AuditSampleViewSet(ProjectScopedViewMixin, mixins.ListModelMixin, mixins.R
     def pass_(self, request, project_id, pk=None):
         sample = self.get_object()
         self._check_can_review(sample)
-        serializer = PassSerializer(data=request.data)
-        serializer.is_valid(raise_exception=True)
+        data = validated_dict(PassSerializer(data=request.data))
         job = sample.job
         with transaction.atomic():
-            self._finish(sample, AuditSample.Result.PASS, serializer.validated_data["comment"])
+            self._finish(sample, AuditSample.Result.PASS, data["comment"])
             job.status = JobStatus.APPROVED
             job.save(update_fields=["status", "updated_at"])
             ActivityLog.record(project=self.project, actor=request.user, action="qc2.pass", target=job, job=job,
@@ -428,38 +484,63 @@ class AuditSampleViewSet(ProjectScopedViewMixin, mixins.ListModelMixin, mixins.R
         """
         sample = self.get_object()
         self._check_can_review(sample)
-        serializer = RejectSerializer(data=request.data, context=self.get_serializer_context())
-        serializer.is_valid(raise_exception=True)
+        data = validated_dict(RejectSerializer(data=request.data, context=self.get_serializer_context()))
         job = sample.job
         with transaction.atomic():
-            self._finish(sample, AuditSample.Result.REJECT, serializer.validated_data["comment"])
+            self._finish(sample, AuditSample.Result.REJECT, data["comment"])
+            round_at_review = max(job.total_rework_rounds, job.rework_round)
             ReviewError.objects.bulk_create([
                 ReviewError(
-                    job=job, stage=ReviewStage.QC2, rework_round=job.rework_round, audit_sample=sample,
-                    category=e["category"], severity=e.get("severity") or e["category"].severity,
-                    location=e["location"], description=e["description"], reported_by=request.user,
+                    job=job,
+                    stage=ReviewStage.QC2,
+                    rework_round=round_at_review,
+                    audit_sample=sample,
+                    category=e["category"],
+                    severity=e.get("severity") or e["category"].severity,
+                    verdict=e.get("verdict") or ErrorVerdict.FAIL,
+                    frame_number=e.get("frame_number"),
+                    cvat_object_id=e.get("cvat_object_id"),
+                    is_missing_object=bool(e.get("is_missing_object", False)),
+                    location=e["location"],
+                    description=e["description"],
+                    reported_by=request.user,
                 )
-                for e in serializer.validated_data["errors"]
+                for e in data["errors"]
             ])
             job.status = JobStatus.REWORK
             job.rework_round += 1
+            job.total_rework_rounds = max(job.total_rework_rounds + 1, job.rework_round)
+            job.rework_scope = ReworkScope.PARTIAL
+            job.round_credited_objects = 0
+            job.last_counted_objects = max(job.last_counted_objects, job.object_count)
             newly_escalated = False
             if job.rework_round > self.project.max_rework_rounds and not job.is_escalated:
                 job.is_escalated = True
                 newly_escalated = True
-            job.save(update_fields=["status", "rework_round", "is_escalated", "updated_at"])
+            job.save(
+                update_fields=[
+                    "status",
+                    "rework_round",
+                    "total_rework_rounds",
+                    "rework_scope",
+                    "round_credited_objects",
+                    "last_counted_objects",
+                    "is_escalated",
+                    "updated_at",
+                ]
+            )
             ActivityLog.record(
                 project=self.project, actor=request.user, action="qc2.reject", target=job, job=job,
                 before={"status": JobStatus.PENDING_QC2},
                 after={"status": JobStatus.REWORK, "rework_round": job.rework_round,
-                       "errors": len(serializer.validated_data["errors"]), "escalated": job.is_escalated},
+                       "errors": len(data["errors"]), "escalated": job.is_escalated},
             )
             notify_rework(
                 self.project,
                 job,
-                error_count=len(serializer.validated_data["errors"]),
+                error_count=len(data["errors"]),
                 stage_label="QC2",
-                reason=serializer.validated_data["comment"],
+                reason=data["comment"],
                 actor=request.user,
                 include_qc1=True,
             )
@@ -473,7 +554,8 @@ class AuditSampleViewSet(ProjectScopedViewMixin, mixins.ListModelMixin, mixins.R
         sample = self.get_object()
         if sample.result != AuditSample.Result.PENDING:
             raise ValidationError("Mẫu đã có kết quả.")
-        auditor = User.objects.filter(pk=request.data.get("auditor")).first()
+        data = validated_dict(AssignAuditorSerializer(data=request.data))
+        auditor = User.objects.filter(pk=data["auditor"]).first()
         if not auditor or Role.QC2 not in auditor.get_project_roles(self.project):
             raise ValidationError("Auditor phải có quyền QC2 trong dự án.")
         if auditor.id in _four_eyes_conflicts(sample.job):
@@ -545,8 +627,8 @@ def _qc1_team_pool_q(project, user):
 
 
 def _check_qc1_access(job, actor):
-    """Luật bốn mắt + kiểm tra quyền sở hữu QC1, phạm vi team (pool), khoá và escalation."""
-    if job.annotator_id and job.annotator_id == actor.id:
+    """Luật bốn mắt (hiện tại + lịch sử L13) + kiểm tra quyền sở hữu QC1, phạm vi team (pool), khoá và escalation."""
+    if actor.id in _historical_annotator_ids(job):
         raise PermissionDenied("Luật bốn mắt: bạn không thể QC1 job do chính mình annotate.")
     if job.qc1_reviewer_id and job.qc1_reviewer_id != actor.id:
         raise PermissionDenied("Job này đã được giao cho người QC1 khác.")
@@ -600,6 +682,9 @@ def qc1_pass(job_id, *, project, actor, comment=""):
     prev_status = job.status
     job.status = JobStatus.QC1_PASSED
     update_fields = ["status", "updated_at"]
+    if not job.first_qc1_result:
+        job.first_qc1_result = FirstQc1Result.PASS
+        update_fields.append("first_qc1_result")
     if not job.qc1_reviewer_id:
         job.qc1_reviewer = actor
         update_fields.append("qc1_reviewer")
@@ -650,7 +735,7 @@ def qc1_reject(job_id, *, project, actor, errors, comment="", rework_scope=Rewor
         )
 
     prev_status = job.status
-    round_at_review = job.rework_round
+    round_at_review = max(job.total_rework_rounds, job.rework_round)
     ReviewError.objects.bulk_create([
         ReviewError(
             job=job,
@@ -659,6 +744,10 @@ def qc1_reject(job_id, *, project, actor, errors, comment="", rework_scope=Rewor
             audit_sample=None,
             category=e["category"],
             severity=e.get("severity") or e["category"].severity,
+            verdict=e.get("verdict") or ErrorVerdict.FAIL,
+            frame_number=e.get("frame_number"),
+            cvat_object_id=e.get("cvat_object_id"),
+            is_missing_object=bool(e.get("is_missing_object", False)),
             location=e["location"],
             description=e["description"],
             reported_by=actor,
@@ -667,12 +756,27 @@ def qc1_reject(job_id, *, project, actor, errors, comment="", rework_scope=Rewor
     ])
     job.status = JobStatus.REWORK
     job.rework_round += 1
+    job.total_rework_rounds = max(job.total_rework_rounds + 1, job.rework_round)
     job.rework_scope = rework_scope
+    job.round_credited_objects = 0
+    job.last_counted_objects = max(job.last_counted_objects, job.object_count)
     newly_escalated = False
     if job.rework_round > project.max_rework_rounds and not job.is_escalated:
         job.is_escalated = True
         newly_escalated = True
-    update_fields = ["status", "rework_round", "rework_scope", "is_escalated", "updated_at"]
+    update_fields = [
+        "status",
+        "rework_round",
+        "total_rework_rounds",
+        "rework_scope",
+        "round_credited_objects",
+        "last_counted_objects",
+        "is_escalated",
+        "updated_at",
+    ]
+    if not job.first_qc1_result:
+        job.first_qc1_result = FirstQc1Result.REJECT
+        update_fields.append("first_qc1_result")
     if not job.qc1_reviewer_id:
         job.qc1_reviewer = actor
         update_fields.append("qc1_reviewer")
@@ -716,7 +820,7 @@ class Qc1JobViewSet(
     lookup_value_regex = r"\d+"
     required_capabilities = {"*": Cap.PERFORM_QC1}
 
-    def get_serializer_class(self):
+    def get_serializer_class(self) -> Any:
         return JobDetailSerializer if self.action == "retrieve" else JobSerializer
 
     def _base_queryset(self):
@@ -728,17 +832,28 @@ class Qc1JobViewSet(
             to_attr="open_samples",
         ))
 
-    def get_queryset(self):
+    def get_queryset(self) -> Any:
         queryset = self._base_queryset()
         user = self.request.user
         team_pool = _qc1_team_pool_q(self.project, user)
 
-        if self.action == "retrieve":
-            return queryset.filter(
-                Q(qc1_reviewer=user) | (Q(qc1_reviewer__isnull=True, status=JobStatus.PENDING_QC1) & team_pool)
-            ).exclude(annotator=user)
+        historical_self_annotated = Q(
+            events__action="job.status",
+            events__after__status__in=[JobStatus.ANNOTATING, JobStatus.PENDING_QC1],
+            events__actor=user,
+        )
 
-        queryset = queryset.exclude(annotator=user)
+        if self.action == "retrieve":
+            return (
+                queryset.filter(
+                    Q(qc1_reviewer=user) | (Q(qc1_reviewer__isnull=True, status=JobStatus.PENDING_QC1) & team_pool)
+                )
+                .exclude(annotator=user)
+                .exclude(historical_self_annotated)
+                .distinct()
+            )
+
+        queryset = queryset.exclude(annotator=user).exclude(historical_self_annotated).distinct()
         p = self.request.query_params
         scope = p.get("scope", "mine")
         pool_filter = Q(
@@ -792,40 +907,43 @@ class Qc1JobViewSet(
     @action(detail=True, methods=["post"])
     def start(self, request, project_id, pk=None):
         """Bắt đầu kiểm tra QC1 (PENDING_QC1 -> QC1_REVIEWING; tự nhận nếu job chưa có qc1_reviewer)."""
-        serializer = Qc1StartSerializer(data=request.data)
-        serializer.is_valid(raise_exception=True)
+        if pk is None:
+            raise ValidationError("Thiếu mã job.")
+        data = validated_dict(Qc1StartSerializer(data=request.data))
         updated = start_qc1(
             int(pk),
             project=self.project,
             actor=request.user,
-            note=serializer.validated_data["note"],
+            note=data["note"],
         )
         return self._detail(updated)
 
     @action(detail=True, methods=["post"], url_path="pass")
     def pass_(self, request, project_id, pk=None):
         """Duyệt đạt QC1 (PENDING_QC1 / QC1_REVIEWING -> PENDING_QC2)."""
-        serializer = PassSerializer(data=request.data)
-        serializer.is_valid(raise_exception=True)
+        if pk is None:
+            raise ValidationError("Thiếu mã job.")
+        data = validated_dict(PassSerializer(data=request.data))
         updated = qc1_pass(
             int(pk),
             project=self.project,
             actor=request.user,
-            comment=serializer.validated_data["comment"],
+            comment=data["comment"],
         )
         return self._detail(updated)
 
     @action(detail=True, methods=["post"])
     def reject(self, request, project_id, pk=None):
         """Trả về Rework từ QC1: bắt buộc ghi ít nhất 1 lỗi (ReviewError stage=qc1)."""
-        serializer = Qc1RejectSerializer(data=request.data, context=self.get_serializer_context())
-        serializer.is_valid(raise_exception=True)
+        if pk is None:
+            raise ValidationError("Thiếu mã job.")
+        data = validated_dict(Qc1RejectSerializer(data=request.data, context=self.get_serializer_context()))
         updated = qc1_reject(
             int(pk),
             project=self.project,
             actor=request.user,
-            errors=serializer.validated_data["errors"],
-            comment=serializer.validated_data["comment"],
-            rework_scope=serializer.validated_data["rework_scope"],
+            errors=data["errors"],
+            comment=data["comment"],
+            rework_scope=data["rework_scope"],
         )
         return self._detail(updated)

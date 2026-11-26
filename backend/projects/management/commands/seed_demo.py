@@ -15,7 +15,7 @@ from django.db import transaction
 from django.utils import timezone
 
 from accounts.models import Role, RoleAssignment, User
-from jobs.models import AnnotatorRequest, Job, JobStatus, ReworkScope
+from jobs.models import AnnotatorRequest, DailyOutputRecord, Job, JobStatus, ReworkScope, record_daily_output
 from projects.models import ActivityLog, Batch, Dataset, Guideline, Project, UserNotification
 from quality.models import ErrorCategory, ReviewError, ReviewStage, Severity
 from teams.models import Team, TeamMember
@@ -63,7 +63,7 @@ class Command(BaseCommand):
     def _create(self):
         now = timezone.now()
         users = {}
-        for username, roles in USERS.items():
+        for username in USERS:
             user, _ = User.objects.get_or_create(username=username, defaults={"first_name": username.split("_")[0].upper()})
             user.set_password(PASSWORD)
             user.save()
@@ -133,8 +133,12 @@ class Command(BaseCommand):
         # N01: chưa giao (dùng để thử "Nhận job mới").
         for i in range(1, 6):
             Job.objects.create(
-                project=project, batch=b03, name=f"N01-{i:03d}",
-                deadline=b03.deadline, frame_count=80, target_object_count=960,
+                project=project,
+                batch=b03,
+                name=f"N01-{i:03d}",
+                deadline=b03.deadline,
+                frame_count=80,
+                target_object_count=960,
             )
 
         # Dữ liệu mẫu cho ann1_demo: lỗi rework, yêu cầu phản hồi lỗi / dữ liệu bị chặn & thông báo
@@ -186,11 +190,21 @@ class Command(BaseCommand):
         sample_job = Job.objects.filter(project=project, annotator=users["ann1_demo"]).first()
         if sample_job:
             for days_ago, objs in [(5, 1080), (4, 1150), (3, 1010), (2, 1220), (1, 1190), (0, 980)]:
+                when = now - timedelta(days=days_ago)
                 ev = ActivityLog.record(
                     project=project, actor=users["ann1_demo"], action="job.status",
                     target=sample_job, job=sample_job,
                     before={"status": JobStatus.ANNOTATING},
                     after={"status": JobStatus.PENDING_QC1, "event": "annotator.submit", "object_count": objs},
                 )
-                ActivityLog.objects.filter(pk=ev.pk).update(created_at=now - timedelta(days=days_ago))
+                ActivityLog.objects.filter(pk=ev.pk).update(created_at=when)
+                record_daily_output(
+                    job=sample_job,
+                    user=users["ann1_demo"],
+                    object_count=objs,
+                    is_rework=False,
+                    rework_round=0,
+                    source=DailyOutputRecord.Source.SUBMIT,
+                    at=when,
+                )
         return project

@@ -11,8 +11,11 @@ python-dotenv = "*"
 djangorestframework-simplejwt = "*"
 django-cors-headers = "*"
 requests = "*"
+pydantic = "*"
 
 [dev-packages]
+pyright = "*"
+ruff = "*"
 
 [requires]
 python_version = "3.14"

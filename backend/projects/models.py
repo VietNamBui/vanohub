@@ -1,3 +1,5 @@
+from typing import TYPE_CHECKING, Any
+
 from django.conf import settings
 from django.core.validators import MaxValueValidator, MinValueValidator
 from django.db import models
@@ -25,6 +27,11 @@ class Project(models.Model):
     Các trường cấu hình (rework, sampling, ngưỡng) đặt thẳng trên Project vì mỗi dự án
     có đúng một bộ cấu hình — đơn giản hơn tách bảng riêng. Giá trị mặc định là ĐỀ XUẤT.
     """
+
+    if TYPE_CHECKING:
+        id: int
+        datasets: Any
+        jobs: Any
 
     name = models.CharField(max_length=200)
     description = models.TextField(blank=True)
@@ -69,6 +76,30 @@ class Project(models.Model):
 
     class Meta:
         ordering = ["-created_at"]
+        constraints = [
+            models.CheckConstraint(
+                condition=models.Q(annotator_wip_limit__gte=1, annotator_wip_limit__lte=50),
+                name="project_wip_limit_1_to_50",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(sampling_rate__gte=1, sampling_rate__lte=100),
+                name="project_sampling_rate_1_to_100",
+            ),
+            models.CheckConstraint(
+                condition=(
+                    models.Q(quality_cl_threshold__isnull=True)
+                    | models.Q(quality_cl_threshold__gte=0, quality_cl_threshold__lte=100)
+                ),
+                name="project_quality_cl_threshold_0_to_100",
+            ),
+            models.CheckConstraint(
+                condition=(
+                    models.Q(defect_rate_threshold__isnull=True)
+                    | models.Q(defect_rate_threshold__gte=0, defect_rate_threshold__lte=100)
+                ),
+                name="project_defect_rate_threshold_0_to_100",
+            ),
+        ]
 
     def __str__(self):
         return self.name
@@ -81,6 +112,11 @@ class DataStatus(models.TextChoices):
 
 
 class Dataset(models.Model):
+    if TYPE_CHECKING:
+        id: int
+        project_id: int
+        batches: Any
+
     project = models.ForeignKey(Project, on_delete=models.CASCADE, related_name="datasets")
     name = models.CharField(max_length=200)
     description = models.TextField(blank=True)
@@ -101,6 +137,19 @@ class Dataset(models.Model):
 class Batch(models.Model):
     """Một lô công việc. Đề xuất ánh xạ: 1 Batch ↔ 1 CVAT Task, mỗi CVAT Job ↔ 1 Job."""
 
+    if TYPE_CHECKING:
+        id: int
+        dataset_id: int
+        team_id: int | None
+        jobs: Any
+        audits: Any
+        job_count: int
+        approved_count: int
+        qc1_passed_count: int
+        blocking_qc2_count: int
+        open_audits: int
+        pending_qc2: int
+
     class SyncStatus(models.TextChoices):
         IDLE = "", "Chưa đồng bộ"
         OK = "ok", "Thành công"
@@ -113,6 +162,9 @@ class Batch(models.Model):
     # Team phụ trách batch.
     team = models.ForeignKey("teams.Team", on_delete=models.SET_NULL, null=True, blank=True, related_name="batches")
     cvat_task_id = models.PositiveIntegerField(null=True, blank=True)
+    source_missing = models.BooleanField(
+        default=False, help_text="True nếu CVAT task không còn tồn tại ở lần đồng bộ gần nhất"
+    )
     last_synced_at = models.DateTimeField(null=True, blank=True)
     last_sync_status = models.CharField(max_length=16, choices=SyncStatus.choices, blank=True, default=SyncStatus.IDLE)
     last_sync_error = models.TextField(blank=True, default="")
@@ -127,7 +179,18 @@ class Batch(models.Model):
 
     class Meta:
         ordering = ["-created_at"]
-        constraints = [models.UniqueConstraint(fields=["dataset", "name"], name="unique_batch_name_per_dataset")]
+        constraints = [
+            models.UniqueConstraint(fields=["dataset", "name"], name="unique_batch_name_per_dataset"),
+            models.UniqueConstraint(
+                fields=["cvat_task_id"],
+                condition=models.Q(cvat_task_id__isnull=False),
+                name="unique_batch_cvat_task_id",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(cvat_task_id__isnull=True) | models.Q(cvat_task_id__gte=1),
+                name="batch_cvat_task_id_positive",
+            ),
+        ]
 
     @property
     def project_id(self):
@@ -157,6 +220,12 @@ class Delivery(models.Model):
 
 class ActivityLog(models.Model):
     """Nhật ký mọi thao tác quan trọng trong dự án (PM-20). Cũng là "dòng thời gian" của Job."""
+
+    if TYPE_CHECKING:
+        id: int
+        project_id: int
+        actor_id: int | None
+        job_id: int | None
 
     project = models.ForeignKey(Project, on_delete=models.CASCADE, related_name="activity_logs")
     actor = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, related_name="+")
@@ -193,6 +262,12 @@ class ActivityLog(models.Model):
 class Announcement(models.Model):
     """Thông báo PM gửi trong dự án (PM-12). Gửi theo vai trò và/hoặc team."""
 
+    if TYPE_CHECKING:
+        id: int
+        project_id: int
+        sender_id: int | None
+        target_team_id: int | None
+
     project = models.ForeignKey(Project, on_delete=models.CASCADE, related_name="announcements")
     sender = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, related_name="+")
     target_roles = models.JSONField(default=list, blank=True, help_text="Rỗng = mọi vai trò")
@@ -216,11 +291,20 @@ class Guideline(models.Model):
 
     class Meta:
         ordering = ["-version"]
-        constraints = [models.UniqueConstraint(fields=["project", "version"], name="unique_guideline_version")]
+        constraints = [
+            models.UniqueConstraint(fields=["project", "version"], name="unique_guideline_version"),
+            models.CheckConstraint(condition=models.Q(version__gte=1), name="guideline_version_gte_1"),
+        ]
 
 
 class UserNotification(models.Model):
     """Thông báo cá nhân theo sự kiện hệ thống (TB03): giao việc, trả sửa, cần duyệt, escalated, hạn, phản hồi."""
+
+    if TYPE_CHECKING:
+        id: int
+        recipient_id: int
+        project_id: int
+        job_id: int | None
 
     class Category(models.TextChoices):
         ASSIGNED = "assigned", "Được giao việc"

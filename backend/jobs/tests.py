@@ -115,6 +115,27 @@ class JobManagementTests(TestCase):
         self.assertEqual(response.status_code, 200, response.data)
         self.assertFalse(response.data["is_escalated"])
         self.assertEqual(response.data["rework_round"], 0)
+        self.assertEqual(response.data["total_rework_rounds"], 3)
+
+    def test_hours_remaining_is_none_when_done_and_overdue_hours_frozen(self):
+        now = timezone.now()
+        done_job = self.f.job(
+            status=JobStatus.APPROVED,
+            deadline=now - timedelta(hours=5),
+            submitted_at=now - timedelta(hours=2),
+        )
+        self.assertIsNone(done_job.hours_remaining)
+        self.assertEqual(done_job.overdue_hours, 3.0)
+        self.assertFalse(done_job.is_on_time)
+
+        on_time_job = self.f.job(
+            status=JobStatus.APPROVED,
+            deadline=now + timedelta(hours=2),
+            submitted_at=now - timedelta(hours=1),
+        )
+        self.assertIsNone(on_time_job.hours_remaining)
+        self.assertEqual(on_time_job.overdue_hours, 0.0)
+        self.assertTrue(on_time_job.is_on_time)
 
     def test_job_queue_counts_by_stage(self):
         self.f.job(status=JobStatus.PENDING_QC2)
@@ -331,6 +352,8 @@ class AnnotatorWorkflowTests(TestCase):
         )
         self.assertEqual(resolved.status_code, 200, resolved.data)
         self.assertEqual(resolved.data["status"], "resolved")
+        err.refresh_from_db()
+        self.assertTrue(err.is_voided)
         again = self.f.client(self.f.pm).post(
             self.f.url(f"annotator/requests/{r_dispute.data['id']}/resolve/"),
             {"status": "rejected", "resolution_note": "Đổi ý"},
@@ -360,6 +383,7 @@ class AnnotatorWorkflowTests(TestCase):
     def test_escalation_warn_only_policy_and_bulk_move_batch_and_team_claim_scoping(self):
         from projects.models import Batch, EscalationPolicy
         from teams.models import Team, TeamMember
+
         from .models import Job
 
         # warn_only cho phép annotator tiếp tục sửa dù is_escalated=True

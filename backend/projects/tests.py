@@ -1,3 +1,5 @@
+from typing import Any
+
 from django.test import TestCase
 from django.urls import reverse
 from rest_framework.test import APIClient
@@ -12,6 +14,8 @@ from .models import Project
 
 class ProjectApiTests(TestCase):
     """Kiểm tra phân quyền theo phạm vi dự án của /api/projects/."""
+
+    client: Any
 
     def setUp(self):
         self.client = APIClient()
@@ -122,9 +126,46 @@ class DataManagementTests(TestCase):
         self.f.job(status=JobStatus.APPROVED)
         data = self.pm.get(self.f.url("overview/")).data
         self.assertEqual(data["counts"]["jobs"], 1)
-        self.assertEqual(data["metrics"]["quality_cl"]["status"], "pending_definition")
+        self.assertEqual(data["metrics"]["estimated_completion"]["status"], "pending_definition")
+        self.assertIsNone(data["metrics"]["estimated_completion"]["value"])
+        self.assertEqual(data["metrics"]["quality_cl"]["status"], "ok")
         self.assertIsNone(data["metrics"]["quality_cl"]["value"])
         self.assertEqual(self.f.client(self.f.qc2).get(self.f.url("overview/")).status_code, 403)
+
+    def test_delivery_candidates_distinct_count_with_multiple_audits(self):
+        from projects.models import SamplingMethod
+        from quality.models import Audit
+
+        self.f.job(status=JobStatus.APPROVED)
+        self.f.job(status=JobStatus.APPROVED)
+        for seed in (1, 2):
+            Audit.objects.create(
+                project=self.f.project,
+                batch=self.f.batch,
+                status=Audit.Status.COMPLETED,
+                decision=Audit.Decision.ACCEPT,
+                method=SamplingMethod.RANDOM,
+                sampling_rate=50,
+                seed=seed,
+                eligible_count=2,
+            )
+        rows = self.pm.get(self.f.url("deliveries/candidates/")).data
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["job_count"], 2)
+        self.assertEqual(rows[0]["approved_count"], 2)
+        self.assertEqual(rows[0]["open_audits"], 0)
+        self.assertTrue(rows[0]["ready"])
+
+        # Khóa batch → không còn ready và bị chặn tạo Delivery
+        self.pm.post(self.f.url(f"batches/{self.f.batch.id}/lock/"))
+        locked_rows = self.pm.get(self.f.url("deliveries/candidates/")).data
+        self.assertFalse(locked_rows[0]["ready"])
+        blocked_del = self.pm.post(
+            self.f.url("deliveries/"),
+            {"batch": self.f.batch.id, "recipient": "Client", "output_path": "s3://out"},
+            format="json",
+        )
+        self.assertEqual(blocked_del.status_code, 400)
 
     def test_guideline_versions_increment(self):
         for _ in range(2):
@@ -249,7 +290,7 @@ class BatchTeamTests(TestCase):
         self.assertEqual(response.status_code, 400)
 
     def test_deleting_team_unassigns_batch(self):
-        self.f.batch.team = self.team
+        self.f.batch.team_id = self.team.id
         self.f.batch.save()
         self.team.delete()
         self.f.batch.refresh_from_db()
@@ -262,7 +303,7 @@ class ProjectCreateAndBatchConfirmQc2Tests(TestCase):
 
         self.f = ProjectFixture()
         self.team = Team.objects.create(project=self.f.project, name="Team Alpha")
-        self.f.batch.team = self.team
+        self.f.batch.team_id = self.team.id
         self.f.batch.save()
         self.pm_client = self.f.client(self.f.pm)
         self.qc1_client = self.f.client(self.f.qc1)

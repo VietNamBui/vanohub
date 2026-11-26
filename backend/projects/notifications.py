@@ -16,7 +16,7 @@ from .models import UserNotification
 
 def project_users_with_roles(project, *roles):
     user_ids = (
-        RoleAssignment.objects.filter(project=project, role__in=roles)
+        RoleAssignment.objects.filter(project=project, role__in=[str(r) for r in roles])
         .values_list("user_id", flat=True)
         .distinct()
     )

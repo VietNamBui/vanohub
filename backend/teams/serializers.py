@@ -40,6 +40,10 @@ class MemberInputSerializer(serializers.Serializer):
         return user
 
 
+class RemoveMemberSerializer(serializers.Serializer):
+    user = serializers.IntegerField(min_value=1)
+
+
 class TransferSerializer(serializers.Serializer):
     user = serializers.PrimaryKeyRelatedField(queryset=User.objects.all())
     to_team = serializers.PrimaryKeyRelatedField(queryset=Team.objects.all())

@@ -1,3 +1,5 @@
+from typing import Any, cast
+
 from django.db import IntegrityError
 from django.test import TestCase
 from django.urls import reverse
@@ -23,7 +25,7 @@ class RoleAssignmentConstraintTests(TestCase):
 
     def test_project_role_requires_project(self):
         with self.assertRaises(IntegrityError):
-            RoleAssignment.objects.create(user=self.user, role=Role.PROJECT_MANAGER, project=None)
+            RoleAssignment.objects.create(user=self.user, role=Role.PROJECT_MANAGER, project=cast(Any, None))
 
     def test_same_role_same_project_is_rejected(self):
         RoleAssignment.objects.create(user=self.user, role=Role.QC2, project=self.project)
@@ -32,6 +34,8 @@ class RoleAssignmentConstraintTests(TestCase):
 
 
 class AuthApiTests(TestCase):
+    client: Any
+
     def setUp(self):
         self.client = APIClient()
         self.user = User.objects.create_user("bob", password="secret-pw")

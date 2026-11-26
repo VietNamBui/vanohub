@@ -11,7 +11,7 @@ class ErrorCategoryAdmin(admin.ModelAdmin):
 
 class AuditSampleInline(admin.TabularInline):
     model = AuditSample
-    fields = ["job", "stratum", "auditor", "result", "reviewed_by", "reviewed_at"]
+    fields = ("job", "stratum", "auditor", "result", "reviewed_by", "reviewed_at")
     readonly_fields = fields
     extra = 0
 

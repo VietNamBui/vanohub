@@ -8,9 +8,13 @@ Vì PM kéo theo QC2 (expand_roles), capability dành cho QC2 tự động có �
 nhưng capability dành cho PM KHÔNG có ở người chỉ có QC2.
 """
 
+from typing import Any, cast
+
 from django.shortcuts import get_object_or_404
 from rest_framework.exceptions import NotFound
 from rest_framework.permissions import BasePermission
+from rest_framework.request import Request
+from rest_framework.views import APIView
 
 from .models import Role, RoleAssignment, expand_roles
 
@@ -82,14 +86,19 @@ class ProjectScopedViewMixin:
     - required_capabilities: {action hoặc HTTP method: capability}. Khoá "*" là mặc định.
     """
 
-    required_capabilities = {"*": Cap.VIEW_PROJECT}
+    kwargs: dict[str, Any]
+    request: Any
+    action: str | None
+    capabilities: set[str]
+    required_capabilities: dict[str, Any] = {"*": Cap.VIEW_PROJECT}
 
     @property
     def permission_classes(self):
         return [HasProjectCapability]
 
-    def get_serializer_context(self):
-        context = super().get_serializer_context()
+    def get_serializer_context(self) -> dict[str, Any]:
+        parent_fn = getattr(super(), "get_serializer_context", None)
+        context: dict[str, Any] = cast(dict[str, Any], parent_fn()) if callable(parent_fn) else {}
         context["project"] = self.get_project()
         return context
 
@@ -108,7 +117,8 @@ class ProjectScopedViewMixin:
         return self.get_project()
 
     def get_required_capability(self):
-        key = getattr(self, "action", None) or self.request.method.lower()
+        method = (self.request.method or "").lower()
+        key = getattr(self, "action", None) or method
         return self.required_capabilities.get(key, self.required_capabilities.get("*"))
 
     def has_cap(self, capability):
@@ -121,13 +131,14 @@ class HasProjectCapability(BasePermission):
 
     message = "Bạn không có quyền thực hiện thao tác này trong dự án."
 
-    def has_permission(self, request, view):
+    def has_permission(self, request: Request, view: APIView) -> Any:
         if not request.user or not request.user.is_authenticated:
             return False
-        view.get_project()
-        required = view.get_required_capability()
+        scoped_view: Any = view
+        scoped_view.get_project()
+        required = scoped_view.get_required_capability()
         if required is None:
             return True
         if isinstance(required, (list, tuple, set)):  # chỉ cần một trong các capability
-            return any(cap in view.capabilities for cap in required)
-        return required in view.capabilities
+            return any(cap in scoped_view.capabilities for cap in required)
+        return required in scoped_view.capabilities

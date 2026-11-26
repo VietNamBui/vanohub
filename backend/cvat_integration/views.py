@@ -1,6 +1,9 @@
+from typing import Any, cast
+
 from django.conf import settings
 from rest_framework import status as http_status
 from rest_framework.decorators import api_view
+from rest_framework.exceptions import PermissionDenied
 from rest_framework.response import Response
 
 from .client import CvatClient, CvatError
@@ -18,7 +21,10 @@ def status(request):
 
 @api_view(["GET"])
 def tasks(request):
-    """GET /api/cvat/tasks/?project_id=&search= — danh sách CVAT task để chọn khi ánh xạ batch."""
+    """GET /api/cvat/tasks/?project_id=&search= — danh sách CVAT task (chỉ PM) để chọn khi ánh xạ batch."""
+    user = cast(Any, request.user)
+    if not user.is_pm():
+        raise PermissionDenied("Chỉ Project Manager mới được xem danh sách CVAT task.")
     project_id = request.query_params.get("project_id")
     search = (request.query_params.get("search") or "").strip() or None
     try:

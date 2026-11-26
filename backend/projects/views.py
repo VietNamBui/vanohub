@@ -1,6 +1,6 @@
 from collections import defaultdict
-
 from datetime import timedelta
+from typing import Any, cast
 
 from django.db import transaction
 from django.db.models import Count, Max, Prefetch, Q
@@ -16,36 +16,17 @@ from accounts.datetime_utils import format_rfc3339_utc, parse_query_date_range
 from accounts.models import Role, RoleAssignment, expand_roles
 from accounts.permissions import CAPABILITY_ROLES, Cap, ProjectScopedViewMixin
 from accounts.serializers import UserBriefSerializer
+from accounts.validation import validated_dict
 from cvat_integration.client import CvatError
 from cvat_integration.sync import import_task_jobs, sync_batch
 from jobs.models import ACTIVE_ANNOTATOR_STATUSES, OPEN_STATUSES, Job, JobStatus
 from quality.models import Audit, AuditSample
 from teams.models import TeamMember
 
-from .models import (
-    ActivityLog,
-    Announcement,
-    Batch,
-    DataStatus,
-    Dataset,
-    Delivery,
-    Guideline,
-    Project,
-    UserNotification,
-)
+from .models import ActivityLog, Announcement, Batch, Dataset, DataStatus, Delivery, Guideline, Project, UserNotification  # isort: skip
 from .notifications import notify_review_needed, project_users_with_roles
-from .serializers import (
-    ActivityLogSerializer,
-    AnnouncementSerializer,
-    BatchSerializer,
-    DatasetSerializer,
-    DeliverySerializer,
-    GuidelineSerializer,
-    ProjectDetailSerializer,
-    ProjectListSerializer,
-    ProjectSettingsSerializer,
-    ProjectWriteSerializer,
-)
+
+from .serializers import ActivityLogSerializer, AddMemberRoleSerializer, AnnouncementSerializer, BatchNoteSerializer, BatchSerializer, DatasetSerializer, DeliverySerializer, GuidelineSerializer, ImportCvatSerializer, MarkNotificationsReadSerializer, ProjectDetailSerializer, ProjectListSerializer, ProjectSettingsSerializer, ProjectWriteSerializer, SyncCvatSerializer  # isort: skip
 
 
 class StandardPagination(PageNumberPagination):
@@ -86,16 +67,17 @@ class ProjectViewSet(
             queryset = queryset.prefetch_related("role_assignments")
         return queryset
 
-    def get_queryset(self):
+    def get_queryset(self) -> Any:
         return self._base_queryset().filter(role_assignments__user=self.request.user).distinct()
 
-    def get_serializer_class(self):
+    def get_serializer_class(self) -> Any:
         if self.action in {"create", "update", "partial_update"}:
             return ProjectWriteSerializer
         return ProjectDetailSerializer if self.action == "retrieve" else ProjectListSerializer
 
     def _require_any_pm(self):
-        if not self.request.user.is_pm():
+        user = cast(Any, self.request.user)
+        if not user.is_pm():
             raise PermissionDenied("Chỉ Project Manager mới được tạo dự án.")
 
     def _require_project_pm(self, project):
@@ -124,10 +106,10 @@ class ProjectViewSet(
     def create(self, request, *args, **kwargs):
         self._require_any_pm()
         serializer = ProjectWriteSerializer(data=request.data)
-        serializer.is_valid(raise_exception=True)
-        pm_ids = serializer.validated_data.pop("pm_ids", []) or [request.user.id]
+        validated = validated_dict(serializer)
+        pm_ids = validated.pop("pm_ids", []) or [request.user.id]
         with transaction.atomic():
-            project = serializer.save(created_by=request.user)
+            project = cast(Project, serializer.save(created_by=request.user))
             self._sync_pms(project, pm_ids, request.user)
             ActivityLog.record(
                 project=project,
@@ -147,8 +129,7 @@ class ProjectViewSet(
         project = self.get_object()
         self._require_project_pm(project)
         serializer = ProjectWriteSerializer(project, data=request.data, partial=partial)
-        serializer.is_valid(raise_exception=True)
-        pm_ids = serializer.validated_data.pop("pm_ids", None)
+        pm_ids = validated_dict(serializer).pop("pm_ids", None)
         with transaction.atomic():
             project = serializer.save()
             if pm_ids is not None:
@@ -177,15 +158,16 @@ class ProjectSettingsView(ProjectScopedViewMixin, APIView):
         return Response(ProjectSettingsSerializer(self.project).data)
 
     def patch(self, request, project_id):
-        before = ProjectSettingsSerializer(self.project).data
+        before = dict(ProjectSettingsSerializer(self.project).data)
         serializer = ProjectSettingsSerializer(self.project, data=request.data, partial=True)
         serializer.is_valid(raise_exception=True)
         serializer.save()
-        changed = {k: v for k, v in serializer.data.items() if before.get(k) != v}
+        after = dict(serializer.data)
+        changed = {k: v for k, v in after.items() if before.get(k) != v}
         if changed:
             ActivityLog.record(project=self.project, actor=request.user, action="project.settings",
                                target=self.project, before={k: before[k] for k in changed}, after=changed)
-        return Response(serializer.data)
+        return Response(after)
 
 
 class ProjectMembersView(ProjectScopedViewMixin, APIView):
@@ -235,9 +217,7 @@ class ProjectMemberRolesView(ProjectScopedViewMixin, APIView):
         current = set(RoleAssignment.objects.filter(project=project, user_id=user_id).values_list("role", flat=True))
         if not current:
             raise NotFound("Người này không thuộc dự án.")
-        role = request.data.get("role")
-        if role not in GRANTABLE_ROLES:
-            raise ValidationError({"role": f"Không gán được vai trò này. Cho phép: {', '.join(GRANTABLE_ROLES)}."})
+        role = validated_dict(AddMemberRoleSerializer(data=request.data))["role"]
         if role in expand_roles(current):
             raise ValidationError({"role": "Người này đã có vai trò này."})
         assignment = RoleAssignment.objects.create(project=project, user_id=user_id, role=role)
@@ -277,7 +257,7 @@ class DatasetViewSet(ProjectScopedViewMixin, mixins.ListModelMixin, mixins.Retri
     serializer_class = DatasetSerializer
     required_capabilities = {"list": Cap.VIEW_JOBS, "retrieve": Cap.VIEW_JOBS, "*": Cap.MANAGE_DATA}
 
-    def get_queryset(self):
+    def get_queryset(self) -> Any:
         queryset = Dataset.objects.filter(project=self.project).annotate(
             batch_count=Count("batches", distinct=True),
             job_count=Count("batches__jobs", distinct=True),
@@ -327,7 +307,7 @@ class BatchViewSet(ProjectScopedViewMixin, mixins.ListModelMixin, mixins.Retriev
         "*": Cap.MANAGE_DATA,
     }
 
-    def get_queryset(self):
+    def get_queryset(self) -> Any:
         done = [JobStatus.APPROVED, JobStatus.DELIVERED]
         queryset = (
             Batch.objects.filter(dataset__project=self.project)
@@ -405,7 +385,7 @@ class BatchViewSet(ProjectScopedViewMixin, mixins.ListModelMixin, mixins.Retriev
             batch.qc2_confirmed_at = timezone.now()
             batch.save(update_fields=["qc2_confirmed_by", "qc2_confirmed_at"])
 
-            note = (request.data.get("note") or "").strip()
+            note = validated_dict(BatchNoteSerializer(data=request.data))["note"].strip()
             ActivityLog.record(
                 project=self.project,
                 actor=request.user,
@@ -429,13 +409,11 @@ class BatchViewSet(ProjectScopedViewMixin, mixins.ListModelMixin, mixins.Retriev
     def import_cvat(self, request, project_id, pk=None):
         """Nhập các job của một CVAT Task vào batch này."""
         batch = self.get_object()
-        task_id = request.data.get("cvat_task_id")
-        if not str(task_id or "").isdigit():
-            raise ValidationError({"cvat_task_id": "Nhập ID task CVAT (số nguyên)."})
-        if batch.cvat_task_id and batch.cvat_task_id != int(task_id):
+        task_id = validated_dict(ImportCvatSerializer(data=request.data))["cvat_task_id"]
+        if batch.cvat_task_id and batch.cvat_task_id != task_id:
             raise ValidationError({"cvat_task_id": f"Batch đã gắn với CVAT task {batch.cvat_task_id}."})
         try:
-            result = import_task_jobs(batch, int(task_id), request.user)
+            result = import_task_jobs(batch, task_id, request.user)
         except CvatError as exc:
             batch.last_sync_status = Batch.SyncStatus.ERROR
             batch.last_sync_error = str(exc)
@@ -449,8 +427,9 @@ class BatchViewSet(ProjectScopedViewMixin, mixins.ListModelMixin, mixins.Retriev
         batch = self.get_object()
         if not batch.cvat_task_id:
             raise ValidationError("Batch chưa gắn với CVAT task.")
+        count_objects = validated_dict(SyncCvatSerializer(data=request.data))["count_objects"]
         try:
-            result = sync_batch(batch, request.user, count_objects=bool(request.data.get("count_objects")))
+            result = sync_batch(batch, request.user, count_objects=count_objects)
         except CvatError as exc:
             batch.last_sync_status = Batch.SyncStatus.ERROR
             batch.last_sync_error = str(exc)
@@ -471,7 +450,7 @@ class DeliveryViewSet(ProjectScopedViewMixin, mixins.ListModelMixin, mixins.Crea
         "*": Cap.MANAGE_DELIVERY,
     }
 
-    def get_queryset(self):
+    def get_queryset(self) -> Any:
         return Delivery.objects.filter(project=self.project).select_related("batch__dataset", "delivered_by")
 
     @action(detail=False)
@@ -482,8 +461,8 @@ class DeliveryViewSet(ProjectScopedViewMixin, mixins.ListModelMixin, mixins.Crea
             .exclude(status=DataStatus.DELIVERED)
             .select_related("dataset")
             .annotate(
-                job_count=Count("jobs"),
-                approved_count=Count("jobs", filter=Q(jobs__status=JobStatus.APPROVED)),
+                job_count=Count("jobs", distinct=True),
+                approved_count=Count("jobs", filter=Q(jobs__status=JobStatus.APPROVED), distinct=True),
                 open_audits=Count("audits", filter=Q(audits__status="in_progress"), distinct=True),
             )
         )
@@ -491,16 +470,24 @@ class DeliveryViewSet(ProjectScopedViewMixin, mixins.ListModelMixin, mixins.Crea
             {
                 "batch": b.id, "batch_name": b.name, "dataset_name": b.dataset.name,
                 "job_count": b.job_count, "approved_count": b.approved_count, "open_audits": b.open_audits,
-                "ready": b.job_count > 0 and b.approved_count == b.job_count and b.open_audits == 0,
+                "ready": (
+                    b.status == DataStatus.ACTIVE
+                    and b.dataset.status == DataStatus.ACTIVE
+                    and b.job_count > 0
+                    and b.approved_count == b.job_count
+                    and b.open_audits == 0
+                ),
             }
             for b in batches
         ])
 
     def perform_create(self, serializer):
-        batch = serializer.validated_data["batch"]
+        batch = validated_dict(serializer)["batch"]
         jobs = batch.jobs.all()
         if batch.status == DataStatus.DELIVERED:
             raise ValidationError("Batch đã được bàn giao.")
+        if batch.status != DataStatus.ACTIVE or batch.dataset.status != DataStatus.ACTIVE:
+            raise ValidationError("Batch hoặc Dataset đang bị khoá — mở khoá trước khi ghi nhận bàn giao.")
         if not jobs.exists() or jobs.exclude(status=JobStatus.APPROVED).exists():
             raise ValidationError("Chỉ bàn giao được khi mọi job trong batch đã ở trạng thái Đã duyệt.")
         if batch.audits.filter(status="in_progress").exists():
@@ -525,7 +512,7 @@ class DeliveryViewSet(ProjectScopedViewMixin, mixins.ListModelMixin, mixins.Crea
 
     def perform_update(self, serializer):
         allowed = {"recipient", "output_path", "note", "client_feedback"}
-        extra = set(serializer.validated_data) - allowed
+        extra = set(validated_dict(serializer)) - allowed
         if extra:
             raise ValidationError(f"Không được sửa: {', '.join(sorted(extra))}")
         serializer.save()
@@ -536,7 +523,7 @@ class ActivityLogViewSet(ProjectScopedViewMixin, viewsets.ReadOnlyModelViewSet):
     pagination_class = StandardPagination
     required_capabilities = {"*": Cap.VIEW_ACTIVITY}
 
-    def get_queryset(self):
+    def get_queryset(self) -> Any:
         queryset = ActivityLog.objects.filter(project=self.project).select_related("actor")
         params = self.request.query_params
         if params.get("actor"):
@@ -563,7 +550,7 @@ class AnnouncementViewSet(ProjectScopedViewMixin, mixins.ListModelMixin, mixins.
     serializer_class = AnnouncementSerializer
     required_capabilities = {"list": Cap.VIEW_PROJECT, "*": Cap.SEND_ANNOUNCEMENT}
 
-    def get_queryset(self):
+    def get_queryset(self) -> Any:
         queryset = Announcement.objects.filter(project=self.project).select_related("sender", "target_team")
         if self.has_cap(Cap.SEND_ANNOUNCEMENT):
             return queryset
@@ -591,7 +578,7 @@ class GuidelineViewSet(ProjectScopedViewMixin, mixins.ListModelMixin, mixins.Cre
     serializer_class = GuidelineSerializer
     required_capabilities = {"list": Cap.VIEW_GUIDELINES, "*": Cap.MANAGE_QUALITY_CATALOG}
 
-    def get_queryset(self):
+    def get_queryset(self) -> Any:
         return Guideline.objects.filter(project=self.project).select_related("created_by")
 
     def perform_create(self, serializer):
@@ -707,7 +694,7 @@ class ProjectNotificationsView(ProjectScopedViewMixin, APIView):
                     deadline__isnull=False,
                     deadline__lte=cutoff,
                 ).order_by("deadline", "id")[:6]:
-                    url = f"/projects/{self.project.id}/jobs?{'overdue=1' if j.deadline < now else 'due_soon=1'}"
+                    url = f"/projects/{self.project.id}/jobs?{'overdue=1' if (j.deadline is not None and j.deadline < now) else 'due_soon=1'}"
                     _append_deadline(j, url, "job dự án sắp/quá hạn.")
 
         # 3. Thông báo dự án (Announcement) phù hợp vai trò / team
@@ -757,7 +744,7 @@ class MarkNotificationsReadView(ProjectScopedViewMixin, APIView):
     required_capabilities = {"*": Cap.VIEW_PROJECT}
 
     def post(self, request, project_id):
-        notif_id = request.data.get("notification_id")
+        notif_id = validated_dict(MarkNotificationsReadSerializer(data=request.data)).get("notification_id")
         qs = UserNotification.objects.filter(recipient=request.user, project=self.project, is_read=False)
         if notif_id is not None:
             qs = qs.filter(pk=notif_id)

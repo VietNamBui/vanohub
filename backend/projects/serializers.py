@@ -7,18 +7,7 @@ from accounts.models import Role, User, expand_roles
 from accounts.permissions import get_project_capabilities
 from accounts.serializers import UserBriefSerializer
 
-from .models import (
-    ActivityLog,
-    Announcement,
-    Batch,
-    DataStatus,
-    Dataset,
-    Delivery,
-    EscalationPolicy,
-    Guideline,
-    Project,
-    UserNotification,
-)
+from .models import ActivityLog, Announcement, Batch, Dataset, DataStatus, Delivery, EscalationPolicy, Guideline, Project, UserNotification  # isort: skip
 
 
 class ProjectScopedSerializer(serializers.ModelSerializer):
@@ -225,6 +214,7 @@ class BatchSerializer(ProjectScopedSerializer):
             "team",
             "team_name",
             "cvat_task_id",
+            "source_missing",
             "last_synced_at",
             "last_sync_status",
             "last_sync_error",
@@ -241,6 +231,7 @@ class BatchSerializer(ProjectScopedSerializer):
         read_only_fields = [
             "status",
             "cvat_task_id",
+            "source_missing",
             "last_synced_at",
             "last_sync_status",
             "last_sync_error",
@@ -377,3 +368,23 @@ class UserNotificationSerializer(serializers.ModelSerializer):
             "created_at",
         ]
         read_only_fields = fields
+
+
+class AddMemberRoleSerializer(serializers.Serializer):
+    role = serializers.ChoiceField(choices=[(Role.QC2, Role.QC2.label), (Role.QC1, Role.QC1.label), (Role.ANNOTATOR, Role.ANNOTATOR.label)])
+
+
+class BatchNoteSerializer(serializers.Serializer):
+    note = serializers.CharField(required=False, allow_blank=True, default="", max_length=2000)
+
+
+class ImportCvatSerializer(serializers.Serializer):
+    cvat_task_id = serializers.IntegerField(min_value=1)
+
+
+class SyncCvatSerializer(serializers.Serializer):
+    count_objects = serializers.BooleanField(required=False, default=False)
+
+
+class MarkNotificationsReadSerializer(serializers.Serializer):
+    notification_id = serializers.IntegerField(required=False, allow_null=True, min_value=1)

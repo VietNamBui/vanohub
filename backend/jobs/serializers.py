@@ -24,6 +24,8 @@ class JobSerializer(serializers.ModelSerializer):
     is_overdue = serializers.BooleanField(read_only=True)
     due_state = serializers.CharField(read_only=True)
     hours_remaining = serializers.FloatField(read_only=True)
+    overdue_hours = serializers.FloatField(read_only=True)
+    is_on_time = serializers.BooleanField(read_only=True)
     max_rework_rounds = serializers.IntegerField(source="project.max_rework_rounds", read_only=True)
     escalation_policy = serializers.CharField(source="project.escalation_policy", read_only=True)
     rework_scope_label = serializers.CharField(source="get_rework_scope_display", read_only=True)
@@ -51,7 +53,11 @@ class JobSerializer(serializers.ModelSerializer):
             "is_overdue",
             "due_state",
             "hours_remaining",
+            "overdue_hours",
+            "is_on_time",
             "rework_round",
+            "total_rework_rounds",
+            "first_qc1_result",
             "max_rework_rounds",
             "escalation_policy",
             "rework_scope",
@@ -69,6 +75,7 @@ class JobSerializer(serializers.ModelSerializer):
             "cvat_task_id",
             "cvat_stage",
             "cvat_state",
+            "source_missing",
             "cvat_url",
             "updated_at",
         ]
@@ -91,8 +98,8 @@ class JobSerializer(serializers.ModelSerializer):
         if annotated is not None:
             return annotated
         if hasattr(job, "_prefetched_objects_cache") and "review_errors" in job._prefetched_objects_cache:
-            return len(job._prefetched_objects_cache["review_errors"])
-        return job.review_errors.count()
+            return sum(1 for e in job._prefetched_objects_cache["review_errors"] if not e.is_voided)
+        return job.review_errors.filter(is_voided=False).count()
 
 
 def _open_sample(job):
@@ -109,14 +116,19 @@ class ReviewErrorBriefSerializer(serializers.Serializer):
     rework_round = serializers.IntegerField()
     category = serializers.CharField(source="category.name")
     severity = serializers.CharField()
+    verdict = serializers.CharField()
+    frame_number = serializers.IntegerField(allow_null=True)
+    cvat_object_id = serializers.IntegerField(allow_null=True)
+    is_missing_object = serializers.BooleanField()
     location = serializers.CharField()
     description = serializers.CharField()
+    is_voided = serializers.BooleanField()
     reported_by = UserBriefSerializer()
     created_at = RFC3339DateTimeField()
 
 
 class JobWithErrorsSerializer(JobSerializer):
-    errors = serializers.SerializerMethodField()
+    errors = serializers.SerializerMethodField()  # type: ignore[assignment, override]
 
     class Meta(JobSerializer.Meta):
         fields = JobSerializer.Meta.fields + ["errors"]
@@ -132,7 +144,7 @@ class JobWithErrorsSerializer(JobSerializer):
 
 class JobDetailSerializer(JobSerializer):
     timeline = serializers.SerializerMethodField()
-    errors = serializers.SerializerMethodField()
+    errors = serializers.SerializerMethodField()  # type: ignore[assignment, override]
 
     class Meta(JobSerializer.Meta):
         fields = JobSerializer.Meta.fields + ["timeline", "errors"]
@@ -176,6 +188,15 @@ class AssignSerializer(serializers.Serializer):
 class DeadlineSerializer(serializers.Serializer):
     deadline = RFC3339DateTimeField(allow_null=True)
     note = serializers.CharField(allow_blank=True, required=False, default="")
+
+
+class JobNoteSerializer(serializers.Serializer):
+    note = serializers.CharField(allow_blank=True, required=False, default="", max_length=2000)
+
+
+class ResolveEscalationSerializer(serializers.Serializer):
+    annotator = serializers.IntegerField(required=False, allow_null=True, min_value=1)
+    note = serializers.CharField(allow_blank=True, required=False, default="", max_length=2000)
 
 
 class BulkSerializer(serializers.Serializer):

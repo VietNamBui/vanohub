@@ -1,6 +1,5 @@
 from django.test import TestCase
 
-from accounts.models import Role
 from accounts.testing import ProjectFixture, make_user
 
 from .models import Team, TeamMember
@@ -29,6 +28,29 @@ class TeamTests(TestCase):
 
     def test_qc2_only_cannot_manage_teams(self):
         self.assertEqual(self.f.client(self.f.qc2).get(self.f.url("teams/")).status_code, 403)
+
+    def test_workload_counts_only_active_stage_jobs_and_separates_overdue_from_due_soon(self):
+        from datetime import timedelta
+
+        from django.utils import timezone
+
+        from jobs.models import JobStatus
+
+        TeamMember.objects.create(team=self.team_a, user=self.f.ann1, capacity=5)
+        TeamMember.objects.create(team=self.team_a, user=self.f.qc1, capacity=5)
+        now = timezone.now()
+        # 1 annotating overdue, 1 rework due_soon, 1 already in pending_qc1 (must NOT count in ann1.holding)
+        self.f.job(status=JobStatus.ANNOTATING, annotator=self.f.ann1, deadline=now - timedelta(hours=3))
+        self.f.job(status=JobStatus.REWORK, annotator=self.f.ann1, deadline=now + timedelta(hours=6))
+        self.f.job(status=JobStatus.PENDING_QC1, annotator=self.f.ann1, deadline=now + timedelta(hours=2))
+        self.f.job(status=JobStatus.PENDING_QC2, annotator=self.f.ann1, deadline=now + timedelta(hours=2))
+
+        rows = {r["user"]["id"]: r for r in self.pm.get(self.f.url("teams/workload/")).data}
+        self.assertEqual(rows[self.f.ann1.id]["holding"], 2)
+        self.assertEqual(rows[self.f.ann1.id]["overdue"], 1)
+        self.assertEqual(rows[self.f.ann1.id]["due_soon"], 1)
+        # qc1_holding chỉ đếm PENDING_QC1 / QC1_REVIEWING (1 job), không đếm ANNOTATING hay PENDING_QC2
+        self.assertEqual(rows[self.f.qc1.id]["qc1_holding"], 1)
 
 
 class TeamDeleteTests(TestCase):

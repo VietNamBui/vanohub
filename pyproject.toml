@@ -1,0 +1,37 @@
+[tool.pyright]
+include = ["backend"]
+exclude = [
+    "**/.venv",
+    "**/migrations",
+    "**/generated",
+    "**/__pycache__",
+    "frontend",
+]
+extraPaths = ["backend"]
+typeCheckingMode = "standard"
+
+[tool.ruff]
+target-version = "py312"
+line-length = 120
+src = ["backend"]
+extend-exclude = ["**/migrations"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "PERF"]
+ignore = [
+    "E501",    # Line length handled separately
+    "PERF401", # Explicit append loops are fine for readability
+    "RUF012",  # Django class attributes (Meta, fields, list_display, etc.)
+]
+
+[tool.ruff.lint.isort]
+known-first-party = [
+    "accounts",
+    "analytics",
+    "config",
+    "cvat_integration",
+    "jobs",
+    "projects",
+    "quality",
+    "teams",
+]

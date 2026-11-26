@@ -5,7 +5,7 @@ from accounts.serializers import UserBriefSerializer
 from jobs.models import Job, ReworkScope
 from projects.models import SamplingMethod, StratifyBy
 
-from .models import Audit, AuditSample, ErrorCategory, ReviewError, Severity
+from .models import Audit, AuditSample, ErrorCategory, ErrorVerdict, ReviewError, Severity
 
 
 class ErrorCategorySerializer(serializers.ModelSerializer):
@@ -28,8 +28,23 @@ class ReviewErrorSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = ReviewError
-        fields = ["id", "stage", "rework_round", "category", "category_name", "severity",
-                  "location", "description", "reported_by", "created_at"]
+        fields = [
+            "id",
+            "stage",
+            "rework_round",
+            "category",
+            "category_name",
+            "severity",
+            "verdict",
+            "frame_number",
+            "cvat_object_id",
+            "is_missing_object",
+            "location",
+            "description",
+            "is_voided",
+            "reported_by",
+            "created_at",
+        ]
 
 
 class SampleJobSerializer(serializers.ModelSerializer):
@@ -68,13 +83,13 @@ class AuditSampleSerializer(serializers.ModelSerializer):
     job = SampleJobSerializer(read_only=True)
     auditor = UserBriefSerializer(read_only=True)
     reviewed_by = UserBriefSerializer(read_only=True)
-    errors = ReviewErrorSerializer(many=True, read_only=True)
+    errors = ReviewErrorSerializer(many=True, read_only=True)  # type: ignore[assignment, override]
     audit_status = serializers.CharField(source="audit.status", read_only=True)
 
     class Meta:
         model = AuditSample
         fields = ["id", "audit", "audit_status", "job", "stratum", "auditor", "result",
-                  "reviewed_by", "reviewed_at", "comment", "errors"]
+                  "checked_object_count", "reviewed_by", "reviewed_at", "comment", "errors"]
 
 
 class AuditSerializer(serializers.ModelSerializer):
@@ -84,6 +99,7 @@ class AuditSerializer(serializers.ModelSerializer):
     decided_by = UserBriefSerializer(read_only=True)
     decision_label = serializers.CharField(source="get_decision_display", read_only=True)
     sample_count = serializers.IntegerField(read_only=True)
+    actual_sampling_rate = serializers.SerializerMethodField()
     passed = serializers.IntegerField(read_only=True)
     rejected = serializers.IntegerField(read_only=True)
     pending = serializers.IntegerField(read_only=True)
@@ -105,6 +121,7 @@ class AuditSerializer(serializers.ModelSerializer):
             "strata_summary",
             "method",
             "sampling_rate",
+            "actual_sampling_rate",
             "stratify_by",
             "seed",
             "eligible_count",
@@ -118,11 +135,19 @@ class AuditSerializer(serializers.ModelSerializer):
             "pending",
         ]
 
+    def get_actual_sampling_rate(self, audit):
+        sample_count = getattr(audit, "sample_count", None)
+        if sample_count is None:
+            sample_count = audit.samples.count()
+        if not audit.eligible_count:
+            return 0.0
+        return round(sample_count * 100 / audit.eligible_count, 1)
+
     def get_strata_summary(self, audit):
         if audit.method != SamplingMethod.STRATIFIED:
             return []
         eligible_by_stratum = {}
-        for _, stratum in (audit.eligible_job_strata or {}).items():
+        for stratum in (audit.eligible_job_strata or {}).values():
             eligible_by_stratum[stratum] = eligible_by_stratum.get(stratum, 0) + 1
         samples_by_stratum = {}
         for s in audit.samples.all():
@@ -185,6 +210,10 @@ class AuditInputSerializer(serializers.Serializer):
 class ErrorInputSerializer(serializers.Serializer):
     category = serializers.PrimaryKeyRelatedField(queryset=ErrorCategory.objects.filter(is_active=True))
     severity = serializers.ChoiceField(choices=Severity.choices, required=False)
+    verdict = serializers.ChoiceField(choices=ErrorVerdict.choices, required=False, default=ErrorVerdict.FAIL)
+    frame_number = serializers.IntegerField(min_value=0, required=False, allow_null=True, default=None)
+    cvat_object_id = serializers.IntegerField(min_value=0, required=False, allow_null=True, default=None)
+    is_missing_object = serializers.BooleanField(required=False, default=False)
     location = serializers.CharField(max_length=120, required=False, allow_blank=True, default="")
     description = serializers.CharField(required=False, allow_blank=True, default="")
 
@@ -197,8 +226,12 @@ class ErrorInputSerializer(serializers.Serializer):
 
 
 class RejectSerializer(serializers.Serializer):
-    errors = ErrorInputSerializer(many=True, allow_empty=False)
+    errors = ErrorInputSerializer(many=True, allow_empty=False)  # type: ignore[assignment, override]
     comment = serializers.CharField(required=False, allow_blank=True, default="")
+
+
+class AssignAuditorSerializer(serializers.Serializer):
+    auditor = serializers.IntegerField(min_value=1)
 
 
 class PassSerializer(serializers.Serializer):
@@ -212,6 +245,10 @@ class Qc1StartSerializer(serializers.Serializer):
 class Qc1ErrorInputSerializer(serializers.Serializer):
     category = serializers.PrimaryKeyRelatedField(queryset=ErrorCategory.objects.filter(is_active=True))
     severity = serializers.ChoiceField(choices=Severity.choices, required=False)
+    verdict = serializers.ChoiceField(choices=ErrorVerdict.choices, required=False, default=ErrorVerdict.FAIL)
+    frame_number = serializers.IntegerField(min_value=0, required=False, allow_null=True, default=None)
+    cvat_object_id = serializers.IntegerField(min_value=0, required=False, allow_null=True, default=None)
+    is_missing_object = serializers.BooleanField(required=False, default=False)
     location = serializers.CharField(max_length=120, required=False, allow_blank=True, default="")
     description = serializers.CharField(required=False, allow_blank=True, default="")
 
@@ -224,6 +261,6 @@ class Qc1ErrorInputSerializer(serializers.Serializer):
 
 
 class Qc1RejectSerializer(serializers.Serializer):
-    errors = Qc1ErrorInputSerializer(many=True, allow_empty=False)
+    errors = Qc1ErrorInputSerializer(many=True, allow_empty=False)  # type: ignore[assignment, override]
     comment = serializers.CharField(required=False, allow_blank=True, default="")
     rework_scope = serializers.ChoiceField(choices=ReworkScope.choices, required=False, default=ReworkScope.PARTIAL)

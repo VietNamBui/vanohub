@@ -1,5 +1,7 @@
 """Hàm tạo dữ liệu dùng chung cho test của các app (không dùng ở code chạy thật)."""
 
+from typing import Any
+
 from rest_framework.test import APIClient
 
 from jobs.models import Job, JobStatus
@@ -11,8 +13,9 @@ from .models import Role, RoleAssignment, User
 
 def make_user(username, *roles, project=None):
     user = User.objects.create_user(username, password="pw")
-    for role in roles:
-        RoleAssignment.objects.create(user=user, role=role, project=project)
+    if project is not None:
+        for role in roles:
+            RoleAssignment.objects.create(user=user, role=role, project=project)
     return user
 
 
@@ -42,7 +45,7 @@ class ProjectFixture:
         return f"/api/projects/{self.project.id}/{path}"
 
     @staticmethod
-    def client(user):
+    def client(user: Any) -> Any:
         client = APIClient()
         client.force_authenticate(user)
         return client

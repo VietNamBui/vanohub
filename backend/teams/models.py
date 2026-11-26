@@ -1,8 +1,15 @@
+from typing import TYPE_CHECKING, Any
+
 from django.conf import settings
 from django.db import models
 
 
 class Team(models.Model):
+    if TYPE_CHECKING:
+        id: int
+        project_id: int
+        members: Any
+        batches: Any
     project = models.ForeignKey("projects.Project", on_delete=models.CASCADE, related_name="teams")
     name = models.CharField(max_length=200)
     created_at = models.DateTimeField(auto_now_add=True)
@@ -23,6 +30,11 @@ class TeamMember(models.Model):
     vì team nằm ở bảng khác (DB không tự ràng buộc "unique theo project" qua FK được).
     """
 
+    if TYPE_CHECKING:
+        id: int
+        team_id: int
+        user_id: int
+
     team = models.ForeignKey(Team, on_delete=models.CASCADE, related_name="members")
     user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="team_memberships")
     capacity = models.PositiveSmallIntegerField(default=5, help_text="Số job tối đa đang giữ cùng lúc")
@@ -30,7 +42,13 @@ class TeamMember(models.Model):
 
     class Meta:
         ordering = ["user__username"]
-        constraints = [models.UniqueConstraint(fields=["team", "user"], name="unique_team_member")]
+        constraints = [
+            models.UniqueConstraint(fields=["team", "user"], name="unique_team_member"),
+            models.CheckConstraint(
+                condition=models.Q(capacity__gte=1, capacity__lte=100),
+                name="team_member_capacity_1_to_100",
+            ),
+        ]
 
     def __str__(self):
         return f"{self.user} @ {self.team}"

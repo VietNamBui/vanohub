@@ -15,6 +15,8 @@
   - [Chi tiết chỉ số chất lượng chính (FPY, Defect Error Rate, Quality CL)](#chi-tiết-chỉ-số-chất-lượng-chính-fpy-defect-error-rate-quality-cl)
   - [Tổng hợp công thức tính toán trong Platform (SL – DA)](#tổng-hợp-công-thức-tính-toán-trong-platform)
   - [Bố cục trang dashboard theo 4 vai trò](#bố-cục-trang-dashboard)
+  - [Đề xuất thiết kế — Dữ liệu Pre-label 3D, Chính sách Guideline & Ngưỡng chất lượng (Chờ chốt)](#đề-xuất-thiết-kế--dữ-liệu-pre-label-3d-chính-sách-guideline--ngưỡng-chất-lượng-chờ-chốt)
+  - [Backlog — Kiến trúc Plugin Stub (trên nền cvat-base gốc)](#backlog--kiến-trúc-plugin-stub-trên-nền-cvat-base-gốc)
 
 ---
 
@@ -27,7 +29,7 @@
 | PV01 | Vấn đề ưu tiên | Giải quyết 3 vấn đề cốt lõi:<br>• Phân mảnh các giai đoạn công việc (quản lý bằng sheet, thao tác trên CVAT, trao đổi truyền miệng).<br>• Dễ sót thông tin và khó quản lý tập trung các thành phần dự án.<br>• Khó mở rộng (scale up) mô hình vận hành hiện tại. |
 | PV02 | Người sử dụng | **4 vai trò phẳng:** `PM`, `QC2` (QC Level 2), `QC1` (QC Level 1), `Annotator`. |
 | PV03 | Phạm vi MVP | [Danh sách tính năng MVP cần có](./mvp-checklist.md) |
-| PV04 | Ranh giới với CVAT | • **Làm trên VanoHub:** Quản lý dự án/dataset/batch, giao việc & giới hạn WIP, vòng đời trạng thái job, kiểm duyệt QC1/QC2 & ghi nhận lỗi (`ReviewError`), xác nhận batch sang QC2, lấy mẫu & chốt audit QC2, theo dõi tiến độ/deadline/KPI, thông báo trong app, nhật ký thao tác và ghi nhận bàn giao.<br>• **Làm trên CVAT:** Vẽ/chỉnh sửa annotation (`shapes` / `tracks` / cuboid) trực tiếp qua deep link từ VanoHub.<br>• *Hiện trạng đồng bộ:* VanoHub đọc/đồng bộ một chiều từ CVAT (`import-cvat` / `sync-cvat`) cho các bước trước QC2; chưa đẩy ngược trạng thái từ VanoHub về CVAT (đồng bộ 2 chiều là hạng mục mở rộng). |
+| PV04 | Ranh giới với CVAT | • **Tích hợp trực tiếp trên `cvat-base` gốc (không fork/patch CVAT).**<br>• **Làm trên VanoHub:** Quản lý dự án/dataset/batch, giao việc & giới hạn WIP, vòng đời trạng thái job, kiểm duyệt QC1/QC2 & ghi nhận lỗi (`ReviewError`), xác nhận batch sang QC2, lấy mẫu & chốt audit QC2, theo dõi tiến độ/deadline/KPI & sổ sản lượng ngày (`DailyOutputRecord`), thông báo trong app, nhật ký thao tác và ghi nhận bàn giao.<br>• **Làm trên CVAT:** Vẽ/chỉnh sửa annotation (`shapes` / `tracks` / cuboid 3D / object 2D) trực tiếp qua deep link từ VanoHub.<br>• *Hiện trạng đồng bộ:* VanoHub đọc/đồng bộ một chiều từ CVAT (`import-cvat` / `sync-cvat`) cho các bước trước QC2, lọc chỉ job `type = annotation` (loại `ground_truth`/`replica`), bung track thành số cuboid/object-frame theo từng frame hợp lệ (xét `outside`, `deleted_frames`, `included_frames`). Đồng bộ 2 chiều và plugin stub để vào Backlog. |
 | PV05 | Tiêu chí thành công | • Giảm thời gian tổng hợp, hỏi tiến độ và thao tác quản lý của PM nhờ tập trung trên 1 nền tảng.<br>• Số liệu cập nhật liên tục theo từng dự án, dễ báo cáo và bám sát KPI nhân sự.<br>• Giảm thời gian job nằm chờ giữa các bước (`Anno → QC1 → QC2 → Bàn giao`).<br>• Batch bàn giao đúng hạn hơn mà không giảm chất lượng. |
 
 ### 2. Quy trình và tổ chức — TC
@@ -50,7 +52,7 @@
 | DL04 | Quy tắc chia batch | Mặc định `1 Batch = 1 CVAT Task`, số job trong batch linh hoạt theo dữ liệu đầu vào. PM có thể gom/chuyển hàng loạt job sang batch khác cùng dự án (`bulk-move-batch`) khi job chưa khóa, chưa bàn giao và không thuộc đợt audit QC2 đang mở. |
 | DL05 | Thông tin bắt buộc & cấu hình | • **Dự án:** Tên dự án, mô tả, PM phụ trách (`pm_ids`), `cvat_project_id` (tùy chọn khi khởi tạo).<br>• **Cấu hình vận hành trên Project:** `max_rework_rounds` (mặc định DB `3`, khuyến nghị `2`), `escalation_policy` (`block` / `warn_only`), `annotator_wip_limit` (mặc định `2`), chiến thuật lấy mẫu QC2 (`sampling_method`: `random` / `stratified`, `sampling_rate`: mặc định `10%`, `stratify_by`: `annotator` / `qc1_reviewer` / `dataset`), ngưỡng `quality_cl_threshold` / `defect_rate_threshold`, chỉ tiêu `kpi_annotation_target` (object/ngày), `kpi_qc1_target` (job/ngày), `kpi_qc2_target` (job/ngày).<br>• **Batch:** Tên (duy nhất trong Dataset), `deadline` (tự kế thừa xuống job khi import). |
 | DL06 | Thay đổi cấu trúc | • **Không xóa cứng** Dataset, Batch, Job hay Danh mục lỗi đang dùng để bảo toàn truy vết.<br>• PM được `lock` / `unlock` Dataset, Batch, Job (khi chưa `delivered`), giao/giao lại job, đổi deadline, chuyển batch (`bulk-move-batch`). Mọi thay đổi đều ghi `ActivityLog` (trước/sau, người thao tác, lý do). |
-| DL07 | Hướng dẫn gán nhãn | • Chỉ **PM** (`manage_quality_catalog`) soạn và phát hành `Guideline` dạng Markdown; mỗi lần lưu tự tăng `version` (khóa dòng Project chống trùng phiên bản), giữ nguyên toàn bộ phiên bản cũ.<br>• Mọi vai trò trong dự án đều xem được toàn bộ lịch sử phiên bản.<br>• *Chưa chốt kỹ thuật:* Job chưa lưu trường `guideline_version` áp dụng tại thời điểm giao, nên mặc định các job đang làm tham chiếu phiên bản mới nhất. |
+| DL07 | Hướng dẫn gán nhãn | • Chỉ **PM** (`manage_quality_catalog`) soạn và phát hành `Guideline` dạng Markdown; mỗi lần lưu tự tăng `version` (khóa dòng Project chống trùng phiên bản), giữ nguyên toàn bộ phiên bản cũ.<br>• Mọi vai trò trong dự án đều xem được toàn bộ lịch sử phiên bản.<br>• *Chưa chốt kỹ thuật:* Job chưa lưu `guideline_version` áp dụng tại thời điểm giao (mặc định tham chiếu bản mới nhất); đề xuất bổ sung `annotation_policies` (`do_not_delete`, `outside_only`, `add_only`) theo Guideline tại mục [Đề xuất thiết kế — Pre-label 3D & Guideline](#đề-xuất-thiết-kế--dữ-liệu-pre-label-3d-chính-sách-guideline--ngưỡng-chất-lượng-chờ-chốt). |
 
 ### 4. Giao việc và thực hiện — GV
 
@@ -60,26 +62,26 @@
 | GV02 | Điều kiện nhận việc | Giới hạn WIP theo cấu hình dự án (`Project.annotator_wip_limit`, mặc định **2 job** đang ở `pending_annotation` / `annotating` / `rework`). Annotator đạt giới hạn phải nộp bớt mới được nhận thêm (chặn ở API `claim` với khóa tuần tự theo user). |
 | GV03 | Thứ tự ưu tiên | Hàng đợi công việc cá nhân và QC1 sắp theo **DB06**: `Quá hạn → Sắp đến hạn (≤ 24h) → Rework → Còn lại`, sau đó theo deadline sớm nhất và ID job. Khi tự nhận từ pool, ưu tiên batch của nhóm phân bổ (nếu có) và deadline sớm nhất. |
 | GV04 | Thu hồi và giao lại | **PM** có quyền giao lại Annotator / QC1 / Auditor QC2 (`assign`, `bulk-assign`, `audit-samples/{id}/assign`) khi job chưa khóa/bàn giao, kèm ghi chú lý do và tự động gửi thông báo `assigned` cho người mới. *(Chưa có bước xác nhận đồng ý 2 chiều từ người nhận cũ).* |
-| GV05 | Công việc dở dang | Khi đổi người làm job, các lượt nộp bài trước đó vẫn gắn với `actor` cũ trong `ActivityLog` nên sản lượng đã nộp không bị chuyển sang người mới; phần việc nộp sau khi giao lại tính cho người mới. |
-| GV06 | Nộp bài | Annotator chuyển `pending_annotation` / `rework` → `annotating` (`start`) → `pending_qc1` (`submit`, kèm `object_count` và ghi chú). Sau khi nộp, Annotator không thể tự rút job về mà phải chờ QC1 kiểm tra (`Pass` hoặc `Reject` sang `rework`). |
+| GV05 | Công việc dở dang | Khi đổi người làm job, sổ sản lượng ngày (`DailyOutputRecord`) và các lượt nộp trong `ActivityLog` gắn cứng theo đúng `actor` thực hiện — sản lượng đã ghi nhận của người cũ không bị chuyển sang người mới; phần việc làm sau khi giao lại tính cho người mới. **Không tính cơ chế cover hộ** (ai trực tiếp làm/duyệt thì ghi đúng người đó). |
+| GV06 | Nộp bài | Annotator chuyển `pending_annotation` / `rework` → `annotating` (`start`) → `pending_qc1` (`submit`, kèm ghi chú). Sản lượng làm được theo ngày được ghi nhận ngay cả **trước khi QC** (qua đồng bộ CVAT `count_objects=true`) và **sau khi nộp/QC vẫn giữ nguyên như thường** (không cộng đúp, không trừ ngược ngày cũ). Sau khi nộp, Annotator không thể tự rút job về mà phải chờ QC1 kiểm tra (`Pass` hoặc `Reject` sang `rework`).<br>• *Đề xuất chờ chốt (Pre-label):* Khóa nhập tay `object_count` cho job đã gắn `cvat_job_id` (tự động đọc CVAT khi nộp, có cờ `count_sync_pending` khi CVAT lỗi để không oan deadline) và chụp baseline `S0` lúc import — xem mục [Đề xuất thiết kế](#đề-xuất-thiết-kế--dữ-liệu-pre-label-3d-chính-sách-guideline--ngưỡng-chất-lượng-chờ-chốt). |
 
 ### 5. Luồng duyệt, chất lượng và ngoại lệ — L
 
 | Mã | Vấn đề cần thống nhất | Quy định & hiện trạng |
 | --- | --- | --- |
 | **L1** | **Vòng đời trạng thái Job** | 9 trạng thái chuẩn trên `JobStatus`:<br>`pending_annotation` (Chờ annotate) → `annotating` (Đang annotate) → `pending_qc1` (Chờ QC1) → `qc1_reviewing` (Đang QC1) → `qc1_passed` (Đạt QC1) → `pending_qc2` (Chờ QC2, sau khi PM xác nhận batch) → `approved` (Đã duyệt) → `delivered` (Đã bàn giao).<br>Nhánh trả sửa: `qc1_reviewing` / `pending_qc2` / `audit.complete` → `rework` → `annotating`. |
-| **L2** | **Vượt giới hạn rework** | • Giới hạn vòng sửa `max_rework_rounds` do PM cài đặt theo dự án (mặc định DB `3`, khuyến nghị nghiệp vụ `2`).<br>• Mỗi lần QC1/QC2/PM trả job về `rework`, tăng `rework_round += 1`. Khi `rework_round > max_rework_rounds`, bật `is_escalated = True` và gửi thông báo `escalated` (ghim chờ xử lý) lên **PM**.<br>• Chính sách xử lý `escalation_policy` do PM chọn: `block` (khóa job chờ PM gọi `resolve-escalation`) hoặc `warn_only` (chỉ cảnh báo, vẫn cho Annotator sửa tiếp). Khi PM gỡ escalation, có thể đổi người làm và đặt lại `rework_round = 0` trong khi giữ nguyên lịch sử lỗi. |
+| **L2** | **Vượt giới hạn rework** | • Giới hạn vòng sửa `max_rework_rounds` do PM cài đặt theo dự án (mặc định DB `3`, khuyến nghị nghiệp vụ `2`).<br>• Mỗi lần QC1/QC2/PM trả job về `rework`, tăng cả `rework_round += 1` và `total_rework_rounds += 1`. Khi `rework_round > max_rework_rounds`, bật `is_escalated = True` và gửi thông báo `escalated` (ghim chờ xử lý) lên **PM**.<br>• Chính sách xử lý `escalation_policy` do PM chọn: `block` (khóa job chờ PM gọi `resolve-escalation`) hoặc `warn_only` (chỉ cảnh báo, vẫn cho Annotator sửa tiếp). Khi PM gỡ escalation, có thể đổi người làm và đặt lại `rework_round = 0` cho vòng xử lý mới, trong khi **giữ bất biến `total_rework_rounds`, `first_qc1_result` và toàn bộ lịch sử lỗi** để không làm sai lệch `CL01` / `RW02`. |
 | **L3** | **Chuyển QC1 → QC2** | • QC1 duyệt từng job sang `qc1_passed`.<br>• Khi **100% job trong batch** đã qua QC1 (không còn job ở `pending_annotation`, `annotating`, `rework`, `pending_qc1`, `qc1_reviewing`), hệ thống gửi thông báo `review_needed` cho PM.<br>• **PM** thực hiện `confirm-qc2` theo batch để chuyển toàn bộ job `qc1_passed` của batch sang `pending_qc2` (chặn cứng nếu còn bất kỳ job nào chưa đạt QC1). |
 | **L4** | **Quyền quyết định chất lượng** | • **QC2** chấm `Pass` (`→ approved`) hoặc `Reject` (`→ rework`, bắt buộc kèm `ReviewError`) cho từng job mẫu (`AuditSample`).<br>• Khi 100% mẫu đã có kết quả, **PM** chốt đợt audit (`audit.complete`) với 3 quyết định:<br>&nbsp;&nbsp;◦ `accept`: Chấp nhận batch (các job chưa lấy mẫu trong đợt được chuyển sang `approved`).<br>&nbsp;&nbsp;◦ `reject`: Trả cả batch về `rework` (bắt buộc ghi `reason`).<br>&nbsp;&nbsp;◦ `partial_reject` *(chỉ cho Stratified)*: Chấp nhận hoặc trả `rework` theo từng tầng (`stratum_decisions`, bắt buộc ghi `reason`).<br>• *Ghi chú cần bổ sung:* Backend hiện chưa tự chặn PM chọn `accept` cho phần chưa lấy mẫu nếu đợt audit có mẫu bị QC2 `reject`, và chưa có kiểm tra tự động "chưa đánh obstacles". |
 | L5 | Điều kiện đạt QC1 | QC1 kiểm tra toàn bộ job trên CVAT và đánh dấu đạt/trả sửa theo ngưỡng chất lượng dự án (`quality_cl_threshold` / `defect_rate_threshold` do PM cấu hình). |
 | L6 | Danh mục lỗi | • Quản lý theo từng dự án (`ErrorCategory`): tên lỗi, mô tả, mức độ (`minor` Nhẹ / `major` Nặng / `critical` Nghiêm trọng), phạm vi áp dụng (`qc1` / `qc2` / `both`).<br>• Với cuboid: thiếu/thừa đối tượng, sai lớp, sai vị trí/kích thước/hướng, sai thuộc tính, sai ID liên kết giữa các frame.<br>• Chỉ **PM** tạo/sửa danh mục; không xóa cứng (`on_delete=RESTRICT`), chỉ ẩn bằng `is_active = False` để bảo toàn lịch sử. |
-| L7 | Bằng chứng lỗi | Khi QC1 hoặc QC2 trả `Reject`, bắt buộc ghi ít nhất 1 `ReviewError` gồm loại lỗi, mức độ, vị trí (`location`: frame/object ID) và mô tả. *(Hạng mục nâng cấp: tách `frame_number` + `cvat_object_id` có cấu trúc để tính chính xác `CL02` và `CL11`).* |
-| L8 | Phạm vi sửa và kiểm lại | Khi trả rework QC1, QC1 chọn `rework_scope`: `partial` (sửa theo danh sách lỗi đã ghi) hoặc `full` (sửa toàn job). Annotator xem chi tiết lỗi theo từng vòng sửa; QC1 kiểm lại theo phạm vi tương ứng. |
-| L9 | Lấy mẫu QC2 | • Hỗ trợ 2 phương pháp do PM cấu hình: **Random** (`sampling_rate`% số job `pending_qc2` của batch) và **Stratified** (phân tầng theo `annotator` / `qc1_reviewer` / `dataset`).<br>• Hỗ trợ xem trước mẫu (`preview`) kèm `seed` ngẫu nhiên lưu trên `Audit` để tái lập/giải trình vì sao job được chọn; tự động phân auditor tránh vi phạm luật bốn mắt.<br>• *Ghi chú:* Hiện lấy mẫu ở **cấp job trong batch**; chưa có lấy mẫu tự động ở **cấp frame trong job** (`AU01`–`AU02`). |
-| L10 | Batch không đạt | Khi PM chọn `reject` hoặc `partial_reject`, toàn bộ job bị trả (ngoại trừ job đã `reject` ở bước chấm mẫu) chuyển về `rework`, tăng `rework_round`, thông báo cho Annotator và QC1 phụ trách. Sau khi sửa và đạt QC1, PM xác nhận chuyển QC2 và tạo đợt audit mới. |
-| L11 | Phản hồi lỗi | Annotator gửi yêu cầu `error_dispute` gắn với job và `ReviewError` cụ thể **trực tiếp tới PM** (`status = pending_pm`); PM xem xét và kết luận `resolved` hoặc `rejected` kèm `resolution_note`. |
+| L7 | Bằng chứng lỗi | Khi QC1 hoặc QC2 trả `Reject`, bắt buộc ghi ít nhất 1 `ReviewError` gồm loại lỗi, mức độ (`minor`/`major`/`critical`), phân loại kết luận độc lập `verdict` (`fail` \| `edge`), cờ tường minh `is_missing_object` (True khi thiếu đối tượng / False Negative), vị trí (`location` + trường có cấu trúc tùy chọn `frame_number`, `cvat_object_id`) và mô tả. |
+| L8 | Phạm vi sửa và kiểm lại | Khi trả rework QC1, QC1 chọn `rework_scope`: `partial` (sửa theo danh sách lỗi đã ghi) hoặc `full` (sửa toàn job). Khi PM trả cả batch/tầng trong `audit.complete`, hệ thống đặt `rework_scope = full`. Annotator xem chi tiết lỗi theo từng vòng sửa; QC1 kiểm lại theo phạm vi tương ứng. |
+| L9 | Lấy mẫu QC2 | • PM chọn 1 trong 2 phương pháp ở **cấp job trong batch** (`pending_qc2`, chưa khóa):<br>&nbsp;&nbsp;◦ **Random:** $n = \min(N, \max(1, \lceil N \cdot r / 100 \rceil))$.<br>&nbsp;&nbsp;◦ **Stratified** (theo `annotator` / `qc1_reviewer` / `dataset`): mỗi tầng $g$ lấy $n_g = \min(N_g, \max(1, \lceil N_g \cdot r / 100 \rceil))$, tổng mẫu $n = \sum_g n_g$.<br>• Hỗ trợ xem trước mẫu (`preview`) kèm `seed` ngẫu nhiên lưu trên `Audit` để tái lập và hiển thị tỷ lệ lấy mẫu thực tế `actual_sampling_rate = n / N × 100%` (`AU02`); tự động phân auditor tránh vi phạm luật bốn mắt.<br>• *Ghi chú:* Lấy mẫu tự động cấp frame bên trong job là hạng mục mở rộng sau MVP. |
+| L10 | Batch không đạt | Khi PM chọn `reject` hoặc `partial_reject`, toàn bộ job bị trả (ngoại trừ job đã `reject` ở bước chấm mẫu) chuyển về `rework`, tăng `rework_round` và `total_rework_rounds`, thông báo cho Annotator và QC1 phụ trách. Sau khi sửa và đạt QC1, PM xác nhận chuyển QC2 và tạo đợt audit mới. |
+| L11 | Phản hồi lỗi | Annotator gửi yêu cầu `error_dispute` gắn với job và `ReviewError` cụ thể **trực tiếp tới PM** (`status = pending_pm`); PM xem xét và kết luận `resolved` hoặc `rejected` kèm `resolution_note`. Khi PM kết luận `resolved`, lỗi `ReviewError` gắn kèm tự động đánh dấu `is_voided = True` (giữ lịch sử truy vết, loại khỏi tính toán `CL02`/`CL04`/`CL06`/`CL11`/`RW04` và ghi nhận vào `CL09`). |
 | L12 | Dữ liệu có vấn đề | Annotator báo `data_issue` **trực tiếp tới PM** (`status = pending_pm`). PM có thể tạm khóa job (`lock`) trong thời gian chờ xử lý dữ liệu / xác nhận khách hàng, sau đó kết luận yêu cầu và mở khóa. |
-| L13 | Luật bốn mắt | Thực thi cứng ở backend trên mọi thao tác giao việc, tự nhận việc, QC1 và QC2: `annotator != qc1_reviewer`; QC2 `auditor` không được trùng `annotator` hoặc `qc1_reviewer`. *(Hạng mục nâng cấp: đối chiếu thêm lịch sử `ActivityLog` nếu job từng đổi người làm giữa chừng).* |
+| L13 | Luật bốn mắt | Thực thi cứng ở backend trên mọi thao tác giao việc, tự nhận việc, QC1 và QC2: kiểm tra cả người đang được giao hiện tại lẫn **lịch sử `ActivityLog`** (đã từng annotate/nộp hoặc đã từng QC1 job đó) để ngăn lách luật bốn mắt bằng cách giao lại job. |
 | L14 | Can thiệp và mở lại | PM có quyền `lock` / `unlock` job, batch, dataset chưa bàn giao và gỡ escalation (`resolve-escalation`). *(Chưa có API mở lại job đã `approved` hoặc `delivered` về `rework` — cần bổ sung nếu áp dụng quy trình hậu bàn giao).* |
 
 ### 6. Deadline và thời gian — TG
@@ -96,12 +98,12 @@
 
 | Mã | Vấn đề cần thống nhất | Quy định & hiện trạng |
 | --- | --- | --- |
-| CS01 | Đơn vị sản lượng | • **Annotator:** Số object/cuboid xử lý mỗi ngày (`kpi_annotation_target`).<br>• **QC1 & QC2:** Số job hoàn tất kiểm tra mỗi ngày (`kpi_qc1_target`, `kpi_qc2_target`).<br>• Toàn bộ chỉ tiêu do **PM** cấu hình theo từng dự án. |
-| CS02 | Thời điểm ghi nhận | • **Annotator:** Ghi nhận theo sự kiện nộp bài (`submit` → `ActivityLog` `job.status=pending_qc1` kèm `object_count`) hoặc đồng bộ `object_count` từ CVAT *(chưa có webhook realtime cho từng cú bấm xác nhận 1 object trong CVAT)*.<br>• **QC1:** Ghi nhận tại thời điểm bấm `qc1.pass` hoặc `qc1.reject`.<br>• **QC2:** Ghi nhận tại thời điểm bấm `pass` hoặc `reject` trên `AuditSample` (`reviewed_at`). |
-| CS03 | Rework và nhiều người làm | • Sản lượng rework **vẫn tính vào tổng sản lượng KPI** của Annotator (`first_pass_objects + rework_objects`), hiển thị tách biệt hai phần.<br>• Khi nhiều người tham gia cùng 1 job, mỗi lượt nộp ghi theo `actor` thực hiện nên sản lượng thuộc về đúng người nộp. |
-| CS04 | KPI khoán | PM đặt chỉ tiêu trên `Project`.<br>• *Hạng mục cần chốt khi đổi chỉ tiêu giữa kỳ:* Hiện chỉ lưu 1 giá trị hiện hành trên `Project` (chưa có bảng lịch sử chỉ tiêu theo ngày hiệu lực); đề xuất thêm `KpiTargetHistory(effective_from)` để ngày cũ giữ nguyên chỉ tiêu cũ, ngày mới áp chỉ tiêu mới. |
+| CS01 | Đơn vị sản lượng | • **Annotator:** Số cuboid 3D / object 2D (object-frame) làm được mỗi ngày (`kpi_annotation_target`). Không liên quan tiền bạc/trả công.<br>• **QC1 & QC2:** Số job hoàn tất kiểm tra mỗi ngày (`kpi_qc1_target`, `kpi_qc2_target`).<br>• Toàn bộ chỉ tiêu do **PM** cấu hình theo từng dự án. |
+| CS02 | Thời điểm ghi nhận | • **Annotator (tính theo ngày làm, cả trước và sau QC):** Ghi vào sổ sản lượng ngày `DailyOutputRecord(user, job, work_date, is_rework, object_count, source)` theo múi giờ người làm:<br>&nbsp;&nbsp;◦ **Khi chưa QC (đang annotate/rework):** Khi đồng bộ CVAT (`sync-cvat` với `count_objects=true`) thấy số cuboid/object-frame tăng thêm `Δ > 0`, ghi nhận ngay `Δ` vào đúng ngày hôm đó cho `job.annotator`.<br>&nbsp;&nbsp;◦ **Khi nộp bài (`submit`) & sau QC:** Chỉ ghi phần chênh lệch chưa ghi nhận (không cộng đúp phần đã đồng bộ trong ngày). Khi QC1/QC2 duyệt `Pass` giữ nguyên sản lượng đã ghi (không dịch ngày, không cộng thêm); khi QC trả `Reject` không trừ ngược sản lượng ngày cũ.<br>• **QC1:** Ghi nhận tại thời điểm bấm `qc1.pass` hoặc `qc1.reject` cho đúng `actor`.<br>• **QC2:** Ghi nhận tại thời điểm bấm `pass` hoặc `reject` trên `AuditSample` (`reviewed_at`) cho đúng `reviewed_by` (**không tính cover hộ / không cộng đúp cho `auditor` được giao nếu người khác kiểm**). |
+| CS03 | Rework và nhiều người làm | • Sản lượng rework (`SL03`) **vẫn tính vào tổng sản lượng KPI** của Annotator (`SL06 = SL01 + SL03`), hiển thị tách biệt hai phần.<br>• Khi `rework_scope = partial`, **không** cộng lại toàn bộ `job.object_count` — chỉ ghi phần thực sửa (số cuboid lỗi duy nhất của vòng hiện tại cộng phần object tăng thêm chưa ghi nhận). Khi `rework_scope = full`, tính theo khối lượng làm lại của vòng đó (trừ phần đã ghi trước lúc nộp trong cùng vòng).<br>• Khi nhiều người tham gia cùng 1 job, mỗi bản ghi `DailyOutputRecord` và lượt duyệt gắn theo đúng `actor` trực tiếp thực hiện (**không có ngoại lệ cover hộ**). |
+| CS04 | Chỉ tiêu KPI | Gộp `KPI07` vào **`KPI02`** (chỉ tính theo khối lượng cuboid 3D / object 2D / job trên `Project.kpi_*_target`, không tách khoán/tiền bạc).<br>• *Hạng mục mở rộng sau MVP:* Thêm bảng lịch sử `KpiTargetHistory(effective_from)` khi cần đổi chỉ tiêu giữa kỳ mà không ảnh hưởng lịch sử cũ. |
 | CS05 | Chất lượng | Xem chi tiết tại mục [Chi tiết chỉ số chất lượng chính (FPY, Defect Error Rate, Quality CL)](#chi-tiết-chỉ-số-chất-lượng-chính-fpy-defect-error-rate-quality-cl). |
-| CS06 | Tốc độ làm việc | • **Annotator:** `AnnotatorAnalyticsView` ước tính giờ làm phiên (`NS01`) bằng hiệu thời gian từ lần chuyển sang `ANNOTATING` gần nhất đến lúc `submit` (giới hạn `0.25h – 10h`/phiên; mặc định `7.5h` nếu thiếu mốc bắt đầu). Chưa tự trừ giờ nghỉ/chờ.<br>• **QC1 / QC2:** Chưa lưu thời điểm bắt đầu kiểm từng lượt audit nên `audit_speed` đang trả trạng thái `pending_definition`. |
+| CS06 | Tốc độ làm việc | • **Annotator:** `AnnotatorAnalyticsView` tính giờ phiên đo thực (`NS01`) bằng hợp nhất (union) các khoảng `ANNOTATING → PENDING_QC1` (giới hạn `0.25h – 10h`/phiên, không cộng đúp giờ song song khi WIP ≥ 2, không gán cứng giờ ảo `7.5h` cho ngày chưa có phiên nộp). Chưa tự trừ giờ nghỉ/chờ.<br>• **QC1 / QC2:** Chưa lưu thời điểm bắt đầu kiểm từng lượt audit nên `audit_speed` đang trả trạng thái `pending_definition`. |
 | CS07 | Đánh giá QC | • Đánh giá QC1 theo sản lượng kiểm, tỷ lệ Pass/Reject, phân bố lỗi ghi nhận và **số lỗi QC1 bỏ sót (`qc2_escape_errors`)** — tức lỗi QC2 phát hiện trên job mà QC1 đó đã duyệt đạt.<br>• Đánh giá QC2 theo số mẫu audit, tỷ lệ Pass/Reject, tiến độ theo batch và so sánh 2 kỳ.<br>• Tranh chấp kết luận chất lượng do **PM** phân xử. |
 | CS08 | Kỳ báo cáo và múi giờ | Báo cáo theo `day` / `week` / `month` (và `7d` / `30d` / `week` cho phân tích cá nhân), tính theo múi giờ người dùng (`User.timezone_name`, mặc định `Asia/Ho_Chi_Minh`) và hiển thị mốc đồng bộ CVAT gần nhất (`last_cvat_sync_at`). |
 
@@ -138,8 +140,8 @@
 | Mã | Vấn đề cần thống nhất | Quy định & hiện trạng |
 | --- | --- | --- |
 | VH01 | Nguồn dữ liệu chuẩn | • **CVAT làm chuẩn:** Dữ liệu annotation (`shapes`/`tracks`/cuboid), số frame (`frame_count`), trạng thái gốc CVAT (`cvat_stage`/`cvat_state`).<br>• **VanoHub làm chuẩn:** Cấu trúc Project/Dataset/Batch, workflow trạng thái (nhất là từ QC2 trở đi), phân công & WIP, deadline, số vòng rework & escalation, `ReviewError`, QC2 `Audit`, `Delivery`, KPI và `ActivityLog`. |
-| VH02 | Chiều và tốc độ đồng bộ | • Hiện triển khai **đồng bộ một chiều thủ công (CVAT → VanoHub)** khi PM bấm `import-cvat` hoặc `sync-cvat` (tùy chọn `count_objects=true`).<br>• Chỉ đồng bộ trạng thái cho job ở các bước trước QC2 (`SYNCABLE_STATUSES`: `annotation` + `qc1`).<br>• *Mở rộng sau MVP:* Đồng bộ nền định kỳ / webhook và đẩy trạng thái 2 chiều ngược về CVAT. |
-| VH03 | Xung đột | • **Trước QC2:** Khi PM bấm `sync-cvat`, trạng thái ánh xạ từ CVAT (`CVAT_STATUS_MAP`) cập nhật trạng thái VanoHub và ghi `ActivityLog` (`"Đồng bộ từ CVAT"`); nếu CVAT là `validation/rejected` sẽ tự tăng `rework_round` và kiểm tra escalation.<br>• **Từ QC2 trở đi (`pending_qc2`, `approved`, `delivered`):** VanoHub luôn ưu tiên — đồng bộ CVAT không ghi đè trạng thái.<br>• Ánh xạ tài khoản khi nhập job: ưu tiên `User.cvat_username`, sau đó `User.username`. |
+| VH02 | Chiều và tốc độ đồng bộ | • Hiện triển khai **đồng bộ một chiều thủ công từ `cvat-base` gốc (CVAT → VanoHub)** khi PM bấm `import-cvat` hoặc `sync-cvat` (tùy chọn `count_objects=true`).<br>• Tự động lọc chỉ job `type = annotation` (bỏ `ground_truth`/`replica`), chặn nhập trùng `cvat_task_id` giữa các batch, kiểm tra khớp `project.cvat_project_id`, thực hiện toàn bộ HTTP I/O bên ngoài transaction DB, đánh dấu `source_missing` nếu task/job bị xóa trên CVAT và không đi theo HTTP redirect (tránh rò token).<br>• Chỉ đồng bộ trạng thái cho job ở các bước trước QC2 (`SYNCABLE_STATUSES`: `annotation` + `qc1`), tôn trọng khóa (`is_locked`) và `escalation_policy = block`.<br>• *Mở rộng sau MVP (Backlog):* Webhook / đồng bộ nền và các plugin stub. |
+| VH03 | Xung đột | • **Trước QC2:** Khi PM bấm `sync-cvat`, trạng thái ánh xạ từ CVAT (`CVAT_STATUS_MAP`) cập nhật trạng thái VanoHub và ghi `ActivityLog` (`"Đồng bộ từ CVAT"`): `annotation/rejected` và `validation/rejected` đưa về `rework` (tăng `rework_round` + `total_rework_rounds` và kiểm tra escalation); **`acceptance/*` chỉ đưa tối đa tới `qc1_passed` (không bao giờ bỏ qua bước PM `confirm-qc2`)**.<br>• Khi bật `count_objects=true`, hệ thống bung toàn bộ track keyframe (xét `outside`, `deleted_frames`, `included_frames`) và ghi ngay phần chênh lệch dương vào sổ sản lượng ngày `DailyOutputRecord` cho `job.annotator` khi job đang ở giai đoạn làm việc (`ACTIVE_ANNOTATOR_STATUSES`).<br>• **Từ QC2 trở đi (`pending_qc2`, `approved`, `delivered`):** VanoHub luôn ưu tiên — đồng bộ CVAT không ghi đè trạng thái.<br>• Ánh xạ tài khoản khi nhập job: ưu tiên `User.cvat_username`, sau đó `User.username`. Endpoint `/api/cvat/tasks/` giới hạn chỉ PM. |
 | VH04 | Mất kết nối | • Endpoint kiểm tra kết nối `GET /api/cvat/status/` (timeout 5s; tải danh sách task 10s; mặc định client 15s).<br>• Khi CVAT không kết nối được hoặc trả lỗi 401/404/5xx, backend trả HTTP `502 Bad Gateway` kèm thông báo dễ hiểu, đồng thời lưu `last_sync_status = "error"`, `last_sync_error` và `last_synced_at` lên Batch.<br>• Người dùng vẫn thao tác bình thường các luồng nội bộ VanoHub và thử đồng bộ lại khi CVAT khôi phục. |
 | VH05 | Quy mô và hiệu năng | • API danh sách phân trang chuẩn `page_size = 50` (tối đa `500`), đánh chỉ mục DB trên các truy vấn trọng yếu (`project+status`, `project+created_at`, `recipient+project+is_read`, `project+created_by+status`).<br>• Sử dụng khóa hàng nguyên tử (`select_for_update` / `skip_locked`) cho `claim`, `start`, `submit`, `qc1`, `confirm-qc2`, `audit.complete`, `guideline.publish`.<br>• *Cần chốt SLA:* Số người dùng đồng thời tối đa và ngưỡng phản hồi mục tiêu (P95) khi đưa vào sản xuất. |
 | VH06 | Triển khai và khôi phục | • **Kiến trúc triển khai:** Backend Django 6 / DRF + SimpleJWT (access token 30 phút, refresh token 1 ngày), Frontend React 19 / TypeScript / Vite 8, CSDL PostgreSQL 17 (`docker-compose.yml`, volume `pgdata`).<br>• Cấu hình bí mật qua `backend/.env` (`DJANGO_SECRET_KEY`, `POSTGRES_*`, `CVAT_URL`, `CVAT_PUBLIC_URL`, `CVAT_ACCESS_TOKEN` hoặc `CVAT_USERNAME/PASSWORD`, `CORS_ALLOWED_ORIGINS`).<br>• *Cần chốt vận hành production:* Lịch sao lưu định kỳ PostgreSQL (`pg_dump` / WAL archiving), mục tiêu RPO/RTO và đơn vị vận hành hạ tầng. |
@@ -203,30 +205,24 @@
 ### 1. First Pass Yield — FPY tại QC1 (`CL01`)
 - **Công thức chuẩn:**
   $$\text{FPY}_{\text{QC1}} = \frac{\text{Số job đạt QC1 ngay lần kiểm đầu}}{\text{Tổng số job đã có kết quả kiểm QC1 lần đầu}} \times 100\%$$
-- **Hiện trạng (`provisional`):** `backend/analytics/views.py` hiện tính `rework_round == 0` trên tập job đã đạt `QC1_PASSED` trở lên (`REACHED_QC2`). Các job **trượt QC1 ngay lần đầu và vẫn đang ở `REWORK` / `ANNOTATING`** hiện bị lọt khỏi mẫu số, làm FPY bị cao giả tạo.
-- **Khắc phục cần làm:** Lưu thêm trường bất biến `first_qc1_result` (`pass` \| `reject`) trên `Job` ngay tại quyết định QC1 đầu tiên (hoặc truy vấn sự kiện `qc1.pass` / `qc1.reject` đầu tiên theo từng job từ `ActivityLog`).
+- **Triển khai (`Đã có`):** `Job.first_qc1_result` (`pass` \| `reject`, ghi 1 lần bất biến tại quyết định QC1 đầu tiên — không bị ảnh hưởng khi QC2 trả lại về sau hay khi PM gọi `resolve-escalation`). Mẫu số bao gồm cả job trượt lần đầu vẫn đang ở `REWORK` / `ANNOTATING`. Hiển thị trên `ProjectOverviewView`, `AnnotatorDashboardView` và `Qc1SummaryView`.
 
 ### 2. Defect Error Rate — Tỷ lệ đối tượng lỗi (`CL02`)
 - **Công thức chuẩn:**
-  $$\text{Defect Error Rate} = \frac{\text{Số cuboid (object-frame) duy nhất có lỗi xác nhận}}{\text{Tổng số cuboid (object-frame) đã kiểm}} \times 100\%$$
-- **Hiện trạng (`pending_definition`):** Chưa trả số thực trên API tổng quan (`value = None`).
-- **2 thiếu hụt dữ liệu cần xử lý:**
-  1. **Đếm đúng số cuboid theo frame từ CVAT:** `CvatClient.count_job_objects()` hiện trả `len(shapes) + len(tracks)` (đếm số *track* vật thể thay vì tổng số *cuboid/object-frame*). Cần bung khoảng frame hoạt động của từng CVAT track (từ keyframe cho tới `outside=True`) cộng với các shape đơn lẻ.
-  2. **Khử trùng mục tiêu lỗi:** `ReviewError.location` hiện là chuỗi tự do nên 2 lỗi trên cùng 1 cuboid dễ bị đếm trùng. Cần thêm trường có cấu trúc `frame_number` + `cvat_object_id` (và quy ước xử lý lỗi thiếu đối tượng — False Negative — vào mẫu số `checked_cuboids + missing_cuboids` để tỷ lệ luôn nằm trong `[0%, 100%]`).
+  $$\text{Defect Error Rate} = \frac{\text{Số cuboid (object-frame) duy nhất có verdict = Fail}}{\text{Tổng} = N_{\text{checked}} + N_{\text{missing}}} \times 100\%$$
+- **Triển khai (`Đã có`):**
+  1. **Đếm cuboid/object-frame từ `cvat-base` gốc:** `CvatClient.count_job_objects()` gọi `/api/jobs/{id}/annotations` kết hợp `/api/jobs/{id}/data/meta`, bung khoảng frame hoạt động của từng CVAT track (từ keyframe đến `outside=True` hoặc `stop_frame`), trừ `deleted_frames`, giao với `included_frames` (nếu có) và cộng các shape đơn lẻ không `outside`.
+  2. **Khử trùng & xử lý False Negative:** `ReviewError` lưu `frame_number`, `cvat_object_id`, `verdict` (`fail` \| `edge`), `is_missing_object`, `is_voided`. Nhiều lỗi trên cùng 1 `(job_id, frame_number, cvat_object_id)` chỉ tính 1 đối tượng; lỗi bị PM hủy qua `error_dispute` (`is_voided=True`) và lỗi `verdict=edge` không tính vào tử số `Fail`; chỉ lỗi đánh dấu tường minh `is_missing_object=True` mới cộng thêm vào $N_{\text{missing}}$ ở mẫu số (khử trùng theo `(frame_number, category_id)`). Chỉ tính `CL02`/`CL11` khi $N_{\text{checked}} > 0$; `AuditSample.checked_object_count` lưu snapshot tại thời điểm chấm QC2 để không sai lệch lịch sử khi `job.object_count` đổi về sau.
 
 ### 3. Quality CL (`CL11`) và phân biệt `Edge` với `AQL`
-- **Công thức chuẩn:**
-  $$\text{Quality CL} = \frac{\text{Cuboid}_{\text{Pass}} + \text{Cuboid}_{\text{Edge}}}{\text{Tổng số cuboid đã kiểm}} \times 100\%$$
-- **Phân biệt `Edge` và `AQL`:**
-  - **`AQL` (Acceptable Quality Limit)** là **ngưỡng chấp nhận ở cấp batch** (ví dụ: chấp nhận batch khi Defect Error Rate $\le 2\%$ hoặc Quality CL $\ge 98\%$), tương ứng với `quality_cl_threshold` và `defect_rate_threshold` trên `Project`.
-  - **`Edge`** **không phải** độ lệch AQL, mà là **mức chấm ở cấp từng cuboid** trong thang 3 bậc **`Pass` / `Edge` / `Fail`**:
-    - *Nghĩa phổ biến nhất (Borderline / Edge-case):* Cuboid có sai lệch rất nhẹ nằm sát biên dung sai hoặc rơi vào trường hợp hướng dẫn chưa rõ/che khuất mạnh/điểm LiDAR thưa — QC đánh dấu `Edge` để theo dõi và bổ sung guideline mà không tính trượt (`Fail`) vào tỷ lệ chất lượng.
-    - *Nghĩa đặc thù dự án (Spatial FOV edge):* Đối tượng nằm sát mép tầm nhìn camera hoặc rìa tầm quét LiDAR được nới lỏng dung sai và cộng chung với `Pass`.
-- **Hiện trạng (`pending_definition`):** CVAT không có trạng thái gốc `Pass / Edge / Fail` trên từng cuboid.
-- **3 điểm PM cần chốt trước khi lập trình `CL11`:**
-  1. Quy ước ghi nhận `Edge`: thêm trường `verdict` (`edge` \| `fail`) trên `ReviewError` (cuboid không gắn lỗi mặc định là `Pass`), ánh xạ từ mức độ lỗi (`minor = Edge`, `major/critical = Fail`), hay đồng bộ từ tag/attribute của CVAT.
-  2. Trọng số của `Edge` trong tử số `Quality CL` (`1.0` như công thức `(Pass + Edge) / Tổng`, hay hệ số từng phần như `0.5`).
-  3. `Edge` có được tính vào tử số của `Defect Error Rate (CL02)` hay chỉ tính `Fail`.
+- **Công thức chuẩn (đã gộp `CL03` vào `CL11`):**
+  $$\text{Quality CL} = \frac{\text{Cuboid}_{\text{Pass}} + \text{Cuboid}_{\text{Edge}}}{N_{\text{checked}} + N_{\text{missing}}} \times 100\% = 100\% - \text{Defect Error Rate}$$
+- **Quy ước đã chốt (`Đã có`):**
+  - **`AQL` (Acceptable Quality Limit)** là **ngưỡng chấp nhận ở cấp batch** (`Project.quality_cl_threshold`, `Project.defect_rate_threshold`).
+  - **`Edge`** là **phân loại kết luận độc lập** trên `ReviewError.verdict = "edge"` (tách biệt với `severity = minor | major | critical`):
+    - Trọng số `Edge` trong tử số `Quality CL` bằng `1.0` (cộng chung với `Pass` để không phạt tỷ lệ chất lượng cho ca cận biên / rìa FOV).
+    - `Edge` **không** tính vào tử số `Fail` của `Defect Error Rate (CL02)` nhưng vẫn được lưu để theo dõi và bổ sung guideline.
+    - `CL03` gộp vào `CL11` (nếu cần xem Pass thuần không gồm Edge: $(N_{\text{checked}} - \text{Fail} - \text{Edge}) \div (N_{\text{checked}} + N_{\text{missing}})$).
 
 ---
 
@@ -236,77 +232,78 @@
 
 | Mã | Chỉ số | Công thức / quy tắc tính | PM | QC2 | QC1 | Anno | Cách trình bày | Mức | Hiện trạng |
 | --- | --- | --- | :---: | :---: | :---: | :---: | --- | :---: | --- |
-| **SL01** | Sản lượng Anno lần đầu | Tổng object-frame nộp hợp lệ ở vòng làm đầu (`rework_round = 0`) trong kỳ | ✓ | — | — | ✓ | Thẻ số; biểu đồ cột theo ngày | P1 | Đã có |
-| **SL02** | Sản lượng QC | Số lượt hoàn tất kiểm job hợp lệ (`qc1.pass/reject`, `qc2 pass/reject`); tách QC1/QC2 | ✓ | ✓ | ✓ | — | Thẻ thực tế/chỉ tiêu; cột phân nhóm | P1 | Đã có *(chưa tách kiểm đầu/lại)* |
-| **SL03** | Sản lượng rework Anno | Tổng object-frame nộp lại trong vòng sửa (`rework_round > 0`) | ✓ | — | — | ✓ | Phần rework trong cột sản lượng | P1 | Đã có |
-| **SL04** | Sản lượng theo người thực hiện | Tổng phần việc ghi nhận theo từng `actor`; giao lại không chuyển sản lượng cũ | ✓ | ✓ | ✓ | ✓ | Bảng chi tiết người–job–vòng xử lý | P1 | Đã có |
-| **SL05** | Sản lượng dự án / nhóm | Tổng sản lượng thành viên trong phạm vi, tách từng vai trò và đơn vị | ✓ | — | — | — | Cột theo ngày / nhóm phân bổ; bộ lọc vai trò | P1 | Tạm tính |
-| **SL06** | Tổng sản lượng tính KPI Anno | `SL01 + SL03` trong ngày/kỳ theo múi giờ người dùng | ✓ | — | — | ✓ | Thẻ KPI chính; bấm xem phần đóng góp | P1 | Đã có |
-| **KPI01** | Chỉ tiêu trong kỳ | Chỉ tiêu cấu hình trên `Project` (`kpi_*_target`) theo ngày công | ✓ | ✓ | ✓ | ✓ | Đường mục tiêu trên biểu đồ; thông tin kỳ | P1 | Đã có *(chưa có lịch sử đổi giữa kỳ)* |
-| **KPI02** | Tỷ lệ đạt KPI | Sản lượng đủ điều kiện ÷ chỉ tiêu cùng kỳ × 100% | ✓ | ✓ | ✓ | ✓ | Thẻ % + thực tế/chỉ tiêu; thanh tiến độ | P1 | Đã có |
+| **SL01** | Sản lượng Anno lần đầu | Tổng cuboid 3D / object 2D làm được theo ngày ở vòng đầu (`is_rework=False`) trên `DailyOutputRecord` — tính cả khi chưa QC (đồng bộ CVAT) và giữ nguyên sau QC | ✓ | — | — | ✓ | Thẻ số; biểu đồ cột theo ngày | P1 | Đã có |
+| **SL02** | Sản lượng QC | Số lượt hoàn tất kiểm job hợp lệ (`qc1.pass/reject` theo `actor`, `qc2 pass/reject` theo `reviewed_by` — không tính cover hộ); tách QC1/QC2 | ✓ | ✓ | ✓ | — | Thẻ thực tế/chỉ tiêu; cột phân nhóm | P1 | Đã có *(chưa tách kiểm đầu/lại)* |
+| **SL03** | Sản lượng rework Anno | Tổng cuboid 3D / object 2D thực làm theo ngày ở vòng sửa (`is_rework=True`): `partial` chỉ tính lỗi duy nhất vòng hiện tại + delta tăng thêm, `full` tính theo vòng làm lại | ✓ | — | — | ✓ | Phần rework trong cột sản lượng | P1 | Đã có |
+| **SL04** | Sản lượng theo người thực hiện | Tổng sản lượng ghi nhận theo đúng `actor` (`DailyOutputRecord.user` / `reviewed_by`); giao lại không chuyển sản lượng cũ, không tính cover hộ | ✓ | ✓ | ✓ | ✓ | Bảng chi tiết người–job–vòng xử lý | P1 | Đã có |
+| **SL05** | Sản lượng dự án / nhóm | Tổng sản lượng thành viên trong phạm vi từ `DailyOutputRecord`, tách từng vai trò và đơn vị | ✓ | — | — | — | Cột theo ngày / nhóm phân bổ; bộ lọc vai trò | P1 | Đã có *(Anno & Team)* |
+| **SL06** | Tổng sản lượng tính KPI Anno | `SL01 + SL03` trong ngày/kỳ theo múi giờ người dùng (tính cả trước và sau QC) | ✓ | — | — | ✓ | Thẻ KPI chính; bấm xem phần đóng góp | P1 | Đã có |
+| **KPI01** | Chỉ tiêu trong kỳ | Chỉ tiêu cấu hình trên `Project` (`kpi_*_target`: cuboid/object cho Anno; job cho QC1/QC2) | ✓ | ✓ | ✓ | ✓ | Đường mục tiêu trên biểu đồ; thông tin kỳ | P1 | Đã có *(chưa có lịch sử đổi giữa kỳ)* |
+| **KPI02** | Tỷ lệ đạt KPI *(đã gộp KPI07)* | Sản lượng đủ điều kiện ÷ chỉ tiêu cùng kỳ × 100% (chỉ tính khối lượng cuboid 3D / object 2D / job, không liên quan tiền bạc) | ✓ | ✓ | ✓ | ✓ | Thẻ % + thực tế/chỉ tiêu; thanh tiến độ | P1 | Đã có |
 | **KPI03** | Sản lượng còn thiếu | `max(0, chỉ tiêu − sản lượng thực tế)` | ✓ | ✓ | ✓ | ✓ | Số phụ trong thẻ KPI | P1 | Đã có |
 | **KPI04** | Sản lượng vượt chỉ tiêu | `max(0, sản lượng thực tế − chỉ tiêu)` | ✓ | ✓ | ✓ | ✓ | Số phụ khi đã đạt KPI | P1 | Đã có |
 | **KPI05** | Tỷ lệ thành viên đạt KPI | Thành viên đạt chỉ tiêu ÷ thành viên đủ điều kiện đánh giá × 100% | ✓ | — | — | — | Thẻ % + số người đạt/tổng | P1 | Chưa làm |
 | **KPI06** | Thành viên dưới ngưỡng KPI | Thành viên dưới ngưỡng X ÷ thành viên được đánh giá × 100%; đề xuất X = 50% | ✓ | — | — | — | Danh sách cần hỗ trợ + số đếm | P1 | Chưa làm |
-| **KPI07** | Tỷ lệ đạt khoán | Sản lượng đủ điều kiện khoán ÷ chỉ tiêu khoán × 100% | ✓ | ✓ | ✓ | ✓ | Thẻ trong tab KPI kỳ; chưa tính tiền công | P1 | Chưa làm |
-| **KPI08** | Chênh lệch hai kỳ | Giá trị kỳ này − giá trị kỳ trước | ✓ | ✓ | ✓ | ✓ | Số tăng/giảm cạnh chỉ số chính | P1 | Đã có *(QC1/QC2)* |
-| **KPI09** | Tỷ lệ tăng/giảm hai kỳ | `(Kỳ này − kỳ trước) ÷ kỳ trước × 100%`; kỳ trước = 0 thì không tính % | ✓ | ✓ | ✓ | ✓ | Nhãn tăng/giảm, ghi rõ kỳ so sánh | P1 | Đã có *(QC1/QC2)* |
-| **KPI10** | Xếp hạng sản lượng | Sắp giảm dần trong cùng vai trò, dự án và kỳ; cá nhân chỉ thấy hạng của mình | ✓ | ✓ | ✓ | ✓ | PM xem bảng; cá nhân chỉ thấy hạng mình | P2 | Đã có *(Anno & Team)* |
+| **KPI07** | *(Gộp vào KPI02)* | Đã gộp vào `KPI02` (khối lượng cuboid 3D / object 2D / job theo `Project.kpi_*_target`; không có nghiệp vụ tiền bạc/khoán riêng trong MVP) | — | — | — | — | Gộp chung trong `KPI02` | — | Gộp vào KPI02 |
+| **KPI08** | Chênh lệch hai kỳ | Giá trị kỳ này − giá trị kỳ trước (`kpi.comparison.*.delta`) | ✓ | ✓ | ✓ | ✓ | Số tăng/giảm cạnh chỉ số chính | P1 | Đã có *(QC1/QC2)* |
+| **KPI09** | Tỷ lệ tăng/giảm hai kỳ | `(Kỳ này − kỳ trước) ÷ kỳ trước × 100%` (`kpi.comparison.*.pct_change`); kỳ trước = 0 thì trả `null` | ✓ | ✓ | ✓ | ✓ | Nhãn tăng/giảm, ghi rõ kỳ so sánh | P1 | Đã có *(QC1/QC2)* |
+| **KPI10** | Xếp hạng sản lượng | Sắp giảm dần theo sản lượng `DailyOutputRecord` cùng kỳ trong cùng vai trò & dự án; cá nhân chỉ thấy hạng mình | ✓ | ✓ | ✓ | ✓ | PM xem bảng; cá nhân chỉ thấy hạng mình | P2 | Đã có *(Anno & Team)* |
 | **KPI11** | Chỉ tiêu dự án / nhóm | Tổng chỉ tiêu thành viên trong phạm vi, cùng đơn vị và kỳ | ✓ | — | — | — | Đường chỉ tiêu cạnh SL05 | P1 | Chưa làm |
-| **NS01** | Thời gian làm thực tế | Tổng thời lượng phiên làm hợp lệ (`ANNOTATING → PENDING_QC1`) | ✓ | ✓ | ✓ | ✓ | Thẻ giờ trong tab năng suất | P2 | Tạm tính *(Anno)* |
+| **NS01** | Thời gian làm thực tế | Tổng thời lượng phiên làm hợp lệ (`ANNOTATING → PENDING_QC1` lọc theo đúng `actor`) | ✓ | ✓ | ✓ | ✓ | Thẻ giờ trong tab năng suất | P2 | Tạm tính *(Anno)* |
 | **NS02** | Thời gian chờ/tạm dừng | Tổng thời lượng chờ/tạm dừng đã ghi nhận, phân theo nguyên nhân | ✓ | ✓ | ✓ | ✓ | Thanh ngang theo nguyên nhân; timeline job | P2 | Chưa làm |
-| **NS03** | Năng suất Anno | Sản lượng Anno hợp lệ ÷ giờ làm thực tế; tách lần đầu/rework | ✓ | — | — | ✓ | Đường xu hướng object-frame/giờ | P2 | Tạm tính |
+| **NS03** | Năng suất Anno | Sản lượng Anno hợp lệ ÷ giờ làm thực tế; tách riêng giờ làm đầu (`first_pass_per_hour`) và giờ rework (`rework_per_hour`) | ✓ | — | — | ✓ | Đường xu hướng object-frame/giờ | P2 | Tạm tính |
 | **NS04** | Năng suất QC | Lượt kiểm job hoàn tất ÷ giờ kiểm thực tế; tách kiểm đầu/kiểm lại | ✓ | ✓ | ✓ | — | Đường xu hướng job/giờ | P2 | Chờ chốt |
 | **NS05** | Thời gian trung bình/đơn vị | Giờ làm thực tế ÷ số đơn vị hoàn thành tương ứng | ✓ | ✓ | ✓ | ✓ | Thẻ phụ; bảng theo loại công việc | P2 | Chưa làm |
 | **NS06** | Sản lượng trung bình/ngày công | Tổng sản lượng ÷ số ngày công có hoạt động | ✓ | ✓ | ✓ | ✓ | Thẻ trung bình trong tab năng suất | P1 | Đã có *(Anno)* |
 | **NS07** | Thời gian chờ giữa hai bước | Thời điểm bắt đầu bước sau − thời điểm sẵn sàng chuyển bước | ✓ | ✓ | ✓ | ✓ | Thanh ngang trung vị theo bước; danh sách chờ lâu | P1 | Chưa làm |
 | **NS08** | Thời gian hoàn tất toàn luồng | Thời điểm PM chấp nhận − thời điểm lần đầu giao Anno | ✓ | — | — | — | Xu hướng trung vị theo kỳ; chi tiết từng job | P1 | Chưa làm |
-| **CL01** | FPY tại QC1 | Job Pass ở lần QC1 đầu ÷ job có kết quả QC1 đầu × 100% | ✓ | — | ✓ | ✓ | Thẻ % + đạt/tổng; đường xu hướng tuần | P1 | Tạm tính *(cần sửa mẫu số)* |
-| **CL02** | Tỷ lệ đối tượng lỗi (Defect Error Rate) | Object-frame duy nhất có lỗi xác nhận ÷ tổng object-frame đã kiểm × 100% | ✓ | ✓ | ✓ | — | Thẻ % có cỡ mẫu; bấm xem lỗi | P1 | Chờ chốt |
-| **CL03** | Tỷ lệ đối tượng đạt trong mẫu | Object-frame không lỗi ÷ tổng object-frame đã kiểm × 100% | ✓ | ✓ | ✓ | — | Thông tin phụ trong chi tiết audit | P1 | Chờ chốt |
-| **CL04** | Số lỗi theo loại/mức độ | Đếm `ReviewError` đã ghi theo loại lỗi và mức độ | ✓ | ✓ | ✓ | ✓ | Thanh ngang top lỗi; Anno xem lỗi trên job mình | P1 | Đã có |
-| **CL05** | Tỷ lệ đối tượng lỗi theo mức độ | Object-frame có lỗi mức X ÷ tổng object-frame đã kiểm × 100% | ✓ | ✓ | ✓ | — | Thanh phân bố; dùng mức nặng nhất nếu tránh chồng lặp | P1 | Chờ chốt |
-| **CL06** | Số lỗi QC1 bỏ sót | Đếm lỗi QC2 xác nhận trên job đã qua QC1 (`qc1_missed_errors` / `qc2_escape_errors`) | ✓ | ✓ | ✓ | — | Thẻ số + bảng bằng chứng | P1 | Đã có |
-| **CL07** | Tỷ lệ job có lỗi QC1 bỏ sót | Job audit có lỗi QC1 bỏ sót ÷ job đã audit thuộc trách nhiệm QC1 đó × 100% | ✓ | ✓ | ✓ | — | Thẻ % + số job lỗi/số job audit | P1 | Chưa làm |
+| **NS09** | Tỷ lệ công QA / Annotation *(đề xuất)* | Tổng giờ (hoặc ngày công) QC1 + QC2 ÷ tổng giờ (hoặc ngày công) Annotation trong kỳ (`qa_to_annotation_ratio`); `≥ 1.0` cảnh báo nghẽn QA (`QA days > Annotation days`) | ✓ | ✓ | — | — | Thẻ tỷ lệ + xu hướng theo batch/kỳ | P2 | Chờ chốt |
+| **CL01** | FPY tại QC1 | Job Pass ở lần QC1 đầu ÷ job có kết quả QC1 đầu × 100% (`Job.first_qc1_result`) | ✓ | — | ✓ | ✓ | Thẻ % + đạt/tổng; đường xu hướng tuần | P1 | Đã có |
+| **CL02** | Tỷ lệ đối tượng lỗi (Defect Error Rate) | Cuboid duy nhất có `verdict=fail` (không void) ÷ `(N_checked + N_missing)` × 100% | ✓ | ✓ | ✓ | — | Thẻ % có cỡ mẫu; bấm xem lỗi | P1 | Đã có |
+| **CL03** | *(Gộp vào CL11)* | Đã gộp vào `CL11` (Pass thuần = `(N_checked - Fail - Edge) ÷ (N_checked + N_missing)` nếu cần tách riêng) | — | — | — | — | Gộp chung trong `CL11` | — | Gộp vào CL11 |
+| **CL04** | Số lỗi theo loại/mức độ | Đếm `ReviewError` (`is_voided=False`) theo loại lỗi (`errors_by_category`) và mức độ (`errors_by_severity`) | ✓ | ✓ | ✓ | ✓ | Thanh ngang top lỗi; Anno xem lỗi trên job mình | P1 | Đã có |
+| **CL05** | Tỷ lệ đối tượng lỗi theo mức độ | Cuboid `verdict=fail` theo mức nặng nhất `minor`/`major`/`critical` ÷ `(N_checked + N_missing)` × 100% | ✓ | ✓ | ✓ | — | Thanh phân bố theo mức độ | P1 | Đã có |
+| **CL06** | Số lỗi QC1 bỏ sót | Đếm lỗi QC2 (`is_voided=False`) xác nhận trên job đã qua QC1 (`qc1_missed_errors` / `qc2_escape_errors`) | ✓ | ✓ | ✓ | — | Thẻ số + bảng bằng chứng | P1 | Đã có |
+| **CL07** | Tỷ lệ job có lỗi QC1 bỏ sót | Job audit có lỗi QC1 bỏ sót ÷ job đã audit thuộc trách nhiệm QC1 đó × 100% (`qc1_escape_job_rate`) | ✓ | ✓ | ✓ | — | Thẻ % + số job lỗi/số job audit | P1 | Đã có |
 | **CL08** | Tỷ lệ lỗi QC2 bỏ sót | Object-frame có lỗi QC2 bỏ sót xác nhận ÷ object-frame tái kiểm × 100% | ✓ | ✓ | — | — | Thẻ % + bảng kết luận tái kiểm độc lập | P2 | Chưa làm |
-| **CL09** | Tỷ lệ kết luận lỗi bị hủy | Kết luận lỗi bị hủy (`error_dispute` resolved) ÷ kết luận lỗi đã phân xử × 100% | ✓ | ✓ | ✓ | — | Bảng phân xử; chỉ số phụ | P2 | Chưa làm |
+| **CL09** | Tỷ lệ kết luận lỗi bị hủy | `error_dispute` có `status=resolved` ÷ (`resolved` + `rejected`) × 100% (`dispute_overturn_rate`) | ✓ | ✓ | ✓ | — | Bảng phân xử; chỉ số phụ | P2 | Đã có |
 | **CL10** | Batch được chấp nhận lần đầu | Batch được PM `accept` ở đợt audit đầu ÷ batch có đợt audit đầu đã chốt × 100% | ✓ | ✓ | — | — | Thẻ % + đường xu hướng | P1 | Chưa làm |
-| **CL11** | Quality CL | `(Cuboid Pass + Cuboid Edge) ÷ Tổng số cuboid đã kiểm × 100%` | ✓ | ✓ | ✓ | ✓ | Thẻ % kèm tổng cuboid đã kiểm | P1 | Chờ chốt *(quy ước Edge)* |
+| **CL11** | Quality CL *(đã gộp CL03)* | `(Cuboid Pass + Cuboid Edge) ÷ (N_checked + N_missing) × 100% = 100% − CL02` (`verdict=edge` độc lập); *giả định phân mức 3 cấp chờ chốt:* Xanh `≥ 95%`, Vàng `90%–<95%`, Đỏ `< 90%` | ✓ | ✓ | ✓ | ✓ | Thẻ % kèm cỡ mẫu & nhãn màu 3 mức | P1 | Đã có *(chưa có phân mức 3 cấp)* |
 | **CL12** | Điều kiện đạt/chặn chất lượng | Áp ngưỡng dự án; lỗi nghiêm trọng chưa xử lý thì chặn chấp nhận/bàn giao | ✓ | ✓ | ✓ | ✓ | Nhãn Đạt/Chưa đạt + lý do chặn | P1 | Chưa làm |
 | **CL13** | FPY toàn luồng | Job được PM chấp nhận không qua rework ÷ job đã được PM chấp nhận × 100% | ✓ | — | — | — | Thẻ phụ có số job còn mở; không thay CL01 | P2 | Chưa làm |
-| **RW01** | Số vòng rework | Đếm quyết định trả về `rework` (`Job.rework_round`) | ✓ | ✓ | ✓ | ✓ | Nhãn số vòng trên job + timeline | P1 | Đã có |
-| **RW02** | Tỷ lệ job bị rework | Job duy nhất có `rework_round > 0` ÷ tổng job trong nhóm đánh giá × 100% | ✓ | ✓ | ✓ | ✓ | Thẻ % + xu hướng; lọc ra danh sách job | P1 | Tạm tính |
+| **RW01** | Số vòng rework | Đếm quyết định trả về `rework` (`Job.rework_round` hiện tại & `Job.total_rework_rounds` bất biến) | ✓ | ✓ | ✓ | ✓ | Nhãn số vòng trên job + timeline | P1 | Đã có |
+| **RW02** | Tỷ lệ job bị rework | Job duy nhất có `total_rework_rounds > 0` ÷ tổng job trong nhóm đánh giá × 100% | ✓ | ✓ | ✓ | ✓ | Thẻ % + xu hướng; lọc ra danh sách job | P1 | Đã có |
 | **RW03** | Lượt trả trung bình/job | Tổng lượt trả sửa ÷ số job trong nhóm đánh giá | ✓ | ✓ | ✓ | ✓ | Chỉ số phụ, đơn vị lượt/job | P1 | Chưa làm |
-| **RW04** | Khối lượng đang chờ sửa | Tổng lỗi / object-frame đang chờ sửa trên job ở trạng thái `rework` | ✓ | ✓ | ✓ | ✓ | Thẻ khối lượng + danh sách sửa | P1 | Tạm tính *(theo số ReviewError)* |
+| **RW04** | Khối lượng đang chờ sửa | Tổng `ReviewError` chưa void thuộc vòng rework hiện tại trên job đang ở `rework` | ✓ | ✓ | ✓ | ✓ | Thẻ khối lượng + danh sách sửa | P1 | Đã có |
 | **RW05** | Thời gian một vòng sửa | Thời điểm nộp lại − thời điểm trả sửa | ✓ | ✓ | ✓ | ✓ | Timeline từng vòng | P1 | Chưa làm |
 | **RW06** | Thời gian sửa trung bình | Tổng thời gian vòng sửa hoàn tất ÷ số vòng sửa hoàn tất | ✓ | ✓ | ✓ | ✓ | Thẻ phụ + xu hướng | P1 | Chưa làm |
 | **RW07** | Vượt giới hạn rework | `rework_round > max_rework_rounds` → `is_escalated = True`, báo PM (`block` hoặc `warn_only`) | ✓ | ✓ | ✓ | ✓ | Thẻ số job vượt vòng + danh sách ưu tiên | P1 | Đã có |
-| **AU01** | Cỡ mẫu QC2 | Hiện tại: `ceil(job pending_qc2 × sampling_rate ÷ 100)` *(Random/Stratified cấp job; cấp frame chưa làm)* | ✓ | ✓ | — | — | Số mẫu/tổng đơn vị trong cấu hình và audit | P1 | Đã có *(cấp job)* |
-| **AU02** | Tỷ lệ lấy mẫu thực tế | Đơn vị được chọn ÷ đơn vị đủ điều kiện × 100% | ✓ | ✓ | — | — | Nhãn % kèm số lượng, phân biệt với % cài đặt | P1 | Đã có *(cấp job)* |
+| **AU01** | Cỡ mẫu QC2 | Cấp job: Random `min(N, max(1, ceil(N*r/100)))`; Stratified `sum_g min(N_g, max(1, ceil(N_g*r/100)))` | ✓ | ✓ | — | — | Số mẫu/tổng đơn vị trong cấu hình và audit | P1 | Đã có *(cấp job)* |
+| **AU02** | Tỷ lệ lấy mẫu thực tế | `sample_count ÷ eligible_count × 100%` (`actual_sampling_rate` trên `Audit` & `preview`) | ✓ | ✓ | — | — | Nhãn % kèm số lượng, phân biệt với % cài đặt | P1 | Đã có *(cấp job)* |
 | **AU03** | Tiến độ audit | Mẫu đã có kết quả ÷ tổng mẫu của đợt audit × 100% | ✓ | ✓ | — | — | Thanh phân đoạn đạt/không đạt/chưa kiểm | P1 | Đã có |
 | **AU04** | Mẫu còn chờ | Tổng mẫu phải kiểm − mẫu đã có kết quả (`pending`) | ✓ | ✓ | — | — | Thẻ số + danh sách mẫu chưa kiểm | P1 | Đã có |
 | **AU05** | Tỷ lệ mẫu đạt | Mẫu `Pass` ÷ mẫu đã có kết quả × 100% (`qc2_pass_rate`) | ✓ | ✓ | — | — | Chỉ số phụ, luôn hiển thị cùng AU03 | P1 | Đã có |
 | **AU06** | Tỷ lệ audit đạt | Audit chốt `accept` ÷ tổng audit đã chốt × 100% | ✓ | ✓ | — | — | Thẻ % theo kỳ + xu hướng | P1 | Chưa làm |
 | **AU07** | Kết luận audit/batch | Chấm đủ 100% mẫu rồi PM chọn `accept` / `reject` / `partial_reject` + lý do | ✓ | ✓ | — | — | Nhãn kết luận + quyết định theo tầng | P1 | Đã có |
-| **TD01** | Khối lượng được giao | Đếm job; cộng `frame_count` / `object_count` / `target_object_count` | ✓ | ✓ | ✓ | ✓ | Thẻ số + bảng công việc | P1 | Đã có |
+| **TD01** | Khối lượng được giao | Đếm job; cộng `frame_count` / `object_count` / `target_object_count` (tính trên toàn bộ job đang giữ, không cắt top 10) | ✓ | ✓ | ✓ | ✓ | Thẻ số + bảng công việc | P1 | Đã có |
 | **TD02** | Số job theo trạng thái | Đếm job hiện tại ở từng `JobStatus` và theo stage (`JobQueueView`) | ✓ | ✓ | ✓ | ✓ | Thẻ số / thanh phân bố; bấm mở hàng đợi | P1 | Đã có |
 | **TD03** | Tiến độ Anno trong job | `object_count ÷ target_object_count × 100%` (hoặc `100%` khi đã nộp) | ✓ | — | ✓ | ✓ | Thanh tiến độ trên dòng job | P1 | Đã có |
 | **TD04** | Tiến độ QC trong job | Đơn vị đã kiểm ÷ đơn vị phải kiểm × 100% | ✓ | ✓ | ✓ | — | Thanh tiến độ; QC2 dùng phạm vi mẫu | P1 | Chưa làm *(cấp đơn vị trong job)* |
-| **TD05** | Tiến độ qua từng bước | Job đã Pass bước và chưa mở lại ÷ tổng job phải qua bước đó × 100% | ✓ | ✓ | ✓ | ✓ | Các thanh tiến độ Anno/QC1/QC2/PM | P1 | Tạm tính *(theo stage)* |
-| **TD06** | Tiến độ toàn luồng | Job `approved` + `delivered` ÷ tổng job × 100% | ✓ | — | — | — | Thẻ % + hoàn tất/tổng; bảng batch/dự án | P1 | Tạm tính |
-| **TD07** | Khối lượng còn lại | Khối lượng phải làm − khối lượng hoàn tất hợp lệ | ✓ | ✓ | ✓ | ✓ | Số phụ cạnh tiến độ; danh sách việc còn lại | P1 | Đã có |
-| **TD08** | Tỷ lệ sẵn sàng bàn giao | Batch đủ điều kiện giao (`candidates.ready`) hoặc job `approved+delivered` ÷ tổng × 100% | ✓ | ✓ | — | — | Thanh tiến độ + danh sách batch sẵn sàng giao | P1 | Đã có *(cấp batch)* |
-| **TD09** | Tỷ lệ đã bàn giao | Batch/Dataset đã `delivered` ÷ tổng cần giao × 100% | ✓ | — | — | — | Thẻ % + lịch sử bàn giao | P1 | Đã có *(cấp batch)* |
-| **TD10** | Tải công việc hiện tại | Số job đang giữ / sức chứa (`capacity` / `wip_limit`), job sắp hạn, escalated | ✓ | ✓ | ✓ | ✓ | Bảng tải thành viên: đang làm, sắp hạn, bị chặn | P1 | Đã có |
-| **TD11** | Số người đang có việc | Số người duy nhất đang giữ ≥ 1 job ở `OPEN_STATUSES` (`active_members`) | ✓ | — | — | — | Thẻ số; không gắn nhãn “đang online” | P1 | Đã có |
+| **TD05** | Tiến độ qua từng bước | Tỷ lệ tích lũy job đã qua từng mốc (`stage_progress`: Anno nộp, đạt QC1, đạt QC2) ÷ tổng job × 100% | ✓ | ✓ | ✓ | ✓ | Các thanh tiến độ Anno/QC1/QC2/PM | P1 | Đã có |
+| **TD06** | Tiến độ toàn luồng | Job `approved` + `delivered` ÷ tổng job × 100% | ✓ | — | — | — | Thẻ % + hoàn tất/tổng; bảng batch/dự án | P1 | Đã có |
+| **TD07** | Khối lượng còn lại | `total_jobs − done_jobs` (`remaining_jobs`) | ✓ | ✓ | ✓ | ✓ | Số phụ cạnh tiến độ; danh sách việc còn lại | P1 | Đã có |
+| **TD08** | Tỷ lệ sẵn sàng bàn giao | Batch đủ điều kiện giao (`candidates.ready`, dùng `Count(..., distinct=True)`) + đã giao ÷ tổng batch × 100% | ✓ | ✓ | — | — | Thanh tiến độ + danh sách batch sẵn sàng giao | P1 | Đã có *(cấp batch)* |
+| **TD09** | Tỷ lệ đã bàn giao | Batch đã `delivered` ÷ tổng batch × 100% (`delivered_rate`) | ✓ | — | — | — | Thẻ % + lịch sử bàn giao | P1 | Đã có *(cấp batch)* |
+| **TD10** | Tải công việc hiện tại | Số job đang giữ đúng vai trò (`holding` = active Anno, `qc1_holding` = `pending_qc1`/`qc1_reviewing`), `due_soon`, `overdue`, `escalated` | ✓ | ✓ | ✓ | ✓ | Bảng tải thành viên: đang làm, sắp hạn, bị chặn | P1 | Đã có |
+| **TD11** | Số người đang có việc | Hợp nhất số người duy nhất đang giữ việc mở trên cả 3 vai trò (`Anno` + `QC1` + `QC2`) (`active_members`) | ✓ | — | — | — | Thẻ số; không gắn nhãn “đang online” | P1 | Đã có |
 | **TD12** | Tiền xử lý/lên CVAT | Frame đã tiền xử lý hoặc đã lên CVAT ÷ tổng frame tương ứng × 100% | ✓ | — | — | — | Hai thanh riêng trên dataset | P1 | Chưa làm |
-| **TD13** | Việc cần quyết định/xử lý | Đếm yêu cầu mở: batch chờ `confirm-qc2`, audit chờ chốt, `AnnotatorRequest`, job escalated | ✓ | ✓ | ✓ | ✓ | Hộp việc cần xử lý; cá nhân thấy yêu cầu mình gửi | P1 | Đã có |
+| **TD13** | Việc cần quyết định/xử lý | Đếm yêu cầu mở (`pending_decisions`): batch chờ `confirm-qc2`, audit chờ chốt, `AnnotatorRequest`, job escalated | ✓ | ✓ | ✓ | ✓ | Hộp việc cần xử lý; cá nhân thấy yêu cầu mình gửi | P1 | Đã có |
 | **DH01** | Deadline hiệu lực | Mốc giờ `deadline` trên Batch / Job kèm lịch sử điều chỉnh trong `ActivityLog` | ✓ | ✓ | ✓ | ✓ | Cột deadline + lịch sử điều chỉnh | P1 | Đã có |
-| **DH02** | Thời gian còn lại | `deadline − hiện tại` (`hours_remaining`) | ✓ | ✓ | ✓ | ✓ | Nhãn “Còn … giờ/ngày” trên công việc | P1 | Đã có |
-| **DH03** | Thời gian quá hạn | Chưa xong: `max(0, hiện tại − hạn)`; đã xong: `max(0, hoàn tất − hạn)` | ✓ | ✓ | ✓ | ✓ | Nhãn đỏ + danh sách quá hạn (`overdue=1`) | P1 | Đã có |
-| **DH04** | Sắp đến hạn | `0 < thời gian còn lại ≤ 24 giờ` (`due_soon=1`) | ✓ | ✓ | ✓ | ✓ | Nhãn cảnh báo + bộ lọc sắp hạn | P1 | Đã có |
-| **DH05** | Kết quả đúng hạn | Thời điểm hoàn tất `≤ deadline` | ✓ | ✓ | ✓ | ✓ | Nhãn Đúng hạn/Trễ | P1 | Đã có *(Anno)* |
-| **DH06** | Tỷ lệ hoàn tất bước đúng hạn | Lượt nộp đúng hạn ÷ lượt nộp có deadline × 100% (`on_time_pct`) | ✓ | ✓ | ✓ | ✓ | Thẻ % + đúng hạn/tổng; xu hướng | P1 | Đã có *(Anno)* |
+| **DH02** | Thời gian còn lại | `deadline − hiện tại` trên job đang mở (`hours_remaining`; trả `null` khi job đã đóng) | ✓ | ✓ | ✓ | ✓ | Nhãn “Còn … giờ/ngày” trên công việc | P1 | Đã có |
+| **DH03** | Thời gian quá hạn | Chưa xong: `max(0, hiện tại − hạn)`; đã xong: `max(0, hoàn tất − hạn)` (`overdue_hours`) | ✓ | ✓ | ✓ | ✓ | Nhãn đỏ + danh sách quá hạn (`overdue=1`) | P1 | Đã có |
+| **DH04** | Sắp đến hạn | `0 ≤ thời gian còn lại ≤ 24 giờ` trên job đang mở (`due_soon=1`, không tính nhầm job đã quá hạn) | ✓ | ✓ | ✓ | ✓ | Nhãn cảnh báo + bộ lọc sắp hạn | P1 | Đã có |
+| **DH05** | Kết quả đúng hạn | Thời điểm nộp/hoàn tất `≤ deadline` (`is_on_time`) | ✓ | ✓ | ✓ | ✓ | Nhãn Đúng hạn/Trễ | P1 | Đã có |
+| **DH06** | Tỷ lệ hoàn tất bước đúng hạn | Lượt nộp đúng hạn ÷ tổng lượt nộp có deadline × 100% (`on_time_pct`, tính trên lịch sử nộp) | ✓ | ✓ | ✓ | ✓ | Thẻ % + đúng hạn/tổng; xu hướng | P1 | Đã có *(Anno)* |
 | **DH07** | Tỷ lệ bàn giao đúng hạn | Batch/Dataset giao đúng hạn ÷ đơn vị đến hạn trong kỳ × 100% | ✓ | — | — | — | Thẻ %; danh sách đến hạn chưa giao | P1 | Chưa làm |
 | **DB01** | Tốc độ hoàn tất gần đây | Job hoàn tất hợp lệ trong 14 ngày ÷ số ngày làm việc | ✓ | — | — | — | Chỉ số cơ sở trong chi tiết dự báo | P2 | Chưa làm |
 | **DB02** | Thời gian dự kiến còn lại | Khối lượng còn lại ÷ tốc độ nhóm việc tương đồng | ✓ | ✓ | ✓ | ✓ | Số ngày/giờ dự kiến, ghi rõ ước tính | P2 | Chờ chốt |
@@ -345,3 +342,98 @@
 | Anno | Kết quả theo ngày | Sản lượng lần đầu/rework 7 ngày gần nhất so với đường chỉ tiêu; tỷ lệ nộp đúng hạn | SL01, SL03, KPI01, DH06 | **Cột chồng lần đầu/rework + đường chỉ tiêu**; thẻ đúng hạn nhỏ | P1 |
 | Anno | Yêu cầu đang chờ | Phản hồi lỗi (`error_dispute`), dữ liệu bị chặn (`data_issue`), PM xử lý và kết luận | TD13 | **Danh sách trạng thái yêu cầu** (`/annotator/requests`) | P1 |
 | Anno | Phân tích cá nhân | Năng suất (`object/giờ`), dự báo sản lượng tuần, thứ hạng cá nhân (ẩn điểm người khác) | NS01, NS03, DB05, KPI10 | **Trang riêng** (`/annotator/analytics`), đường dự báo nét đứt và hạng cá nhân | P2 |
+
+---
+
+## ĐỀ XUẤT THIẾT KẾ — DỮ LIỆU PRE-LABEL 3D, CHÍNH SÁCH GUIDELINE & NGƯỠNG CHẤT LƯỢNG (CHỜ CHỐT)
+
+> **Trạng thái:** **Đề xuất / Giả định tham khảo từ mentor (chưa triển khai code).**  
+> Mục tiêu của mục này là làm tài liệu tham khảo để PM/Mentor chốt nghiệp vụ trước khi viết migration và backend; toàn bộ ngưỡng & chính sách được thiết kế **cấu hình được** theo `Project` / `Guideline`, không hardcode cứng.
+
+### 1. Bối cảnh thực tế & vấn đề cần giải quyết
+- **Dữ liệu pre-label sẵn trên `cvat-base`:** Job 3D LiDAR nhập từ CVAT thường đã có sẵn cuboid/track do AI pre-label tạo ra. Công việc thực tế của Annotator gồm 4 phần: *(a)* kiểm tra & giữ nguyên box đúng sẵn, *(b)* chỉnh sửa box lệch, *(c)* bật `outside=True` cho box AI sai (không xóa track để tránh hỏng nội suy 3D), và *(d)* vẽ thêm box AI bỏ sót.
+- **Lỗ hổng của cơ chế đếm hiện tại:**
+  1. `import-cvat` chưa lưu mốc pre-label ban đầu (`S0`) → lần chạy `sync-cvat` (`count_objects=true`) đầu tiên sẽ tính toàn bộ cuboid pre-label có sẵn thành sản lượng của Annotator dù chưa thao tác.
+  2. `POST /submit/` hiện vẫn cho phép Annotator gửi `object_count` nhập tay kể cả trên job gắn `cvat_job_id` → rủi ro sai lệch sản lượng `SL01`/`SL06` và làm phồng mẫu số khiến Accuracy (`CL02`/`CL05`/`CL11`) đẹp giả tạo.
+- **Tỷ lệ thời gian QA vs Annotation:** Thực tế vận hành thường có xu hướng **`QA days > Annotation days`** khi trình độ Annotator chưa đồng đều (làm ẩu gây nhiều vòng rework và bóp nghẽn QC1).
+- **Lý do KHÔNG dùng "đếm thao tác từng cuboid / dwell" làm công thức KPI:**
+  - Trên dữ liệu pre-label, box AI đúng sẵn có 0 thao tác sửa → tính KPI theo thao tác sẽ kích hoạt nạn nhích chuột `micro-jitter` làm hỏng dữ liệu chuẩn.
+  - Trên 3D Track, đếm theo keyframe sẽ khiến Annotator bấm `K` phá nội suy; đếm theo frame đổi tọa độ nội suy thì 1 kéo ở frame `0` ăn cả 100 frame.
+  - Dwell (thời gian đứng trên frame) là tín hiệu thụ động dễ lướt qua/làm giả, không tương đương "đã làm xong".
+  - Trên `cvat-base` gốc (v2.84.0), chế độ `Standard 3D` tắt UI Tag, bảng `LabeledTrack`/`TrackedShape` không có `updated_date`/`updated_by`, và `source` chỉ nằm ở cấp track (sửa 1 keyframe lật cả track).
+
+### 2. Cơ chế chốt sản lượng Pre-label & `outside` (không tính điểm, chỉ đếm cuboid thật)
+- **Chụp mốc Baseline `S0` lúc `import-cvat`:** Đọc `/api/jobs/{id}/annotations` + `/data/meta` 1 lần khi nhập job, lưu gọn trên `Job`:
+  - `baseline_frame_counts`: `{frame_number: visible_count_S0}` (số cuboid `outside=False` ban đầu theo từng frame).
+  - `baseline_track_ids`: tập `track_id` pre-label ban đầu.
+  - **Không** ghi `DailyOutputRecord` tại thời điểm import.
+- **Khóa nhập tay `object_count` cho job gắn `cvat_job_id`:**
+  - `POST /submit/` bỏ qua/chặn `object_count` nhập tay từ Annotator và tự động gọi CVAT đếm cuboid (timeout ngắn ~10–15s).
+  - Nếu CVAT trả lỗi mạng/timeout: **vẫn cho hoàn tất `Submit`** để giữ đúng `submitted_at` (không oan trễ deadline `DH05`/`DH06`), đồng thời bật cờ `count_sync_pending = True` để đồng bộ bù tự động (và cảnh báo trước khi chốt mẫu `AuditSample.checked_object_count`).
+  - Ngoại lệ duy nhất: **PM** được phép chỉnh `object_count` khi `source_missing = True` hoặc job không gắn `cvat_job_id` (bắt buộc ghi lý do vào `ActivityLog`).
+- **2 phương án ghi nhận theo ngày (chọn 1 khi chốt):**
+  - **Mô hình 1 (Đơn giản nhất — khi cắt job ≤ 1 ngày):** Chỉ ghi `DailyOutputRecord` từ CVAT tại thời điểm Annotator bấm `Submit`. Không phát sinh bước nhập tiến độ nào.
+  - **Mô hình 2 (Khuyến nghị nếu có job dài nhiều ngày / OT chưa kịp Submit — bao trùm Mô hình 1):**
+    - Job xong trong ngày: Annotator chỉ bấm **`Submit`** → hệ thống tự chốt toàn bộ các frame chưa tính.
+    - Job dài nhiều ngày / OT: cuối ca Annotator cập nhật mốc frame đã xong (vd khoảng `0 → 45`) → backend VanoHub đọc CVAT, chỉ tính các frame mới chưa có trong `counted_frames` theo khóa `(job_id, rework_round)` (chống cộng đúp).
+    - Vì tổng job khóa cứng theo CVAT, khai sớm mốc frame giữa chừng chỉ là ứng trước sản lượng ngày hôm sau của chính mình, không tạo cuboid ảo; khi đổi người làm giữa chừng (`reassignment`), PM gỡ các frame chưa làm để điều chỉnh phần `DailyOutputRecord` sang đúng người làm tiếp.
+    - Bổ sung tùy chọn `Project.workday_cutoff_hour` (vd `04:00`) để ca OT sau `00:00` vẫn quy về đúng ngày làm việc.
+- **Tách rạch ròi 2 công thức (không trộn lẫn):**
+  1. **Sản lượng KPI (`SL01` / `SL06`) tại mỗi frame `f` được chốt:**
+     $$\text{output}(f) = \max\big(\text{visible}_{S_1}(f),\; \text{visible}_{S_0}(f)\big)$$
+     - Pre-label giữ/sửa: tính đủ.
+     - Pre-label rác thuộc track span qua frame bị bật `outside=True`: `visible_{S_0}(f)` giữ mức nền nên **vẫn tính sản lượng**.
+     - Cuboid vẽ mới (`outside=False`): `visible_{S_1}(f) > visible_{S_0}(f)` nên được cộng thêm.
+     - Cuboid tự vẽ rồi tắt `outside` trước khi chốt: không có trong `S0`, không hiện trong `S1` → tính `0`.
+     - Miễn nhiễm Split/Merge đổi `track_id` (không đếm trùng x2).
+  2. **Mẫu số chất lượng (`CL02`, `CL05`, `CL11`) & `job.object_count` bàn giao:**
+     - **Chỉ dùng `visible_{S_1}` (`outside=False`)**, tuyệt đối không cộng `outside=True` để tránh làm loãng tỷ lệ lỗi.
+- **Hiển thị song song khi `SL06 = SL01 + SL03`:** Mọi bảng/thẻ KPI cá nhân và nhóm luôn tách rõ `SL01` (làm mới), `SL03` (rework), tỷ trọng rework (`SL03 / SL06`) và nhãn phân mức chất lượng đi kèm để không che giấu tình trạng làm ẩu gây nhiều vòng rework.
+
+### 3. Chính sách Annotation theo `Guideline` (`annotation_policies`)
+Cấu hình tổ hợp cờ ngay trên `Guideline` (snapshot vào `Batch`/`Job` khi áp dụng để phiên bản Guideline mới không làm thay đổi quy tắc của batch cũ). Hệ thống kiểm tra tự động **1 lần lúc `Submit`** bằng cách so `S0` với `S1` và **chỉ gắn cờ cảnh báo cho QC1** (không chặn cứng Submit để tránh oan deadline hoặc chặn nhầm ca Split/Merge hợp lệ):
+
+| Cờ policy | Ý nghĩa | Kiểm tra tự động `S0 → S1` | Cảnh báo hiển thị cho QC1 |
+| --- | --- | --- | --- |
+| `do_not_delete` | Cấm xóa track/shape pre-label (tránh hỏng interpolation & mất track ID) | Mọi `track_id`/`shape_id` ở `S0` phải còn tồn tại ở `S1` | `forbidden_track_deleted` (kèm danh sách `track_id`) |
+| `outside_only` | Ẩn box pre-label sai chỉ bằng `outside=True`, cấm xóa track | Gồm `do_not_delete` + kiểm tra `outside=True` có lan tràn sang vùng frame chưa hoàn thành | `forbidden_track_deleted`, `outside_spillover` |
+| `add_only` | Chỉ vẽ thêm box mới, không xóa và không tắt `outside` pre-label | Không xóa `S0` + không chuyển `visible(S0) → outside(S1)` *(cần chốt có cấm sửa tọa độ pre-label hay không)* | `forbidden_track_deleted`, `forbidden_outside` *(+ `forbidden_prelabel_edit` nếu áp bản chặt)* |
+
+- **Cảnh báo bổ trợ cho QC1 (chỉ thông tin, không cộng/trừ KPI):** `suspect_untouched` khi ≥ N frame liên tiếp có 0% thay đổi so với `S0`, giúp QC1 ưu tiên soi nhanh các đoạn có nguy cơ bỏ qua chưa kiểm.
+
+### 4. Ngưỡng phân mức Chất lượng & Chỉ số nghẽn QA *(Giả định từ Mentor — chờ chốt)*
+- **Thang phân mức 3 cấp trên `Quality CL` (`CL11`, cấu hình được theo `Project`):**
+  - Đề xuất 2 mốc cấu hình trên `Project`: `quality_cl_target` (giả định `95%`) và `quality_cl_warning_threshold` (giả định `90%`).
+
+| Mức trạng thái | Giả định ngưỡng `Quality CL` (`CL11`) | Tương đương `Defect Error Rate` (`CL02`) | Ý nghĩa vận hành |
+| --- | --- | --- | --- |
+| **Đạt (`good` — Xanh)** | `≥ 95%` | `≤ 5%` | Chất lượng tốt, QA đi nhanh |
+| **Cần chú ý (`warning` — Vàng)** | `90% ≤ CL11 < 95%` | `5% < CL02 ≤ 10%` | Đáng báo động — cần theo dõi, nhắc guideline / coaching |
+| **Báo động (`critical` — Đỏ)** | `< 90%` | `> 10%` | Cảnh báo nặng — nguyên nhân trực tiếp gây `QA days > Annotation days`, cần PM can thiệp |
+
+- **Chỉ số nghẽn QA — `NS09` (`qa_to_annotation_ratio`):**
+  - Tính từ `ActivityLog` hiện có: tổng thời lượng (và số ngày công) của giai đoạn `QC1 + QC2` chia cho tổng thời lượng (và số ngày công) của giai đoạn `Annotation`.
+  - `ratio < 1.0`: vận hành khỏe; `ratio ≥ 1.0` (`QA days > Annotation days`): cảnh báo nghẽn QA ở cấp Batch/Project, liên kết thẳng tới danh sách Annotator vùng Vàng/Đỏ.
+
+### 5. Danh sách điểm mở cần PM / Mentor xác nhận trước khi triển khai
+1. **Ngưỡng chất lượng giả định (`95%` / `90%`):** Giữ làm giá trị mặc định khởi tạo dự án hay đổi mốc? Áp chung cho cá nhân (`Annotator`), `Batch`, hay tách ngưỡng riêng?
+2. **Mô hình ghi nhận ngày:** Chọn **Mô hình 1** (cắt job ≤ 1 ngày, chỉ chốt lúc `Submit`) hay **Mô hình 2** (chốt lúc `Submit` + mốc frame cuối ca cho job nhiều ngày/OT)?
+3. **Định nghĩa chặt cho `add_only`:** Cấm sửa cả tọa độ/nhãn pre-label (chỉ vẽ mới) hay vẫn cho tinh chỉnh tọa độ, chỉ cấm xóa & cấm `outside`?
+4. **Cắt ngày cho ca OT xuyên `00:00`:** Có áp dụng `Project.workday_cutoff_hour` (vd `04:00`) không?
+5. **Trường hợp track keyframe thưa khi bật `outside=True`:** Chấp nhận tính `per_frame` theo `max(visible_S1(f), visible_S0(f))` hay cần tùy chọn `keyframe_only`?
+
+---
+
+## BACKLOG — KIẾN TRÚC PLUGIN STUB (TRÊN NỀN CVAT-BASE GỐC)
+
+> **Trạng thái:** Backlog sau MVP (chưa triển khai mã nguồn stub ở giai đoạn hiện tại).  
+> **Nguyên tắc:** Không fork hoặc patch `cvat-base`; VanoHub giữ vai trò nền tảng lõi (tiến độ, chất lượng, giao việc) và mở rộng theo mô hình **cắm-rút (plug-in)** khi cần nối thêm công cụ ngoài (`cvat-auto-qc`, hệ thống telemetry phiên làm việc, CVAT webhook, hoặc overlay UI).
+
+| Hạng mục Backlog | Giao diện / Thực thể dự kiến | Mục đích & dữ liệu trao đổi |
+| --- | --- | --- |
+| **B1. Plugin Hooks (Python `Protocol`)** | `TelemetryCollector`, `ExternalQcFindingProvider`, `WorkSessionProvider` | Cho phép đăng ký nguồn dữ liệu ngoài qua cấu hình mà không sửa logic lõi của `jobs`/`quality`/`analytics`. |
+| **B2. Bảng `JobTelemetryEvent`** | `(project, job, user, source, event_type, occurred_at, delta_objects, duration_seconds, payload, idempotency_key)` | Nhận sự kiện làm việc / phiên hoạt động từ plugin ngoài để bổ sung `NS01`–`NS04` chính xác theo phiên thực (có chống ghi trùng theo `idempotency_key`). |
+| **B3. API nhận cảnh báo Auto-QC** | `POST /api/projects/{id}/jobs/{job_id}/plugin-findings/` | Cho phép pipeline kiểm định tự động (như `cvat-auto-qc`) đẩy kết quả gợi ý lỗi (`frame_number`, `cvat_object_id`, `severity`, `confidence`, `source_plugin`, `status=suggested`) vào `ReviewError` mà không tự ý đổi trạng thái `Job`; QC1/QC2 xác nhận hoặc bỏ qua. |
+| **B4. API nhận Telemetry** | `POST /api/projects/{id}/telemetry/` | Nạp batch sự kiện làm việc / thời gian thao tác từ plugin ngoài (xác thực theo API key/service token riêng). |
+| **B5. CVAT Webhook Ingest** | `POST /api/integrations/cvat/webhook/` | Nhận webhook gốc từ `cvat-base` (`update:job`, `update:task`, xác thực chữ ký HMAC `X-Signature-256`) để kích hoạt đồng bộ tự động thay vì chỉ bấm thủ công. |
+| **B6. Mở rộng KPI & Quy trình hậu MVP** | `KpiTargetHistory(effective_from)`, `Project/Dataset.deadline`, `Delivery.reopen`, `CL08`/`CL10`/`CL12`/`CL13`, `NS02`/`NS04`/`NS05`/`NS07`/`NS08`, `RW03`/`RW05`/`RW06`, `AU06`, `DB01`–`DB04`, `DA02`–`DA03` | Các chỉ số P2 và quy trình hậu bàn giao triển khai tăng dần sau khi lõi MVP vận hành ổn định. |

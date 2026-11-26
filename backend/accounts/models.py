@@ -1,3 +1,5 @@
+from typing import TYPE_CHECKING, Any
+
 from django.conf import settings
 from django.contrib.auth.models import AbstractUser
 from django.db import models
@@ -33,6 +35,14 @@ def expand_roles(roles):
 
 
 class User(AbstractUser):
+    if TYPE_CHECKING:
+        id: int
+        role_assignments: Any
+        annotated_jobs: Any
+        qc1_jobs: Any
+        team_memberships: Any
+        notifications: Any
+
     avatar_url = models.TextField(blank=True, default="")
     cvat_username = models.CharField(max_length=150, blank=True, default="")
     timezone_name = models.CharField(max_length=64, default="Asia/Ho_Chi_Minh")
@@ -86,6 +96,13 @@ class RoleAssignment(models.Model):
                 name="unique_role_per_scope",
             ),
         ]
+
+    if TYPE_CHECKING:
+        id: int
+        user_id: int
+        project_id: int
+
+        def get_role_display(self) -> str: ...
 
     def __str__(self):
         return f"{self.user} · {self.get_role_display()} · {self.project}"

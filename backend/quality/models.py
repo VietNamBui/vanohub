@@ -1,4 +1,7 @@
+from typing import TYPE_CHECKING, Any
+
 from django.conf import settings
+from django.core.exceptions import ValidationError
 from django.db import models
 
 from projects.models import SamplingMethod, StratifyBy
@@ -15,8 +18,19 @@ class ReviewStage(models.TextChoices):
     QC2 = "qc2", "QC2"
 
 
+class ErrorVerdict(models.TextChoices):
+    """Phân loại kết luận cấp cuboid tách biệt với Severity (CL02/CL11)."""
+
+    FAIL = "fail", "Lỗi (Fail)"
+    EDGE = "edge", "Cận biên (Edge)"
+
+
 class ErrorCategory(models.Model):
     """Danh mục lỗi (PM-15). QC1 và QC2 cùng dùng khi ghi lỗi."""
+
+    if TYPE_CHECKING:
+        id: int
+        project_id: int
 
     class AppliesTo(models.TextChoices):
         QC1 = "qc1", "QC1"
@@ -44,6 +58,13 @@ class Audit(models.Model):
     Lưu lại cấu hình sampling đã dùng + seed ngẫu nhiên → có thể giải thích vì sao
     những job này được chọn (yêu cầu "lưu lịch sử Sampling").
     """
+
+    if TYPE_CHECKING:
+        id: int
+        project_id: int
+        batch_id: int
+        decided_by_id: int | None
+        samples: Any
 
     class Status(models.TextChoices):
         IN_PROGRESS = "in_progress", "Đang audit"
@@ -80,6 +101,25 @@ class Audit(models.Model):
 
     class Meta:
         ordering = ["-created_at"]
+        constraints = [
+            models.CheckConstraint(
+                condition=models.Q(sampling_rate__gte=1, sampling_rate__lte=100),
+                name="audit_sampling_rate_1_to_100",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(status="in_progress") | ~models.Q(decision=""),
+                name="audit_completed_requires_decision",
+            ),
+        ]
+
+    def clean(self):
+        super().clean()
+        if not (1 <= self.sampling_rate <= 100):
+            raise ValidationError({"sampling_rate": "Tỉ lệ lấy mẫu phải nằm trong khoảng 1..100."})
+        if self.status == self.Status.COMPLETED and not self.decision:
+            raise ValidationError({"decision": "Audit đã chốt phải có quyết định (decision)."})
+        if self.batch_id and self.project_id and self.batch.dataset.project_id != self.project_id:
+            raise ValidationError({"batch": "Batch không thuộc cùng dự án với Audit."})
 
     def __str__(self):
         return f"Audit #{self.pk} · {self.batch}"
@@ -87,6 +127,13 @@ class Audit(models.Model):
 
 class AuditSample(models.Model):
     """Một job được lấy mẫu trong một Audit, và kết quả QC2 của job đó."""
+
+    if TYPE_CHECKING:
+        id: int
+        audit_id: int
+        job_id: int
+        auditor_id: int | None
+        reviewed_by_id: int | None
 
     class Result(models.TextChoices):
         PENDING = "pending", "Chờ audit"
@@ -100,6 +147,9 @@ class AuditSample(models.Model):
         settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name="audit_samples"
     )
     result = models.CharField(max_length=10, choices=Result.choices, default=Result.PENDING)
+    checked_object_count = models.PositiveIntegerField(
+        null=True, blank=True, help_text="Snapshot object_count của job tại thời điểm chấm audit QC2"
+    )
     reviewed_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, related_name="+")
     reviewed_at = models.DateTimeField(null=True, blank=True)
     comment = models.TextField(blank=True)
@@ -112,6 +162,13 @@ class AuditSample(models.Model):
 class ReviewError(models.Model):
     """Một lỗi được ghi khi review (QC1 hoặc QC2). Lưu từng lần → giữ được lịch sử qua các vòng rework."""
 
+    if TYPE_CHECKING:
+        id: int
+        job_id: int
+        audit_sample_id: int | None
+        category_id: int
+        reported_by_id: int | None
+
     job = models.ForeignKey("jobs.Job", on_delete=models.CASCADE, related_name="review_errors")
     stage = models.CharField(max_length=10, choices=ReviewStage.choices)
     rework_round = models.PositiveSmallIntegerField(help_text="Vòng rework tại thời điểm ghi lỗi")
@@ -122,10 +179,29 @@ class ReviewError(models.Model):
     # nhưng vẫn cho xoá cả dự án (khi đó lỗi cũng bị xoá theo).
     category = models.ForeignKey(ErrorCategory, on_delete=models.RESTRICT, related_name="errors")
     severity = models.CharField(max_length=20, choices=Severity.choices)
+    verdict = models.CharField(max_length=10, choices=ErrorVerdict.choices, default=ErrorVerdict.FAIL)
+    frame_number = models.PositiveIntegerField(
+        null=True, blank=True, help_text="Số thứ tự frame (0-based) trên CVAT"
+    )
+    cvat_object_id = models.PositiveIntegerField(
+        null=True, blank=True, help_text="ID đối tượng trên CVAT (trống nếu chưa gắn ID hoặc thiếu object)"
+    )
+    is_missing_object = models.BooleanField(
+        default=False, help_text="True nếu là lỗi thiếu đối tượng (False Negative), cộng vào mẫu số N_missing"
+    )
     location = models.CharField(max_length=120, blank=True, help_text="Frame / object ID")
     description = models.TextField(blank=True)
+    is_voided = models.BooleanField(
+        default=False, help_text="True khi PM chấp nhận khiếu nại lỗi (error_dispute resolved)"
+    )
     reported_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, related_name="+")
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
         ordering = ["-created_at"]
+        constraints = [
+            models.CheckConstraint(
+                condition=models.Q(verdict__in=["fail", "edge"]),
+                name="review_error_valid_verdict",
+            ),
+        ]

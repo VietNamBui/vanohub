@@ -60,10 +60,75 @@ class AuditFlowTests(TestCase):
         )
         self.assertEqual(audit.eligible_count, 6)
         self.assertEqual(audit.samples.count(), 3)  # 50% của 6
+        self.assertEqual(preview["actual_sampling_rate"], 50.0)
+
+    def test_actual_sampling_rate_au02_differs_from_configured_rate_when_rounded_up(self):
+        # 10% của 6 job = ceil(0.6) = 1 job => actual_sampling_rate = 16.7%
+        preview = self.pm.post(
+            self.f.url("audits/preview/"), {"batch": self.f.batch.id, "sampling_rate": 10}, format="json"
+        ).data
+        self.assertEqual(preview["sample_count"], 1)
+        self.assertEqual(preview["actual_sampling_rate"], 16.7)
+        created = self.pm.post(
+            self.f.url("audits/"),
+            {"batch": self.f.batch.id, "sampling_rate": 10, "seed": preview["seed"], "auditors": [self.f.qc2.id]},
+            format="json",
+        )
+        self.assertEqual(created.status_code, 201, created.data)
+        self.assertEqual(created.data["actual_sampling_rate"], 16.7)
+
+    def test_structured_review_error_fields_and_historical_four_eyes(self):
+        dual = make_user("dual_hist", Role.ANNOTATOR, Role.QC1, Role.QC2, project=self.f.project)
+        job = self.f.job(status=JobStatus.PENDING_ANNOTATION, annotator=dual)
+        Job.objects.filter(pk=job.pk).update(qc1_reviewer=None)
+        dual_client = self.f.client(dual)
+        self.assertEqual(dual_client.post(self.f.url(f"annotator/jobs/{job.id}/start/"), {}, format="json").status_code, 200)
+        self.assertEqual(dual_client.post(self.f.url(f"annotator/jobs/{job.id}/submit/"), {}, format="json").status_code, 200)
+
+        # PM đổi annotator sang ann2 để thử lách luật bốn mắt
+        reassign = self.pm.post(self.f.url(f"jobs/{job.id}/assign/"), {"annotator": self.f.ann2.id}, format="json")
+        self.assertEqual(reassign.status_code, 200)
+        # Không thể gán dual làm QC1 hoặc cho dual tự chấm QC1 dù annotator hiện tại đã đổi
+        self.assertEqual(
+            self.pm.post(self.f.url(f"jobs/{job.id}/assign/"), {"qc1_reviewer": dual.id}, format="json").status_code,
+            400,
+        )
+        self.assertEqual(dual_client.post(self.f.url(f"qc1/jobs/{job.id}/start/"), {}, format="json").status_code, 403)
+
+        # QC1 khác từ chối kèm frame_number, cvat_object_id và verdict="edge"
+        qc1_client = self.f.client(self.f.qc1)
+        rej = qc1_client.post(
+            self.f.url(f"qc1/jobs/{job.id}/reject/"),
+            {
+                "errors": [
+                    {
+                        "category": self.f.category.id,
+                        "frame_number": 12,
+                        "cvat_object_id": 4,
+                        "verdict": "edge",
+                        "description": "rìa LiDAR",
+                    }
+                ]
+            },
+            format="json",
+        )
+        self.assertEqual(rej.status_code, 200, rej.data)
+        err = ReviewError.objects.get(job=job)
+        self.assertEqual((err.frame_number, err.cvat_object_id, err.verdict), (12, 4, "edge"))
+
+        # Khi job tới QC2, dual cũng bị chặn chấm QC2 theo lịch sử annotate
+        Job.objects.filter(pk=job.pk).update(status=JobStatus.PENDING_QC2)
+        audit = self._create_audit(sampling_rate=100, auditors=[self.f.qc2.id])
+        sample = audit.samples.get(job=job)
+        self.assertEqual(
+            self.pm.post(self.f.url(f"audit-samples/{sample.id}/assign/"), {"auditor": dual.id}, format="json").status_code,
+            400,
+        )
 
     def test_qc2_sees_only_own_samples_and_can_pass(self):
         audit = self._create_audit()
         sample = audit.samples.first()
+        assert sample is not None
         listed = self.qc2.get(self.f.url("audit-samples/")).data
         self.assertEqual(len(listed), 3)
         response = self.qc2.post(self.f.url(f"audit-samples/{sample.id}/pass/"), {}, format="json")
@@ -74,6 +139,7 @@ class AuditFlowTests(TestCase):
     def test_reject_records_errors_and_sends_job_to_rework(self):
         audit = self._create_audit()
         sample = audit.samples.first()
+        assert sample is not None
         body = {"errors": [{"category": self.f.category.id, "location": "frame 12 / obj 3"}], "comment": "x"}
         response = self.qc2.post(self.f.url(f"audit-samples/{sample.id}/reject/"), body, format="json")
         self.assertEqual(response.status_code, 200, response.data)
@@ -84,12 +150,14 @@ class AuditFlowTests(TestCase):
 
     def test_reject_without_errors_is_refused(self):
         sample = self._create_audit().samples.first()
+        assert sample is not None
         response = self.qc2.post(self.f.url(f"audit-samples/{sample.id}/reject/"), {"errors": []}, format="json")
         self.assertEqual(response.status_code, 400)
 
     def test_exceeding_max_rework_rounds_escalates(self):
         Job.objects.filter(pk__in=[j.pk for j in self.jobs]).update(rework_round=2)
         sample = self._create_audit().samples.first()
+        assert sample is not None
         body = {"errors": [{"category": self.f.category.id}]}
         self.qc2.post(self.f.url(f"audit-samples/{sample.id}/reject/"), body, format="json")
         self.assertTrue(Job.objects.get(pk=sample.job_id).is_escalated)
@@ -99,6 +167,7 @@ class AuditFlowTests(TestCase):
         make_user("dual", Role.ANNOTATOR, project=self.f.project)
         audit = self._create_audit()
         sample = audit.samples.first()
+        assert sample is not None
         Job.objects.filter(pk=sample.job_id).update(annotator=self.f.pm)
         response = self.pm.post(self.f.url(f"audit-samples/{sample.id}/pass/"), {}, format="json")
         self.assertEqual(response.status_code, 403)
@@ -106,6 +175,7 @@ class AuditFlowTests(TestCase):
     def test_qc2_cannot_review_sample_assigned_to_someone_else(self):
         other = make_user("qc2_other", Role.QC2, project=self.f.project)
         sample = self._create_audit().samples.first()
+        assert sample is not None
         AuditSample.objects.filter(pk=sample.pk).update(auditor=other)
         response = self.qc2.post(self.f.url(f"audit-samples/{sample.id}/pass/"), {}, format="json")
         self.assertIn(response.status_code, (403, 404))
@@ -188,6 +258,7 @@ class Qc2ScreensTests(TestCase):
     def test_pm_summary_has_kpi_comparison_and_trend(self):
         response = self.pm.post(self.f.url("audits/"), {"batch": self.f.batch.id, "auditors": [self.f.qc2.id]}, format="json")
         sample = Audit.objects.get(pk=response.data["id"]).samples.first()
+        assert sample is not None
         self.qc2.post(self.f.url(f"audit-samples/{sample.id}/pass/"), {}, format="json")
         data = self.pm.get(self.f.url("qc2-summary/?period=week")).data
         self.assertEqual(data["kpi"]["current"]["passed"], 1)
@@ -394,9 +465,8 @@ class Qc1WorkflowTests(TestCase):
         from projects.models import ActivityLog
 
         body = {"errors": [{"category": self.f.category.id, "description": "loi"}]}
-        with patch.object(ActivityLog, "record", side_effect=RuntimeError("db failure")):
-            with self.assertRaises(RuntimeError):
-                self.qc1.post(self.f.url(f"qc1/jobs/{self.job.id}/reject/"), body, format="json")
+        with patch.object(ActivityLog, "record", side_effect=RuntimeError("db failure")), self.assertRaises(RuntimeError):
+            self.qc1.post(self.f.url(f"qc1/jobs/{self.job.id}/reject/"), body, format="json")
 
         self.job.refresh_from_db()
         self.assertEqual(self.job.status, JobStatus.PENDING_QC1)
