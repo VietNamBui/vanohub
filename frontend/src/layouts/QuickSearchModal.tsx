@@ -1,8 +1,10 @@
 import { AlertTriangle, CheckCircle, SearchLg } from '@untitledui/icons'
 import { useEffect, useMemo, useState } from 'react'
 import { useNavigate } from 'react-router'
-import { quickSearchAnnotator } from '../features/jobs/api'
+import { listJobs, quickSearchAnnotator } from '../features/jobs/api'
 import type { AnnotatorQuickSearchResult } from '../features/jobs/types'
+import { getProject } from '../features/projects/api'
+import type { Capability } from '../shared/types/capabilities'
 import { cx } from '@/utils/cx'
 
 interface QuickPage {
@@ -10,6 +12,17 @@ interface QuickPage {
   label: string
   path: string
   kind: 'dashboard' | 'rework' | 'guideline' | 'page'
+  cap?: Capability | Capability[]
+}
+
+interface QuickJobItem {
+  id: number
+  name: string
+  status: string
+  status_label: string
+  rework_round: number
+  progress_percent: number
+  targetPath: string
 }
 
 interface Props {
@@ -18,7 +31,7 @@ interface Props {
   onClose: () => void
 }
 
-/** Tìm kiếm nhanh (⌘K): tra cứu job cá nhân (PQ01) và nhảy nhanh tới các màn hình Annotator. */
+/** Tìm kiếm nhanh (⌘K): tra cứu job theo phạm vi quyền và nhảy nhanh tới các màn hình phù hợp. */
 export default function QuickSearchModal({ open, projectId, onClose }: Props) {
   if (!open) return null
   return <QuickSearchPalette projectId={projectId} onClose={onClose} />
@@ -27,39 +40,102 @@ export default function QuickSearchModal({ open, projectId, onClose }: Props) {
 function QuickSearchPalette({ projectId, onClose }: { projectId: number | null; onClose: () => void }) {
   const navigate = useNavigate()
   const [query, setQuery] = useState('')
-  const [jobs, setJobs] = useState<AnnotatorQuickSearchResult['jobs']>([])
+  const [capsState, setCapsState] = useState<{ projectId: number; caps: Capability[] } | null>(null)
+  const [jobs, setJobs] = useState<QuickJobItem[]>([])
   const [loading, setLoading] = useState(false)
   const [activeIndex, setActiveIndex] = useState(0)
 
+  useEffect(() => {
+    if (!projectId) return
+    let cancelled = false
+    getProject(projectId)
+      .then((proj) => {
+        if (!cancelled) setCapsState({ projectId, caps: proj.my_capabilities })
+      })
+      .catch(() => {
+        if (!cancelled) setCapsState({ projectId, caps: [] })
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [projectId])
+
+  const caps = projectId && capsState?.projectId === projectId ? capsState.caps : null
+  const canAnnotate = caps?.includes('annotate_jobs') ?? false
+  const canViewAllJobs = caps?.includes('view_jobs') ?? false
+  const canSearchJobs = projectId != null && (canAnnotate || canViewAllJobs)
+
   const pages = useMemo<QuickPage[]>(() => {
     const base = projectId ? `/projects/${projectId}` : null
+    const can = (cap?: Capability | Capability[]) => {
+      if (!cap) return true
+      if (!caps) return false
+      return Array.isArray(cap) ? cap.some((c) => caps.includes(c)) : caps.includes(cap)
+    }
+
     const list: QuickPage[] = base
-      ? [
-          { id: 'p-dash', label: 'Tổng quan cá nhân', path: `${base}/annotator/dashboard`, kind: 'dashboard' },
-          { id: 'p-jobs', label: 'Job của tôi', path: `${base}/annotator/jobs`, kind: 'page' },
-          { id: 'p-rework', label: 'Cần sửa', path: `${base}/annotator/rework`, kind: 'rework' },
-          { id: 'p-requests', label: 'Yêu cầu của tôi', path: `${base}/annotator/requests`, kind: 'page' },
-          { id: 'p-analytics', label: 'Phân tích cá nhân (P2)', path: `${base}/annotator/analytics`, kind: 'dashboard' },
-          { id: 'p-guide', label: 'Hướng dẫn gán nhãn', path: `${base}/guidelines`, kind: 'guideline' },
-          { id: 'p-settings', label: 'Cài đặt tài khoản', path: `${base}/account/settings`, kind: 'page' },
-        ]
+      ? (
+          [
+            { id: 'p-ann-dash', label: 'Tổng quan cá nhân', path: `${base}/annotator/dashboard`, kind: 'dashboard', cap: 'annotate_jobs' },
+            { id: 'p-ann-jobs', label: 'Job của tôi', path: `${base}/annotator/jobs`, kind: 'page', cap: 'annotate_jobs' },
+            { id: 'p-ann-rework', label: 'Cần sửa', path: `${base}/annotator/rework`, kind: 'rework', cap: 'annotate_jobs' },
+            { id: 'p-ann-analytics', label: 'Phân tích cá nhân (P2)', path: `${base}/annotator/analytics`, kind: 'dashboard', cap: 'annotate_jobs' },
+            { id: 'p-requests', label: canAnnotate ? 'Yêu cầu của tôi' : 'Yêu cầu xử lý', path: `${base}/annotator/requests`, kind: 'page', cap: ['annotate_jobs', 'manage_jobs'] },
+            { id: 'p-pm-dash', label: 'Tổng quan dự án', path: `${base}/overview`, kind: 'dashboard', cap: 'view_dashboard' },
+            { id: 'p-datasets', label: 'Datasets', path: `${base}/datasets`, kind: 'page', cap: 'view_jobs' },
+            { id: 'p-batches', label: 'Batches', path: `${base}/batches`, kind: 'page', cap: 'view_jobs' },
+            { id: 'p-jobs', label: 'Jobs', path: `${base}/jobs`, kind: 'page', cap: 'view_jobs' },
+            { id: 'p-teams', label: 'Team & Members', path: `${base}/teams`, kind: 'page', cap: 'manage_team' },
+            { id: 'p-qc1-dash', label: 'Tổng quan QC1', path: `${base}/qc1/dashboard`, kind: 'dashboard', cap: ['perform_qc1', 'view_dashboard'] },
+            { id: 'p-qc1-work', label: 'Job kiểm tra QC1', path: `${base}/qc1/work`, kind: 'page', cap: 'perform_qc1' },
+            { id: 'p-qc2-dash', label: 'Tổng quan QC2', path: `${base}/qc2/dashboard`, kind: 'dashboard', cap: 'perform_audit' },
+            { id: 'p-qc2-work', label: 'Job audit QC2', path: `${base}/qc2/work`, kind: 'page', cap: 'perform_audit' },
+            { id: 'p-audits', label: 'Quản lý Audit', path: `${base}/audits`, kind: 'page', cap: 'manage_audits' },
+            { id: 'p-guide', label: 'Hướng dẫn gán nhãn', path: `${base}/guidelines`, kind: 'guideline', cap: 'view_guidelines' },
+            { id: 'p-settings', label: 'Cài đặt tài khoản', path: `${base}/account/settings`, kind: 'page', cap: 'view_project' },
+          ] satisfies QuickPage[]
+        ).filter((item) => can(item.cap))
       : [
           { id: 'p-projects', label: 'Dự án của tôi', path: '/projects', kind: 'page' },
           { id: 'p-settings', label: 'Cài đặt tài khoản', path: '/account/settings', kind: 'page' },
         ]
     const needle = query.trim().toLowerCase()
-    if (!needle) return list.slice(0, 5)
+    if (!needle) return list.slice(0, 6)
     return list.filter((item) => item.label.toLowerCase().includes(needle))
-  }, [projectId, query])
+  }, [projectId, caps, canAnnotate, query])
 
   useEffect(() => {
-    if (!projectId) return
+    if (!projectId || !canSearchJobs) return
     let cancelled = false
     const timer = setTimeout(async () => {
       setLoading(true)
       try {
-        const res = await quickSearchAnnotator(projectId, query)
-        if (!cancelled) setJobs(res.jobs)
+        if (canAnnotate) {
+          const res: AnnotatorQuickSearchResult = await quickSearchAnnotator(projectId, query)
+          if (!cancelled) {
+            setJobs(
+              res.jobs.map((j) => ({
+                ...j,
+                targetPath: `/projects/${projectId}/annotator/jobs/${j.id}`,
+              })),
+            )
+          }
+        } else if (canViewAllJobs) {
+          const res = await listJobs(projectId, { search: query, page_size: 8 })
+          if (!cancelled) {
+            setJobs(
+              res.results.map((j) => ({
+                id: j.id,
+                name: j.name,
+                status: j.status,
+                status_label: j.status_label,
+                rework_round: j.rework_round,
+                progress_percent: j.progress_percent ?? 0,
+                targetPath: `/projects/${projectId}/jobs?search=${encodeURIComponent(j.name)}`,
+              })),
+            )
+          }
+        }
       } catch {
         if (!cancelled) setJobs([])
       } finally {
@@ -70,18 +146,18 @@ function QuickSearchPalette({ projectId, onClose }: { projectId: number | null; 
       cancelled = true
       clearTimeout(timer)
     }
-  }, [projectId, query])
+  }, [projectId, canSearchJobs, canAnnotate, canViewAllJobs, query])
 
-  const visibleJobs = useMemo(() => (projectId ? jobs : []), [projectId, jobs])
+  const visibleJobs = useMemo(() => (canSearchJobs ? jobs : []), [canSearchJobs, jobs])
 
   const flatTargets = useMemo(() => {
     const jobItems = visibleJobs.map((j) => ({
       key: `job-${j.id}`,
-      path: `/projects/${projectId}/annotator/jobs/${j.id}`,
+      path: j.targetPath,
     }))
     const pageItems = pages.map((p) => ({ key: p.id, path: p.path }))
     return [...jobItems, ...pageItems]
-  }, [visibleJobs, pages, projectId])
+  }, [visibleJobs, pages])
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -118,7 +194,7 @@ function QuickSearchPalette({ projectId, onClose }: { projectId: number | null; 
               setQuery(e.target.value)
               setActiveIndex(0)
             }}
-            placeholder="Tìm mã job, batch hoặc chuyển nhanh tới trang…"
+            placeholder={canSearchJobs ? 'Tìm mã job, batch hoặc chuyển nhanh tới trang…' : 'Chuyển nhanh tới trang…'}
             className="w-full bg-transparent text-base text-[#101828] outline-none placeholder:text-[#667085]"
           />
           <button
@@ -131,7 +207,7 @@ function QuickSearchPalette({ projectId, onClose }: { projectId: number | null; 
         </div>
 
         <div className="max-h-[380px] overflow-y-auto p-2">
-          {projectId != null && (
+          {canSearchJobs && (
             <div className="mb-2">
               <div className="px-3 py-1.5 text-xs font-semibold text-[#667085]">Job</div>
               {loading && visibleJobs.length === 0 ? (
@@ -146,7 +222,7 @@ function QuickSearchPalette({ projectId, onClose }: { projectId: number | null; 
                         type="button"
                         onMouseEnter={() => setActiveIndex(idx)}
                         onClick={() => {
-                          navigate(`/projects/${projectId}/annotator/jobs/${job.id}`)
+                          navigate(job.targetPath)
                           onClose()
                         }}
                         className={cx(

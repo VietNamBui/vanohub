@@ -48,21 +48,31 @@ export default function MainLayout() {
 
   const settingsPath = projectId ? `/projects/${projectId}/account/settings` : '/account/settings'
 
-  // Phím tắt toàn cục: ⌘K / Ctrl+K mở tìm kiếm nhanh; Alt+Shift+Q đăng xuất.
+  // Phím tắt toàn cục: ⌘K mở tìm kiếm nhanh; ⌘P hồ sơ cá nhân; ⌘S cài đặt; ⌥⇧Q đăng xuất.
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
-      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
+      const mod = e.metaKey || e.ctrlKey
+      const key = e.key.toLowerCase()
+      if (mod && key === 'k') {
         e.preventDefault()
         setMenuOpen(false)
         setSearchOpen((prev) => !prev)
-      } else if (e.altKey && e.shiftKey && e.key.toLowerCase() === 'q') {
+      } else if (mod && key === 'p') {
+        e.preventDefault()
+        setMenuOpen(false)
+        navigate(`${settingsPath}?tab=profile`)
+      } else if (mod && key === 's') {
+        e.preventDefault()
+        setMenuOpen(false)
+        navigate(settingsPath)
+      } else if (e.altKey && e.shiftKey && key === 'q') {
         e.preventDefault()
         logout()
       }
     }
     window.addEventListener('keydown', onKeyDown)
     return () => window.removeEventListener('keydown', onKeyDown)
-  }, [logout])
+  }, [logout, navigate, settingsPath])
 
   // Đóng menu người dùng khi bấm ra ngoài hoặc nhấn Esc
   useEffect(() => {

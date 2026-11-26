@@ -109,7 +109,11 @@ function buildMenu(can: (cap: Capability) => boolean): NavGroup[] {
     [
       { key: 'annotator/jobs', label: 'Job của tôi', cap: 'annotate_jobs', matchPrefix: 'annotator/jobs' },
       { key: 'annotator/rework', label: 'Cần sửa', cap: 'annotate_jobs' },
-      { key: 'annotator/requests', label: 'Yêu cầu của tôi', cap: 'annotate_jobs' },
+      {
+        key: 'annotator/requests',
+        label: isAnnotator ? 'Yêu cầu của tôi' : 'Yêu cầu xử lý',
+        cap: ['annotate_jobs', 'manage_jobs'],
+      },
       { key: 'datasets', label: 'Datasets', cap: 'view_jobs' },
       { key: 'batches', label: 'Batches', cap: 'view_jobs' },
       { key: 'jobs', label: 'Jobs', cap: 'view_jobs' },

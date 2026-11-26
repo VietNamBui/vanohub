@@ -110,6 +110,21 @@ class ReviewErrorBriefSerializer(serializers.Serializer):
     created_at = serializers.DateTimeField()
 
 
+class JobWithErrorsSerializer(JobSerializer):
+    errors = serializers.SerializerMethodField()
+
+    class Meta(JobSerializer.Meta):
+        fields = JobSerializer.Meta.fields + ["errors"]
+        read_only_fields = fields
+
+    def get_errors(self, job):
+        if hasattr(job, "_prefetched_objects_cache") and "review_errors" in job._prefetched_objects_cache:
+            errors = job._prefetched_objects_cache["review_errors"]
+        else:
+            errors = job.review_errors.select_related("category", "reported_by")
+        return ReviewErrorBriefSerializer(errors, many=True).data
+
+
 class JobDetailSerializer(JobSerializer):
     timeline = serializers.SerializerMethodField()
     errors = serializers.SerializerMethodField()

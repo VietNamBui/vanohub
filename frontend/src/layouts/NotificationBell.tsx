@@ -3,7 +3,7 @@ import { useEffect, useState } from 'react'
 import { useNavigate } from 'react-router'
 import { Badge } from '@/components/base/badges/badges'
 import { useAuth } from '../features/auth/useAuth'
-import { listAnnouncements, listProjectNotifications, markProjectNotificationsRead } from '../features/projects/api'
+import { listProjectNotifications, markProjectNotificationsRead } from '../features/projects/api'
 import type { NotificationCategory, ProjectSummary, UnifiedNotification } from '../features/projects/types'
 import { useRequest } from '../shared/hooks/useRequest'
 import { formatDateTime, formatRelative } from '../shared/utils/format'
@@ -12,6 +12,8 @@ import { cx } from '@/utils/cx'
 const POLL_MS = 60_000
 
 const seenKey = (userId: number, projectId: number) => `vanohub:notifSeen:${userId}:${projectId}`
+const readMapKey = (userId: number) => `vanohub:notifReadIds:${userId}`
+
 function readSeen(key: string): number {
   try {
     return Number(localStorage.getItem(key)) || 0
@@ -26,41 +28,56 @@ function writeSeen(key: string, value: number) {
     // ignore storage restriction
   }
 }
-
-async function fetchNotifications(projects: ProjectSummary[], userId: number): Promise<UnifiedNotification[]> {
-  if (!projects.length || !userId) return []
-  if (projects.length === 1) {
-    const feed = await listProjectNotifications(projects[0].id)
-    const seenAt = readSeen(seenKey(userId, projects[0].id))
-    return feed.items.map((item) => {
-      if (item.source === 'announcement' && new Date(item.created_at).getTime() <= seenAt) {
-        return { ...item, is_read: true }
-      }
-      return item
-    })
+function readStoredIds(userId: number): Record<string, boolean> {
+  if (!userId) return {}
+  try {
+    const raw = localStorage.getItem(readMapKey(userId))
+    const parsed = raw ? (JSON.parse(raw) as unknown) : null
+    return parsed && typeof parsed === 'object' ? (parsed as Record<string, boolean>) : {}
+  } catch {
+    return {}
   }
+}
+function writeStoredIds(userId: number, map: Record<string, boolean>) {
+  if (!userId) return
+  try {
+    const entries = Object.entries(map).slice(-200)
+    localStorage.setItem(readMapKey(userId), JSON.stringify(Object.fromEntries(entries)))
+  } catch {
+    // ignore storage restriction
+  }
+}
+
+type ScopedNotification = UnifiedNotification & { _projectId: number }
+
+async function fetchNotifications(projects: ProjectSummary[], userId: number): Promise<ScopedNotification[]> {
+  if (!projects.length || !userId) return []
+  const multi = projects.length > 1
   const results = await Promise.allSettled(
     projects.map(async (p) => {
       const seenAt = readSeen(seenKey(userId, p.id))
-      const list = await listAnnouncements(p.id)
-      return list.map<UnifiedNotification>((a) => ({
-        id: `ann-${p.id}-${a.id}`,
-        notification_id: null,
-        source: 'announcement',
-        category: 'announcement',
-        title: `${p.name} · ${a.sender?.full_name ?? 'Hệ thống'}`,
-        body: a.content,
-        job_id: null,
-        action_url: `/projects/${p.id}/announcements`,
-        is_read: a.sender?.id === userId || new Date(a.created_at).getTime() <= seenAt,
-        is_pinned_pending: false,
-        created_at: a.created_at,
-      }))
+      const feed = await listProjectNotifications(p.id)
+      return feed.items.map<ScopedNotification>((item) => {
+        const isAnnouncementRead =
+          item.source === 'announcement' && new Date(item.created_at).getTime() <= seenAt
+        return {
+          ...item,
+          id: multi ? `${p.id}:${item.id}` : item.id,
+          title: multi ? `${p.name} · ${item.title}` : item.title,
+          is_read: item.is_read || isAnnouncementRead,
+          _projectId: p.id,
+        }
+      })
     }),
   )
   return results
     .flatMap((r) => (r.status === 'fulfilled' ? r.value : []))
-    .sort((a, b) => b.created_at.localeCompare(a.created_at))
+    .sort((a, b) => {
+      const ap = !a.is_read && a.is_pinned_pending ? 0 : 1
+      const bp = !b.is_read && b.is_pinned_pending ? 0 : 1
+      if (ap !== bp) return ap - bp
+      return b.created_at.localeCompare(a.created_at)
+    })
 }
 
 function CategoryIcon({ category }: { category: NotificationCategory }) {
@@ -118,19 +135,22 @@ export default function NotificationBell({ projects }: { projects: ProjectSummar
   const userId = user?.id ?? 0
   const [open, setOpen] = useState(false)
   const [tab, setTab] = useState<'all' | 'unread'>('all')
-  const [tick, setTick] = useState(0)
-  const [readIds, setReadIds] = useState<Record<string, boolean>>({})
+  const [readState, setReadState] = useState<{ userId: number; ids: Record<string, boolean> }>(() => ({
+    userId,
+    ids: readStoredIds(userId),
+  }))
+  const readIds = readState.userId === userId ? readState.ids : readStoredIds(userId)
   const scopeKey = projects.map((p) => p.id).join(',')
 
-  const { data, error, isLoading } = useRequest(
-    `notif-drawer:${scopeKey}:${userId}:${tick}`,
+  const { data, error, isLoading, retry } = useRequest(
+    `notif-drawer:${scopeKey}:${userId}`,
     () => fetchNotifications(projects, userId),
   )
 
   useEffect(() => {
-    const timer = setInterval(() => setTick((t) => t + 1), POLL_MS)
+    const timer = setInterval(() => retry(), POLL_MS)
     return () => clearInterval(timer)
-  }, [])
+  }, [retry])
 
   useEffect(() => {
     if (!open) return
@@ -145,34 +165,33 @@ export default function NotificationBell({ projects }: { projects: ProjectSummar
   const unreadCount = items.filter((i) => !i.is_read).length
   const visible = tab === 'unread' ? items.filter((i) => !i.is_read) : items
 
+  function persistReadIds(next: Record<string, boolean>) {
+    setReadState({ userId, ids: next })
+    writeStoredIds(userId, next)
+  }
+
   async function markAllRead() {
     const nowMs = new Date().getTime()
     for (const p of projects) {
       writeSeen(seenKey(userId, p.id), nowMs)
     }
-    const nextRead: Record<string, boolean> = {}
+    const nextRead: Record<string, boolean> = { ...readIds }
     for (const item of items) nextRead[item.id] = true
-    setReadIds((prev) => ({ ...prev, ...nextRead }))
-    if (projects.length === 1) {
-      try {
-        await markProjectNotificationsRead(projects[0].id)
-      } catch {
-        // ignore optimistic failure
-      }
-    }
+    persistReadIds(nextRead)
+    await Promise.allSettled(projects.map((p) => markProjectNotificationsRead(p.id)))
   }
 
-  async function handleItemClick(item: UnifiedNotification) {
-    setReadIds((prev) => ({ ...prev, [item.id]: true }))
-    if (!item.is_read && item.notification_id && projects.length === 1) {
+  async function handleItemClick(item: ScopedNotification) {
+    persistReadIds({ ...readIds, [item.id]: true })
+    if (!item.is_read && item.notification_id) {
       try {
-        await markProjectNotificationsRead(projects[0].id, item.notification_id)
+        await markProjectNotificationsRead(item._projectId, item.notification_id)
       } catch {
         // ignore
       }
     }
-    if (item.source === 'announcement' && projects.length === 1) {
-      writeSeen(seenKey(userId, projects[0].id), new Date().getTime())
+    if (item.source === 'announcement') {
+      writeSeen(seenKey(userId, item._projectId), new Date().getTime())
     }
     setOpen(false)
     if (item.action_url) {
@@ -186,7 +205,7 @@ export default function NotificationBell({ projects }: { projects: ProjectSummar
         type="button"
         onClick={() => {
           setOpen(true)
-          setTick((t) => t + 1)
+          retry()
         }}
         aria-label={unreadCount ? `Thông báo, ${unreadCount} chưa đọc` : 'Thông báo'}
         className="relative flex size-10 cursor-pointer items-center justify-center rounded-lg text-[#667085] transition hover:bg-[#F9FAFB] hover:text-[#344054]"

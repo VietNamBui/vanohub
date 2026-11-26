@@ -37,6 +37,12 @@ class AnnotatorAndQc1AnalyticsTests(TestCase):
         self.assertEqual(len(res.data["daily_results"]), 7)
         self.assertIn("recent_requests", res.data)
 
+    def test_annotator_dashboard_daily_actual_does_not_mix_lifetime_done(self):
+        self.f.job(status=JobStatus.APPROVED, annotator=self.f.ann1, object_count=500)
+        res = self.ann1.get(self.f.url("annotator/dashboard/?period=week"))
+        self.assertEqual(res.status_code, 200, res.data)
+        self.assertEqual(res.data["kpi_summary"]["actual_objects"], 0)
+
     def test_annotator_personal_analytics_p2_and_private_ranking(self):
         self.assertEqual(self.qc1.get(self.f.url("annotator/analytics/")).status_code, 403)
 

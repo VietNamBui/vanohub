@@ -4,7 +4,9 @@ QUY ƯỚC: chỉ số nào chưa chốt công thức thì trả về value=None
 Chỉ số "tạm tính" (provisional) có ghi công thức đang dùng để nhóm kiểm tra.
 """
 
+from bisect import bisect_right
 from datetime import timedelta
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from django.db.models import Count, Q, Sum
 from django.db.models.functions import TruncDate
@@ -38,6 +40,14 @@ def _pct(part, whole):
 def _period_start(request):
     days = PERIODS.get(request.query_params.get("period", "week"), 7)
     return timezone.now() - timedelta(days=days)
+
+
+def _user_timezone(user):
+    name = (getattr(user, "timezone_name", "") or "Asia/Ho_Chi_Minh").strip()
+    try:
+        return ZoneInfo(name)
+    except ZoneInfoNotFoundError:
+        return ZoneInfo("Asia/Ho_Chi_Minh")
 
 
 class ProjectOverviewView(ProjectScopedViewMixin, APIView):
@@ -276,6 +286,10 @@ class AnnotatorDashboardView(ProjectScopedViewMixin, APIView):
     def get(self, request, project_id):
         project = self.project
         user = request.user
+        with timezone.override(_user_timezone(user)):
+            return self._build(request, project, user)
+
+    def _build(self, request, project, user):
         now = timezone.now()
         today = timezone.localdate(now)
         since = _period_start(request)
@@ -452,9 +466,8 @@ class AnnotatorDashboardView(ProjectScopedViewMixin, APIView):
         submitted_total = len(submitted_jobs)
         on_time_count = sum(1 for j in submitted_jobs if (j.submitted_at or j.updated_at) <= j.deadline)
 
-        # Sản lượng / chỉ tiêu (SL06 · KPI02 · KPI03)
-        today_actual = daily_first.get(today, 0) + daily_rework.get(today, 0)
-        actual_objects = today_actual if today_actual > 0 else (totals["objects_done"] or 0)
+        # Sản lượng / chỉ tiêu (SL06 · KPI02 · KPI03) — chỉ tính sản lượng nộp hôm nay so với chỉ tiêu/ngày
+        actual_objects = daily_first.get(today, 0) + daily_rework.get(today, 0)
         target_objects = project.kpi_annotation_target
         achievement_pct = _pct(actual_objects, target_objects) if target_objects else None
         shortfall = max(0, target_objects - actual_objects) if target_objects else 0
@@ -551,6 +564,10 @@ class AnnotatorAnalyticsView(ProjectScopedViewMixin, APIView):
     def get(self, request, project_id):
         project = self.project
         user = request.user
+        with timezone.override(_user_timezone(user)):
+            return self._build(request, project, user)
+
+    def _build(self, request, project, user):
         now = timezone.now()
         today = timezone.localdate(now)
         iso_year, iso_week, _ = today.isocalendar()
@@ -583,6 +600,22 @@ class AnnotatorAnalyticsView(ProjectScopedViewMixin, APIView):
             .select_related("job")
             .order_by("created_at")
         )
+        job_ids = {log.job_id for log in logs if log.job_id}
+        start_times_by_job = {}
+        if job_ids:
+            for start_log in (
+                ActivityLog.objects.filter(
+                    project=project,
+                    job_id__in=job_ids,
+                    action="job.status",
+                    after__status=JobStatus.ANNOTATING,
+                    created_at__lte=now,
+                )
+                .order_by("created_at", "id")
+                .only("job_id", "created_at")
+            ):
+                start_times_by_job.setdefault(start_log.job_id, []).append(start_log.created_at)
+
         day_fp = {}
         day_rw = {}
         day_hours = {}
@@ -599,8 +632,17 @@ class AnnotatorAnalyticsView(ProjectScopedViewMixin, APIView):
             else:
                 day_fp[d] = day_fp.get(d, 0) + objs
 
-            if log.job and log.job.started_at and log.created_at > log.job.started_at:
-                hrs = (log.created_at - log.job.started_at).total_seconds() / 3600
+            session_start = None
+            starts = start_times_by_job.get(log.job_id) if log.job_id else None
+            if starts:
+                idx = bisect_right(starts, log.created_at) - 1
+                if idx >= 0:
+                    session_start = starts[idx]
+            if session_start is None and not is_rw and log.job and log.job.started_at:
+                session_start = log.job.started_at
+
+            if session_start and log.created_at > session_start:
+                hrs = (log.created_at - session_start).total_seconds() / 3600
                 hrs = max(0.25, min(10.0, hrs))
             else:
                 hrs = 0.0
@@ -707,7 +749,7 @@ class AnnotatorAnalyticsView(ProjectScopedViewMixin, APIView):
                 if objs is None:
                     objs = ev.job.object_count if ev.job else 0
                 scores[ev.actor_id] = scores.get(ev.actor_id, 0) + int(objs or 0)
-            if all(v == 0 for v in scores.values()):
+            if window_end is None and all(v == 0 for v in scores.values()):
                 for row in (
                     Job.objects.filter(project=project, annotator_id__in=annotator_ids, status__in=DONE)
                     .values("annotator_id")
@@ -753,6 +795,10 @@ class Qc1SummaryView(ProjectScopedViewMixin, APIView):
     def get(self, request, project_id):
         project = self.project
         user = request.user
+        with timezone.override(_user_timezone(user)):
+            return self._build(request, project, user)
+
+    def _build(self, request, project, user):
         scope = "project" if self.has_cap(Cap.VIEW_DASHBOARD) and request.query_params.get("scope") != "mine" else "mine"
 
         jobs = Job.objects.filter(project=project)

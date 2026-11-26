@@ -61,6 +61,7 @@ export default function AnnotatorJobDetailPage() {
   const [dataIssueOpen, setDataIssueOpen] = useState(false)
   const [submitModalOpen, setSubmitModalOpen] = useState(false)
   const [submitObjects, setSubmitObjects] = useState('')
+  const [submitObjectsError, setSubmitObjectsError] = useState<string | null>(null)
   const [submitNote, setSubmitNote] = useState('')
 
   const jobReq = useRequest(`annotator-job-detail:${projectId}:${jobId}:${version}`, () =>
@@ -85,7 +86,12 @@ export default function AnnotatorJobDetailPage() {
   async function handleConfirmSubmit() {
     if (!job) return
     const trimmed = submitObjects.trim()
-    const parsed = trimmed !== '' && /^\d+$/.test(trimmed) ? Number(trimmed) : undefined
+    if (trimmed !== '' && !/^\d+$/.test(trimmed)) {
+      setSubmitObjectsError('Vui lòng nhập số nguyên không âm.')
+      return
+    }
+    setSubmitObjectsError(null)
+    const parsed = trimmed !== '' ? Number(trimmed) : undefined
     const ok = await run(
       () => submitAnnotatorJob(projectId, job.id, { note: submitNote.trim(), ...(parsed !== undefined ? { object_count: parsed } : {}) }),
       `Đã nộp ${job.name} lên QC1`,
@@ -384,7 +390,10 @@ export default function AnnotatorJobDetailPage() {
 
           <FormDialog
             isOpen={submitModalOpen}
-            onClose={() => setSubmitModalOpen(false)}
+            onClose={() => {
+              setSubmitObjectsError(null)
+              setSubmitModalOpen(false)
+            }}
             title={`Nộp ${job.name} lên QC1`}
             description="Xác nhận bạn đã kiểm tra cuboid, đối tượng và tracking ID trước khi nộp."
             submitLabel="Xác nhận nộp QC1"
@@ -396,7 +405,12 @@ export default function AnnotatorJobDetailPage() {
                 label="Số object-frame đã hoàn tất (không bắt buộc)"
                 placeholder="Để trống để giữ nguyên số hiện tại"
                 value={submitObjects}
-                onChange={setSubmitObjects}
+                onChange={(v) => {
+                  setSubmitObjects(v)
+                  if (submitObjectsError) setSubmitObjectsError(null)
+                }}
+                isInvalid={!!submitObjectsError}
+                hint={submitObjectsError ?? undefined}
               />
               <TextArea
                 label="Ghi chú cho QC1 (không bắt buộc)"

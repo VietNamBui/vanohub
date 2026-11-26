@@ -40,13 +40,11 @@ export default function AccountSettingsPage() {
   const { projectId: projectIdParam } = useParams()
   const projectId = projectIdParam ? Number(projectIdParam) : null
   const [searchParams, setSearchParams] = useSearchParams()
-  const initialTab = (searchParams.get('tab') as SettingsTab) || 'profile'
-  const [tab, setTab] = useState<SettingsTab>(
-    ['profile', 'security', 'notifications'].includes(initialTab) ? initialTab : 'profile',
-  )
+  const rawTab = searchParams.get('tab') as SettingsTab | null
+  const tab: SettingsTab =
+    rawTab && ['profile', 'security', 'notifications'].includes(rawTab) ? rawTab : 'profile'
 
   const switchTab = (next: SettingsTab) => {
-    setTab(next)
     setSearchParams({ tab: next }, { replace: true })
   }
 
@@ -135,14 +133,31 @@ function ProfileTab({
   const [fullName, setFullName] = useState(initialName)
   const [email, setEmail] = useState(user?.email ?? '')
   const [avatarUrl, setAvatarUrl] = useState(user?.avatar_url ?? '')
+  const [avatarError, setAvatarError] = useState<string | null>(null)
   const [timezoneName, setTimezoneName] = useState(user?.timezone_name || 'Asia/Ho_Chi_Minh')
 
   function handleAvatarFile(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0]
+    e.target.value = ''
     if (!file) return
+    if (!/^image\/(png|jpeg|webp|gif)$/.test(file.type)) {
+      setAvatarError('Chỉ hỗ trợ ảnh PNG, JPG, WEBP hoặc GIF.')
+      return
+    }
+    if (file.size > 350 * 1024) {
+      setAvatarError('Ảnh quá lớn (tối đa 350 KB).')
+      return
+    }
     const reader = new FileReader()
     reader.onload = () => {
-      if (typeof reader.result === 'string') setAvatarUrl(reader.result)
+      if (typeof reader.result === 'string') {
+        if (reader.result.length > 500_000) {
+          setAvatarError('Ảnh vượt quá kích thước cho phép.')
+          return
+        }
+        setAvatarError(null)
+        setAvatarUrl(reader.result)
+      }
     }
     reader.readAsDataURL(file)
   }
@@ -185,7 +200,7 @@ function ProfileTab({
             <input
               ref={fileInputRef}
               type="file"
-              accept="image/*"
+              accept="image/png,image/jpeg,image/webp,image/gif"
               className="hidden"
               onChange={handleAvatarFile}
             />
@@ -193,11 +208,19 @@ function ProfileTab({
               Tải ảnh lên
             </Button>
             {avatarUrl && (
-              <Button color="tertiary" size="sm" onPress={() => setAvatarUrl('')}>
+              <Button
+                color="tertiary"
+                size="sm"
+                onPress={() => {
+                  setAvatarError(null)
+                  setAvatarUrl('')
+                }}
+              >
                 Xoá ảnh
               </Button>
             )}
           </div>
+          {avatarError && <p className="text-xs text-[#D92D20] md:col-span-8 md:col-start-5">{avatarError}</p>}
         </div>
 
         <div className="grid grid-cols-1 gap-4 py-5 md:grid-cols-12 md:items-center">
@@ -380,7 +403,7 @@ function NotificationsTab({
           isSelected={notifyRequests}
           onChange={setNotifyRequests}
           label="Cập nhật phản hồi lỗi & báo dữ liệu"
-          hint="Thông báo khi Team Leader hoặc PM tiếp nhận và kết luận yêu cầu của bạn."
+          hint="Thông báo khi PM tiếp nhận và kết luận yêu cầu của bạn."
         />
         <Toggle
           size="md"

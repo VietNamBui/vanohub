@@ -10,12 +10,12 @@ from rest_framework.exceptions import NotFound, PermissionDenied, ValidationErro
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from accounts.models import Role, RoleAssignment
+from accounts.models import Role, RoleAssignment, User
 from accounts.permissions import Cap, ProjectScopedViewMixin
 from projects.models import ActivityLog, DataStatus, EscalationPolicy, UserNotification
 from projects.notifications import notify_assigned, notify_review_needed, project_users_with_roles
 from projects.views import StandardPagination
-from quality.models import Audit, AuditSample
+from quality.models import Audit, AuditSample, ReviewError
 from teams.models import TeamMember
 
 from .models import (
@@ -38,6 +38,7 @@ from .serializers import (
     DeadlineSerializer,
     JobDetailSerializer,
     JobSerializer,
+    JobWithErrorsSerializer,
 )
 
 
@@ -487,11 +488,19 @@ class AnnotatorJobViewSet(
     required_capabilities = {"*": Cap.ANNOTATE_JOBS}
 
     def get_serializer_class(self):
-        return JobDetailSerializer if self.action == "retrieve" else JobSerializer
+        if self.action == "retrieve":
+            return JobDetailSerializer
+        if self.action == "list" and self.request.query_params.get("include_errors") == "1":
+            return JobWithErrorsSerializer
+        return JobSerializer
 
     def get_queryset(self):
         queryset = _base_job_queryset(self.project).filter(annotator=self.request.user)
         p = self.request.query_params
+        if self.action == "list" and p.get("include_errors") == "1":
+            queryset = queryset.prefetch_related(
+                Prefetch("review_errors", queryset=ReviewError.objects.select_related("category", "reported_by"))
+            )
         tab = p.get("tab")
         if tab in ANNOTATOR_TABS:
             queryset = queryset.filter(status__in=ANNOTATOR_TABS[tab])
@@ -532,11 +541,11 @@ class AnnotatorJobViewSet(
         )
 
         with transaction.atomic():
-            active_count = (
-                Job.objects.select_for_update()
-                .filter(project=self.project, annotator=user, status__in=ACTIVE_ANNOTATOR_STATUSES)
-                .count()
-            )
+            # Khoá dòng User để tuần tự hoá các request claim đồng thời của cùng một annotator (tránh vượt WIP limit).
+            User.objects.select_for_update().get(pk=user.pk)
+            active_count = Job.objects.filter(
+                project=self.project, annotator=user, status__in=ACTIVE_ANNOTATOR_STATUSES
+            ).count()
             if active_count >= wip_limit:
                 raise ValidationError(
                     f"Bạn đang giữ {active_count}/{wip_limit} job (GV02). Hoàn tất bớt job trước khi nhận thêm."
@@ -734,6 +743,8 @@ class AnnotatorRequestViewSet(
     def resolve(self, request, project_id, pk=None):
         """PM cập nhật trạng thái hoặc kết luận yêu cầu."""
         req = self.get_object()
+        if req.status in (AnnotatorRequest.Status.RESOLVED, AnnotatorRequest.Status.REJECTED):
+            raise ValidationError("Yêu cầu này đã được kết luận.")
         serializer = AnnotatorRequestResolveSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         new_status = serializer.validated_data["status"]

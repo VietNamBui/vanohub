@@ -107,3 +107,16 @@ class AuthApiTests(TestCase):
         self.assertEqual(ok.status_code, 200, ok.data)
         self.user.refresh_from_db()
         self.assertTrue(self.user.check_password("NewStrongPassword#2026"))
+
+    def test_patch_me_validates_avatar_url(self):
+        self.client.force_authenticate(self.user)
+        bad_svg = self.client.patch(
+            reverse("me"), {"avatar_url": "data:text/html;base64,PHNjcmlwdD4="}, format="json"
+        )
+        self.assertEqual(bad_svg.status_code, 400)
+        bad_url = self.client.patch(reverse("me"), {"avatar_url": "javascript:alert(1)"}, format="json")
+        self.assertEqual(bad_url.status_code, 400)
+        ok_data = self.client.patch(
+            reverse("me"), {"avatar_url": "data:image/png;base64,iVBORw0KGgo="}, format="json"
+        )
+        self.assertEqual(ok_data.status_code, 200)

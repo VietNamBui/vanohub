@@ -269,7 +269,7 @@ class AnnotatorWorkflowTests(TestCase):
         # 3. PQ01: ann2 không thấy yêu cầu của ann1
         self.assertEqual(len(self.f.client(self.f.ann2).get(self.f.url("annotator/requests/")).data), 0)
 
-        # 4. PM giải quyết yêu cầu
+        # 4. PM giải quyết yêu cầu (và không thể kết luận lại lần 2)
         resolved = self.f.client(self.f.pm).post(
             self.f.url(f"annotator/requests/{r_dispute.data['id']}/resolve/"),
             {"status": "resolved", "resolution_note": "Đã kiểm tra và gỡ lỗi sai ID."},
@@ -277,6 +277,19 @@ class AnnotatorWorkflowTests(TestCase):
         )
         self.assertEqual(resolved.status_code, 200, resolved.data)
         self.assertEqual(resolved.data["status"], "resolved")
+        again = self.f.client(self.f.pm).post(
+            self.f.url(f"annotator/requests/{r_dispute.data['id']}/resolve/"),
+            {"status": "rejected", "resolution_note": "Đổi ý"},
+            format="json",
+        )
+        self.assertEqual(again.status_code, 400)
+
+        # include_errors=1 trả về errors ngay trong danh sách rework
+        self.job_mine.status = JobStatus.REWORK
+        self.job_mine.save(update_fields=["status"])
+        rework_list = self.ann1.get(self.f.url("annotator/jobs/?tab=rework&include_errors=1"))
+        self.assertEqual(rework_list.status_code, 200)
+        self.assertEqual(len(rework_list.data["results"][0]["errors"]), 1)
 
         # 5. Thông báo hợp nhất & đánh dấu đã đọc
         notifs = self.ann1.get(self.f.url("notifications/"))

@@ -10,7 +10,7 @@ import { useRequest } from '../../../shared/hooks/useRequest'
 import { useProject } from '../../projects/projectContext'
 import { SEVERITY_LABELS } from '../../quality/constants'
 import type { Severity } from '../../quality/types'
-import { getAnnotatorJob, listAnnotatorJobs } from '../api'
+import { listAnnotatorJobs } from '../api'
 import AnnotatorBreadcrumb from '../components/AnnotatorBreadcrumb'
 import DisputeErrorModal from '../components/DisputeErrorModal'
 import { formatDeadlineCountdown } from '../constants'
@@ -30,9 +30,8 @@ export default function AnnotatorReworkPage() {
   const [disputeTarget, setDisputeTarget] = useState<{ job: JobDetail; errorId: number } | null>(null)
 
   const req = useRequest(`annotator-rework-full:${projectId}:${version}`, async () => {
-    const listed = await listAnnotatorJobs(projectId, { tab: 'rework' })
-    const details = await Promise.all(listed.results.map((j) => getAnnotatorJob(projectId, j.id)))
-    return details
+    const listed = await listAnnotatorJobs(projectId, { tab: 'rework', include_errors: true })
+    return listed.results as JobDetail[]
   })
 
   const reworkJobs = req.data ?? []

@@ -1,7 +1,14 @@
+import re
+
 from django.contrib.auth.password_validation import validate_password
+from django.core.exceptions import ValidationError as DjangoValidationError
+from django.core.validators import URLValidator
 from rest_framework import serializers
 
 from .models import RoleAssignment, User
+
+_DATA_IMAGE_RE = re.compile(r"^data:image/(png|jpe?g|webp|gif);base64,[A-Za-z0-9+/=]+$")
+_HTTP_URL_VALIDATOR = URLValidator(schemes=["http", "https"])
 
 
 class UserBriefSerializer(serializers.ModelSerializer):
@@ -76,8 +83,19 @@ class ProfileUpdateSerializer(serializers.ModelSerializer):
         ]
 
     def validate_avatar_url(self, value):
+        value = (value or "").strip()
+        if not value:
+            return ""
         if len(value) > 500_000:
             raise serializers.ValidationError("Ảnh đại diện vượt quá kích thước cho phép.")
+        if value.startswith("data:"):
+            if not _DATA_IMAGE_RE.match(value):
+                raise serializers.ValidationError("Ảnh đại diện phải là định dạng PNG, JPG, WEBP hoặc GIF hợp lệ.")
+            return value
+        try:
+            _HTTP_URL_VALIDATOR(value)
+        except DjangoValidationError as exc:
+            raise serializers.ValidationError("URL ảnh đại diện không hợp lệ.") from exc
         return value
 
     def update(self, instance, validated_data):

@@ -28,9 +28,10 @@ export function useRequest<T>(key: string, request: () => Promise<T>) {
   }, [requestKey])
 
   const current = result?.key === requestKey ? result : null
+  const sameScope = result && result.key.startsWith(`${key}#`) ? result : null
   return {
     isLoading: current === null,
-    data: current?.data ?? null,
+    data: sameScope?.data ?? null,
     error: current?.error ?? null,
     retry: () => setAttempt((n) => n + 1),
   }

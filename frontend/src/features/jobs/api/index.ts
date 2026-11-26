@@ -69,15 +69,16 @@ export const getJobQueue = async (projectId: number, batch?: number) =>
 // --- Không gian làm việc Annotator ---
 export const listAnnotatorJobs = async (
   projectId: number,
-  params: { tab?: AnnotatorJobTab; search?: string; page?: number; overdue?: boolean } = {},
+  params: { tab?: AnnotatorJobTab; search?: string; page?: number; overdue?: boolean; include_errors?: boolean } = {},
 ) =>
   (
-    await apiClient.get<Paginated<Job>>(p(projectId, 'annotator/jobs/'), {
+    await apiClient.get<Paginated<Job | JobDetail>>(p(projectId, 'annotator/jobs/'), {
       params: cleanParams({
         tab: params.tab === 'all' ? undefined : params.tab,
         search: params.search,
         page: params.page,
         overdue: params.overdue ? 1 : undefined,
+        include_errors: params.include_errors ? 1 : undefined,
       }),
     })
   ).data
