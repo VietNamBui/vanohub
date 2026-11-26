@@ -7,6 +7,7 @@ const COLORS = {
   annotating: 'blue',
   pending_qc1: 'warning',
   qc1_reviewing: 'warning',
+  qc1_passed: 'brand',
   rework: 'orange',
   pending_qc2: 'purple',
   approved: 'success',

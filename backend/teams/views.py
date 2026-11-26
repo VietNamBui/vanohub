@@ -29,7 +29,7 @@ class TeamViewSet(ProjectScopedViewMixin, mixins.ListModelMixin, mixins.Retrieve
     }
 
     def get_queryset(self):
-        return Team.objects.filter(project=self.project).select_related("leader").prefetch_related(
+        return Team.objects.filter(project=self.project).prefetch_related(
             Prefetch("members", queryset=TeamMember.objects.select_related("user"))
         )
 
@@ -40,7 +40,7 @@ class TeamViewSet(ProjectScopedViewMixin, mixins.ListModelMixin, mixins.Retrieve
     def perform_update(self, serializer):
         team = serializer.save()
         ActivityLog.record(project=self.project, actor=self.request.user, action="team.update", target=team,
-                           after={"name": team.name, "leader": team.leader_id})
+                           after={"name": team.name})
 
     @transaction.atomic
     def perform_destroy(self, team):

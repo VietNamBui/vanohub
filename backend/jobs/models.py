@@ -6,16 +6,13 @@ from django.utils import timezone
 
 
 class JobStatus(models.TextChoices):
-    """ĐỀ XUẤT (đã được đồng ý dùng tạm, chưa chốt chính thức).
-
-    L3 (TL xác nhận lên QC2) và L4 (PM accept batch) bỏ qua trong MVP:
-    QC1 pass → Chờ QC2; QC2 xong → Đã duyệt.
-    """
+    """Trạng thái vòng đời của Job (đủ luồng PM xác nhận theo batch sang QC2 và chốt batch)."""
 
     PENDING_ANNOTATION = "pending_annotation", "Chờ annotate"
     ANNOTATING = "annotating", "Đang annotate"
     PENDING_QC1 = "pending_qc1", "Chờ QC1"
     QC1_REVIEWING = "qc1_reviewing", "Đang QC1"
+    QC1_PASSED = "qc1_passed", "Đạt QC1"
     REWORK = "rework", "Rework"
     PENDING_QC2 = "pending_qc2", "Chờ QC2"
     APPROVED = "approved", "Đã duyệt"
@@ -30,7 +27,7 @@ class ReworkScope(models.TextChoices):
 # Nhóm trạng thái theo stage, dùng cho tab lọc và Data Queue.
 STAGE_STATUSES = {
     "annotation": [JobStatus.PENDING_ANNOTATION, JobStatus.ANNOTATING, JobStatus.REWORK],
-    "qc1": [JobStatus.PENDING_QC1, JobStatus.QC1_REVIEWING],
+    "qc1": [JobStatus.PENDING_QC1, JobStatus.QC1_REVIEWING, JobStatus.QC1_PASSED],
     "qc2": [JobStatus.PENDING_QC2],
     "done": [JobStatus.APPROVED, JobStatus.DELIVERED],
 }
@@ -39,6 +36,7 @@ ACTIVE_ANNOTATOR_STATUSES = [JobStatus.PENDING_ANNOTATION, JobStatus.ANNOTATING,
 SUBMITTED_OR_DONE_STATUSES = [
     JobStatus.PENDING_QC1,
     JobStatus.QC1_REVIEWING,
+    JobStatus.QC1_PASSED,
     JobStatus.PENDING_QC2,
     JobStatus.APPROVED,
     JobStatus.DELIVERED,
@@ -140,7 +138,6 @@ class AnnotatorRequest(models.Model):
         DATA_ISSUE = "data_issue", "Dữ liệu bị chặn"
 
     class Status(models.TextChoices):
-        PENDING_TL = "pending_tl", "Đang chờ TL"
         PENDING_PM = "pending_pm", "Đang chờ PM"
         RESOLVED = "resolved", "Đã giải quyết"
         REJECTED = "rejected", "Từ chối"
@@ -151,7 +148,7 @@ class AnnotatorRequest(models.Model):
         "quality.ReviewError", on_delete=models.SET_NULL, null=True, blank=True, related_name="disputes"
     )
     request_type = models.CharField(max_length=20, choices=RequestType.choices)
-    status = models.CharField(max_length=20, choices=Status.choices, default=Status.PENDING_TL)
+    status = models.CharField(max_length=20, choices=Status.choices, default=Status.PENDING_PM)
     title = models.CharField(max_length=255)
     reason = models.TextField()
     progress_note = models.TextField(blank=True, default="")
@@ -162,7 +159,7 @@ class AnnotatorRequest(models.Model):
     handler = models.ForeignKey(
         settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name="handled_requests"
     )
-    handler_role = models.CharField(max_length=16, blank=True, default="TL")
+    handler_role = models.CharField(max_length=16, blank=True, default="PM")
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
     resolved_at = models.DateTimeField(null=True, blank=True)

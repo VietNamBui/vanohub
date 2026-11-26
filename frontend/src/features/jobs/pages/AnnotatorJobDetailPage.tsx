@@ -7,7 +7,6 @@ import { Button } from '@/components/base/buttons/button'
 import { Input } from '@/components/base/input/input'
 import { ProgressBarBase } from '@/components/base/progress-indicators/progress-indicators'
 import { TextArea } from '@/components/base/textarea/textarea'
-import { useShell } from '../../../layouts/ShellContext'
 import { getErrorMessage } from '../../../shared/api/errors'
 import FormDialog from '../../../shared/components/ui/FormDialog'
 import PageState from '../../../shared/components/ui/PageState'
@@ -54,7 +53,6 @@ export default function AnnotatorJobDetailPage() {
   const { jobId: jobIdParam } = useParams()
   const jobId = Number(jobIdParam)
   const navigate = useNavigate()
-  const { teamLeaderName } = useShell()
   const { run, pending } = useAction()
 
   const [version, setVersion] = useState(0)
@@ -369,7 +367,6 @@ export default function AnnotatorJobDetailPage() {
             projectId={projectId}
             jobId={job.id}
             jobName={job.name}
-            teamLeaderName={teamLeaderName}
             errors={job.errors}
             initialErrorId={disputeErrorId}
             onClose={() => setDisputeOpen(false)}

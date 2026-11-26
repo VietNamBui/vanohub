@@ -3,6 +3,7 @@ from datetime import timedelta
 from django.db import transaction
 from django.db.models import Case, Count, F, IntegerField, Prefetch, Q, When
 from django.utils import timezone
+from django.utils.dateparse import parse_date, parse_datetime
 from rest_framework import mixins, status, viewsets
 from rest_framework.decorators import action
 from rest_framework.exceptions import NotFound, PermissionDenied, ValidationError
@@ -11,7 +12,8 @@ from rest_framework.views import APIView
 
 from accounts.models import Role, RoleAssignment
 from accounts.permissions import Cap, ProjectScopedViewMixin
-from projects.models import ActivityLog, DataStatus, UserNotification
+from projects.models import ActivityLog, DataStatus, EscalationPolicy, UserNotification
+from projects.notifications import notify_assigned, notify_review_needed, project_users_with_roles
 from projects.views import StandardPagination
 from quality.models import Audit, AuditSample
 from teams.models import TeamMember
@@ -31,6 +33,7 @@ from .serializers import (
     AnnotatorStartSerializer,
     AnnotatorSubmitSerializer,
     AssignSerializer,
+    BulkMoveBatchSerializer,
     BulkSerializer,
     DeadlineSerializer,
     JobDetailSerializer,
@@ -70,7 +73,7 @@ def ensure_editable(job):
 
 
 def ensure_not_escalated(job):
-    if job.is_escalated:
+    if job.is_escalated and job.project.escalation_policy == EscalationPolicy.BLOCK:
         raise ValidationError("Job đang ở trạng thái Escalated, chờ PM xử lý.")
 
 
@@ -78,7 +81,7 @@ def lock_job(project, job_id):
     """Khoá dòng Job bằng select_for_update(of=("self",)) để an toàn trên PostgreSQL."""
     job = (
         Job.objects.select_for_update(of=("self",))
-        .select_related("batch__dataset", "project", "annotator", "qc1_reviewer")
+        .select_related("batch__dataset", "batch__team", "project", "annotator", "qc1_reviewer")
         .filter(pk=job_id, project=project)
         .first()
     )
@@ -183,6 +186,18 @@ def submit_annotation(job_id, *, project, actor, note="", object_count=None):
         after=after,
         note=note,
     )
+    # Thông báo "cần duyệt" tới người QC1 được giao (hoặc các QC1 trong dự án nếu job ở pool)
+    review_targets = [job.qc1_reviewer] if job.qc1_reviewer_id else project_users_with_roles(project, Role.QC1)
+    if review_targets:
+        notify_review_needed(
+            project,
+            review_targets,
+            title=f"{job.name} chờ kiểm tra QC1",
+            body=f"{actor.get_full_name() or actor.username} vừa nộp bài (vòng {job.rework_round}).",
+            action_url=f"/projects/{project.id}/qc1/work",
+            job=job,
+            actor=actor,
+        )
     return job
 
 
@@ -199,6 +214,10 @@ def assign_job(job, data, actor, project):
     job.save()
     ActivityLog.record(project=project, actor=actor, action="job.assign", target=job, job=job,
                        before=before, after=after, note=data.get("note", ""))
+    if "annotator" in after and after["annotator"] and after["annotator"] != before.get("annotator"):
+        notify_assigned(project, job, job.annotator, role_label="Annotator", actor=actor)
+    if "qc1_reviewer" in after and after["qc1_reviewer"] and after["qc1_reviewer"] != before.get("qc1_reviewer"):
+        notify_assigned(project, job, job.qc1_reviewer, role_label="QC1", actor=actor)
 
 
 def set_job_deadline(job, deadline, note, actor, project):
@@ -222,16 +241,41 @@ class JobViewSet(ProjectScopedViewMixin, mixins.ListModelMixin, mixins.RetrieveM
     def get_queryset(self):
         queryset = _base_job_queryset(self.project)
         p = self.request.query_params
+        now = timezone.now()
         if p.get("status"):
             queryset = queryset.filter(status__in=p["status"].split(","))
         if p.get("stage") in STAGE_STATUSES:
             queryset = queryset.filter(status__in=STAGE_STATUSES[p["stage"]])
         if p.get("batch"):
-            queryset = queryset.filter(batch_id=p["batch"])
+            batch_ids = [int(x) for x in p["batch"].split(",") if x.strip().isdigit()]
+            if batch_ids:
+                queryset = queryset.filter(batch_id__in=batch_ids)
         if p.get("dataset"):
-            queryset = queryset.filter(batch__dataset_id=p["dataset"])
+            dataset_ids = [int(x) for x in p["dataset"].split(",") if x.strip().isdigit()]
+            if dataset_ids:
+                queryset = queryset.filter(batch__dataset_id__in=dataset_ids)
         if p.get("assignee"):
             queryset = queryset.filter(Q(annotator_id=p["assignee"]) | Q(qc1_reviewer_id=p["assignee"]))
+        if p.get("annotator") and p["annotator"].isdigit():
+            queryset = queryset.filter(annotator_id=int(p["annotator"]))
+        if p.get("qc1_reviewer") and p["qc1_reviewer"].isdigit():
+            queryset = queryset.filter(qc1_reviewer_id=int(p["qc1_reviewer"]))
+        if p.get("min_rework") and p["min_rework"].isdigit():
+            queryset = queryset.filter(rework_round__gte=int(p["min_rework"]))
+        if p.get("max_rework") and p["max_rework"].isdigit():
+            queryset = queryset.filter(rework_round__lte=int(p["max_rework"]))
+        if p.get("deadline_from"):
+            dt = parse_datetime(p["deadline_from"])
+            if dt:
+                queryset = queryset.filter(deadline__gte=dt)
+            elif parse_date(p["deadline_from"]):
+                queryset = queryset.filter(deadline__date__gte=parse_date(p["deadline_from"]))
+        if p.get("deadline_to"):
+            dt = parse_datetime(p["deadline_to"])
+            if dt:
+                queryset = queryset.filter(deadline__lte=dt)
+            elif parse_date(p["deadline_to"]):
+                queryset = queryset.filter(deadline__date__lte=parse_date(p["deadline_to"]))
         if p.get("escalated") == "1":
             queryset = queryset.filter(is_escalated=True)
         if p.get("locked") == "1":
@@ -239,10 +283,12 @@ class JobViewSet(ProjectScopedViewMixin, mixins.ListModelMixin, mixins.RetrieveM
         if p.get("unassigned") == "1":
             queryset = queryset.filter(annotator__isnull=True)
         if p.get("overdue") == "1":
-            queryset = queryset.filter(deadline__lt=timezone.now(), status__in=OPEN_STATUSES)
+            queryset = queryset.filter(deadline__lt=now, status__in=OPEN_STATUSES)
+        if p.get("due_soon") == "1":
+            queryset = queryset.filter(deadline__gte=now, deadline__lte=now + timedelta(hours=24), status__in=OPEN_STATUSES)
         if p.get("search"):
             term = p["search"].strip()
-            cond = Q(name__icontains=term)
+            cond = Q(name__icontains=term) | Q(batch__name__icontains=term)
             if term.isdigit():
                 cond |= Q(cvat_job_id=int(term)) | Q(pk=int(term))
             queryset = queryset.filter(cond)
@@ -340,6 +386,38 @@ class JobViewSet(ProjectScopedViewMixin, mixins.ListModelMixin, mixins.RetrieveM
                                  request.user, self.project)
         return Response({"updated": len(jobs)})
 
+    @action(detail=False, methods=["post"], url_path="bulk-move-batch")
+    def bulk_move_batch(self, request, project_id):
+        """Data Query: nhóm / chuyển hàng loạt job sang một batch đích trong cùng dự án."""
+        serializer = BulkMoveBatchSerializer(data=request.data, context=self.get_serializer_context())
+        serializer.is_valid(raise_exception=True)
+        target_batch = serializer.validated_data["batch"]
+        note = serializer.validated_data["note"]
+        jobs = list(self.get_queryset().filter(pk__in=serializer.validated_data["ids"]))
+        if not jobs:
+            raise ValidationError("Không tìm thấy job phù hợp để chuyển batch.")
+        with transaction.atomic():
+            for job in jobs:
+                ensure_editable(job)
+                if job.audit_samples.filter(audit__status=Audit.Status.IN_PROGRESS).exists():
+                    raise ValidationError(f"Job {job} đang thuộc một đợt audit QC2 chưa chốt.")
+                if job.batch_id == target_batch.id:
+                    continue
+                before_name = job.batch.name
+                job.batch = target_batch
+                job.save(update_fields=["batch", "updated_at"])
+                ActivityLog.record(
+                    project=self.project,
+                    actor=request.user,
+                    action="job.move_batch",
+                    target=job,
+                    job=job,
+                    before={"batch": before_name},
+                    after={"batch": target_batch.name, "batch_id": target_batch.id},
+                    note=note,
+                )
+        return Response({"updated": len(jobs), "batch": target_batch.id, "batch_name": target_batch.name})
+
 
 class JobQueueView(ProjectScopedViewMixin, APIView):
     """GET /api/projects/{id}/job-queue/ — Data Queue.
@@ -379,7 +457,7 @@ ANNOTATOR_TABS = {
     "active": [JobStatus.REWORK, JobStatus.ANNOTATING, JobStatus.PENDING_ANNOTATION],
     "todo": [JobStatus.PENDING_ANNOTATION, JobStatus.ANNOTATING],
     "rework": [JobStatus.REWORK],
-    "submitted": [JobStatus.PENDING_QC1, JobStatus.QC1_REVIEWING, JobStatus.PENDING_QC2],
+    "submitted": [JobStatus.PENDING_QC1, JobStatus.QC1_REVIEWING, JobStatus.QC1_PASSED, JobStatus.PENDING_QC2],
     "done": [JobStatus.APPROVED, JobStatus.DELIVERED],
 }
 
@@ -479,16 +557,20 @@ class AnnotatorJobViewSet(
                 .exclude(qc1_reviewer=user)
             )
             if team_ids:
-                pool = pool.annotate(
-                    _team_pref=Case(
-                        When(batch__team_id__in=team_ids, then=0),
-                        When(batch__team__isnull=True, then=1),
-                        default=2,
-                        output_field=IntegerField(),
+                # Chặn chặt theo team: chỉ nhận job thuộc batch của team mình hoặc batch chung (chưa gán team).
+                pool = (
+                    pool.filter(Q(batch__team_id__in=team_ids) | Q(batch__team__isnull=True))
+                    .annotate(
+                        _team_pref=Case(
+                            When(batch__team_id__in=team_ids, then=0),
+                            default=1,
+                            output_field=IntegerField(),
+                        )
                     )
-                ).order_by("_team_pref", F("deadline").asc(nulls_last=True), "id")
+                    .order_by("_team_pref", F("deadline").asc(nulls_last=True), "id")
+                )
             else:
-                pool = pool.order_by(F("deadline").asc(nulls_last=True), "id")
+                pool = pool.filter(batch__team__isnull=True).order_by(F("deadline").asc(nulls_last=True), "id")
 
             job = pool.first()
             if job is None:
@@ -539,32 +621,14 @@ class AnnotatorJobViewSet(
 
 
 def _find_request_handler(project, user, request_type):
-    """Định tuyến yêu cầu: phản hồi lỗi → TL (chuyển PM nếu chưa có TL); dữ liệu bị chặn → PM (hoặc TL)."""
-    membership = (
-        TeamMember.objects.filter(user=user, team__project=project)
-        .select_related("team__leader")
-        .first()
-    )
-    tl = membership.team.leader if membership and membership.team and membership.team.leader else None
+    """Định tuyến yêu cầu trực tiếp tới PM phụ trách dự án."""
     pm_assignment = (
         RoleAssignment.objects.filter(project=project, role=Role.PROJECT_MANAGER)
         .select_related("user")
         .first()
     )
     pm = pm_assignment.user if pm_assignment else None
-
-    if request_type == AnnotatorRequest.RequestType.DATA_ISSUE:
-        if pm:
-            return pm, "PM", AnnotatorRequest.Status.PENDING_PM
-        if tl:
-            return tl, "TL", AnnotatorRequest.Status.PENDING_TL
-        return None, "PM", AnnotatorRequest.Status.PENDING_PM
-
-    if tl:
-        return tl, "TL", AnnotatorRequest.Status.PENDING_TL
-    if pm:
-        return pm, "PM", AnnotatorRequest.Status.PENDING_PM
-    return None, "TL", AnnotatorRequest.Status.PENDING_TL
+    return pm, "PM", AnnotatorRequest.Status.PENDING_PM
 
 
 class AnnotatorRequestViewSet(
@@ -579,23 +643,18 @@ class AnnotatorRequestViewSet(
     serializer_class = AnnotatorRequestSerializer
     lookup_value_regex = r"\d+"
     required_capabilities = {
-        "list": [Cap.ANNOTATE_JOBS, Cap.LEAD_TEAM, Cap.MANAGE_JOBS],
-        "retrieve": [Cap.ANNOTATE_JOBS, Cap.LEAD_TEAM, Cap.MANAGE_JOBS],
+        "list": [Cap.ANNOTATE_JOBS, Cap.MANAGE_JOBS],
+        "retrieve": [Cap.ANNOTATE_JOBS, Cap.MANAGE_JOBS],
         "create": Cap.ANNOTATE_JOBS,
-        "resolve": [Cap.LEAD_TEAM, Cap.MANAGE_JOBS],
+        "resolve": Cap.MANAGE_JOBS,
     }
 
     def get_queryset(self):
         qs = AnnotatorRequest.objects.filter(project=self.project).select_related(
             "job__batch", "review_error__category", "created_by", "handler"
         )
-        if not self.has_cap(Cap.MANAGE_JOBS) and not self.has_cap(Cap.LEAD_TEAM):
+        if not self.has_cap(Cap.MANAGE_JOBS):
             qs = qs.filter(created_by=self.request.user)
-        elif self.has_cap(Cap.LEAD_TEAM) and not self.has_cap(Cap.MANAGE_JOBS):
-            team_members = TeamMember.objects.filter(
-                team__project=self.project, team__leader=self.request.user
-            ).values_list("user_id", flat=True)
-            qs = qs.filter(Q(created_by=self.request.user) | Q(created_by_id__in=team_members) | Q(handler=self.request.user))
 
         p = self.request.query_params
         if p.get("request_type"):
@@ -616,8 +675,8 @@ class AnnotatorRequestViewSet(
 
         handler, handler_role, initial_status = _find_request_handler(self.project, request.user, req_type)
         default_progress = (
-            "TL đang đối chiếu lỗi được phản hồi. Nếu chưa phân xử được, TL sẽ chuyển PM."
-            if handler_role == "TL"
+            "PM đang đối chiếu lỗi được phản hồi."
+            if req_type == AnnotatorRequest.RequestType.ERROR_DISPUTE
             else "PM đang kiểm tra dữ liệu bị chặn và phương án thay thế."
         )
 
@@ -673,7 +732,7 @@ class AnnotatorRequestViewSet(
 
     @action(detail=True, methods=["post"])
     def resolve(self, request, project_id, pk=None):
-        """TL / PM cập nhật trạng thái, chuyển lên PM hoặc kết luận yêu cầu."""
+        """PM cập nhật trạng thái hoặc kết luận yêu cầu."""
         req = self.get_object()
         serializer = AnnotatorRequestResolveSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
@@ -694,7 +753,7 @@ class AnnotatorRequestViewSet(
                 req.handler_role = "PM"
             else:
                 req.handler = request.user
-                req.handler_role = "PM" if self.has_cap(Cap.MANAGE_JOBS) else "TL"
+                req.handler_role = "PM"
                 req.resolved_at = timezone.now()
             req.save()
 

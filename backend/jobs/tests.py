@@ -223,11 +223,6 @@ class AnnotatorWorkflowTests(TestCase):
 
     def test_annotator_requests_dispute_data_issue_and_notifications(self):
         from quality.models import ReviewError, ReviewStage
-        from teams.models import Team, TeamMember
-
-        tl = make_user("tl_req", Role.TEAM_LEADER, project=self.f.project)
-        team = Team.objects.create(project=self.f.project, name="Team Alpha", leader=tl)
-        TeamMember.objects.create(team=team, user=self.f.ann1)
 
         err = ReviewError.objects.create(
             job=self.job_mine,
@@ -240,7 +235,7 @@ class AnnotatorWorkflowTests(TestCase):
             reported_by=self.f.qc1,
         )
 
-        # 1. Phản hồi lỗi → định tuyến sang TL
+        # 1. Phản hồi lỗi → định tuyến trực tiếp sang PM
         r_dispute = self.ann1.post(
             self.f.url("annotator/requests/"),
             {
@@ -252,9 +247,9 @@ class AnnotatorWorkflowTests(TestCase):
             format="json",
         )
         self.assertEqual(r_dispute.status_code, 201, r_dispute.data)
-        self.assertEqual(r_dispute.data["status"], "pending_tl")
-        self.assertEqual(r_dispute.data["handler"]["id"], tl.id)
-        self.assertEqual(r_dispute.data["handler_role"], "TL")
+        self.assertEqual(r_dispute.data["status"], "pending_pm")
+        self.assertEqual(r_dispute.data["handler"]["id"], self.f.pm.id)
+        self.assertEqual(r_dispute.data["handler_role"], "PM")
 
         # 2. Báo dữ liệu bị chặn → định tuyến sang PM
         r_data = self.ann1.post(
@@ -274,8 +269,8 @@ class AnnotatorWorkflowTests(TestCase):
         # 3. PQ01: ann2 không thấy yêu cầu của ann1
         self.assertEqual(len(self.f.client(self.f.ann2).get(self.f.url("annotator/requests/")).data), 0)
 
-        # 4. TL giải quyết yêu cầu
-        resolved = self.f.client(tl).post(
+        # 4. PM giải quyết yêu cầu
+        resolved = self.f.client(self.f.pm).post(
             self.f.url(f"annotator/requests/{r_dispute.data['id']}/resolve/"),
             {"status": "resolved", "resolution_note": "Đã kiểm tra và gỡ lỗi sai ID."},
             format="json",
@@ -294,3 +289,37 @@ class AnnotatorWorkflowTests(TestCase):
         search = self.ann1.get(self.f.url(f"annotator/search/?q={self.job_mine.name}"))
         self.assertEqual(search.status_code, 200)
         self.assertEqual([j["id"] for j in search.data["jobs"]], [self.job_mine.id])
+
+    def test_escalation_warn_only_policy_and_bulk_move_batch_and_team_claim_scoping(self):
+        from projects.models import Batch, EscalationPolicy
+        from teams.models import Team, TeamMember
+        from .models import Job
+
+        # warn_only cho phép annotator tiếp tục sửa dù is_escalated=True
+        self.f.project.escalation_policy = EscalationPolicy.WARN_ONLY
+        self.f.project.save(update_fields=["escalation_policy"])
+        self.job_mine.status = JobStatus.REWORK
+        self.job_mine.is_escalated = True
+        self.job_mine.save(update_fields=["status", "is_escalated"])
+        ok_warn = self.ann1.post(self.f.url(f"annotator/jobs/{self.job_mine.id}/start/"), {}, format="json")
+        self.assertEqual(ok_warn.status_code, 200, ok_warn.data)
+
+        # Chặn chặt theo team khi claim
+        team_a = Team.objects.create(project=self.f.project, name="Team A")
+        team_b = Team.objects.create(project=self.f.project, name="Team B")
+        TeamMember.objects.create(team=team_a, user=self.f.ann1)
+        batch_b = Batch.objects.create(dataset=self.f.dataset, name="Batch B", team=team_b)
+        Job.objects.create(project=self.f.project, batch=batch_b, name="OTHER-TEAM-JOB", status=JobStatus.PENDING_ANNOTATION)
+        denied = self.ann1.post(self.f.url("annotator/jobs/claim/"), {}, format="json")
+        self.assertEqual(denied.status_code, 400)
+
+        # Data query bulk-move-batch
+        batch_dest = Batch.objects.create(dataset=self.f.dataset, name="Batch Dest")
+        moved = self.f.client(self.f.pm).post(
+            self.f.url("jobs/bulk-move-batch/"),
+            {"ids": [self.job_mine.id], "batch": batch_dest.id, "note": "gom lô"},
+            format="json",
+        )
+        self.assertEqual(moved.status_code, 200, moved.data)
+        self.job_mine.refresh_from_db()
+        self.assertEqual(self.job_mine.batch_id, batch_dest.id)

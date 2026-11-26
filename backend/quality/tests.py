@@ -210,28 +210,14 @@ class Qc1WorkflowTests(TestCase):
         self.assertEqual(self.ann1.get(self.f.url("qc1/jobs/")).status_code, 403)
         self.assertEqual(self.f.client(self.f.qc2).get(self.f.url("qc1/jobs/")).status_code, 403)
 
-    def test_team_leader_has_implied_qc1_capability(self):
-        tl = make_user("tl_qc1", Role.TEAM_LEADER, project=self.f.project)
-        pool_job = self.f.job(status=JobStatus.PENDING_QC1, annotator=self.f.ann2)
-        Job.objects.filter(pk=pool_job.pk).update(qc1_reviewer=None)
-
-        client = self.f.client(tl)
-        listed = client.get(self.f.url("qc1/jobs/?scope=pool")).data
-        self.assertEqual([r["id"] for r in listed["results"]], [pool_job.id])
-
-        passed = client.post(self.f.url(f"qc1/jobs/{pool_job.id}/pass/"), {"comment": "ok"}, format="json")
-        self.assertEqual(passed.status_code, 200, passed.data)
-        self.assertEqual(passed.data["status"], JobStatus.PENDING_QC2)
-        self.assertEqual(passed.data["qc1_reviewer"]["id"], tl.id)
-
-    def test_qc1_start_then_pass_transitions_to_pending_qc2(self):
+    def test_qc1_start_then_pass_transitions_to_qc1_passed(self):
         started = self.qc1.post(self.f.url(f"qc1/jobs/{self.job.id}/start/"), {}, format="json")
         self.assertEqual(started.status_code, 200, started.data)
         self.assertEqual(started.data["status"], JobStatus.QC1_REVIEWING)
 
         passed = self.qc1.post(self.f.url(f"qc1/jobs/{self.job.id}/pass/"), {"comment": "dat chuan"}, format="json")
         self.assertEqual(passed.status_code, 200, passed.data)
-        self.assertEqual(passed.data["status"], JobStatus.PENDING_QC2)
+        self.assertEqual(passed.data["status"], JobStatus.QC1_PASSED)
         self.assertEqual([e["action"] for e in passed.data["timeline"]], ["qc1.start", "qc1.pass"])
 
     def test_qc1_reject_records_errors_increments_rework_and_escalates(self):
@@ -319,6 +305,11 @@ class Qc1WorkflowTests(TestCase):
         self.assertEqual(self.ann1.post(self.f.url(f"annotator/jobs/{job.id}/submit/"), {}, format="json").status_code, 200)
         self.assertEqual(self.qc1.post(self.f.url(f"qc1/jobs/{job.id}/pass/"), {}, format="json").status_code, 200)
 
+        # Đưa job setUp sang QC1_PASSED để batch đạt 100%, rồi PM xác nhận chuyển QC2
+        Job.objects.filter(pk=self.job.pk).update(status=JobStatus.QC1_PASSED)
+        confirm = pm.post(self.f.url(f"batches/{self.f.batch.id}/confirm-qc2/"), {}, format="json")
+        self.assertEqual(confirm.status_code, 200, confirm.data)
+
         # Sang QC2 audit
         audit = pm.post(self.f.url("audits/"), {"batch": self.f.batch.id, "sampling_rate": 100, "auditors": [self.f.qc2.id]}, format="json")
         self.assertEqual(audit.status_code, 201, audit.data)
@@ -327,6 +318,75 @@ class Qc1WorkflowTests(TestCase):
 
         job.refresh_from_db()
         self.assertEqual(job.status, JobStatus.APPROVED)
+
+    def test_qc1_pool_strictly_scoped_to_own_team(self):
+        from projects.models import Batch
+        from teams.models import Team, TeamMember
+
+        team_a = Team.objects.create(project=self.f.project, name="Team A")
+        team_b = Team.objects.create(project=self.f.project, name="Team B")
+        TeamMember.objects.create(team=team_a, user=self.f.qc1)
+        batch_b = Batch.objects.create(dataset=self.f.dataset, name="Batch B", team=team_b)
+        foreign_job = Job.objects.create(
+            project=self.f.project,
+            batch=batch_b,
+            name="FOREIGN-1",
+            status=JobStatus.PENDING_QC1,
+            annotator=self.f.ann2,
+        )
+        # QC1 team A không thấy và không nhận được job pool của team B
+        pool_ids = [r["id"] for r in self.qc1.get(self.f.url("qc1/jobs/?scope=pool")).data["results"]]
+        self.assertNotIn(foreign_job.id, pool_ids)
+        self.assertEqual(self.qc1.post(self.f.url(f"qc1/jobs/{foreign_job.id}/start/"), {}, format="json").status_code, 403)
+
+    def test_stratified_and_random_audit_batch_decisions(self):
+        from projects.models import Batch
+
+        batch_r = Batch.objects.create(dataset=self.f.dataset, name="Batch Random")
+        r_jobs = [Job.objects.create(project=self.f.project, batch=batch_r, name=f"R-{i}", status=JobStatus.PENDING_QC2, annotator=self.f.ann1) for i in range(4)]
+        pm = self.f.client(self.f.pm)
+        qc2 = self.f.client(self.f.qc2)
+
+        # Random reject batch requires reason & returns all jobs in batch
+        a_rand = pm.post(self.f.url("audits/"), {"batch": batch_r.id, "method": "random", "sampling_rate": 50, "auditors": [self.f.qc2.id]}, format="json")
+        self.assertEqual(a_rand.status_code, 201, a_rand.data)
+        for s in Audit.objects.get(pk=a_rand.data["id"]).samples.all():
+            qc2.post(self.f.url(f"audit-samples/{s.id}/pass/"), {}, format="json")
+        self.assertEqual(pm.post(self.f.url(f"audits/{a_rand.data['id']}/complete/"), {"decision": "reject"}, format="json").status_code, 400)
+        done_r = pm.post(
+            self.f.url(f"audits/{a_rand.data['id']}/complete/"),
+            {"decision": "reject", "reason": "Lỗi hàng loạt"},
+            format="json",
+        )
+        self.assertEqual(done_r.status_code, 200, done_r.data)
+        self.assertEqual(done_r.data["decision"], "reject")
+        self.assertEqual(set(Job.objects.filter(pk__in=[j.pk for j in r_jobs]).values_list("status", flat=True)), {JobStatus.REWORK})
+
+        # Stratified partial reject: reject ann1 stratum, accept ann2 stratum
+        batch_s = Batch.objects.create(dataset=self.f.dataset, name="Batch Stratified")
+        s_a1 = [Job.objects.create(project=self.f.project, batch=batch_s, name=f"S1-{i}", status=JobStatus.PENDING_QC2, annotator=self.f.ann1) for i in range(2)]
+        s_a2 = [Job.objects.create(project=self.f.project, batch=batch_s, name=f"S2-{i}", status=JobStatus.PENDING_QC2, annotator=self.f.ann2) for i in range(2)]
+        a_str = pm.post(
+            self.f.url("audits/"),
+            {"batch": batch_s.id, "method": "stratified", "stratify_by": "annotator", "sampling_rate": 50, "auditors": [self.f.qc2.id]},
+            format="json",
+        )
+        self.assertEqual(a_str.status_code, 201, a_str.data)
+        for s in Audit.objects.get(pk=a_str.data["id"]).samples.all():
+            qc2.post(self.f.url(f"audit-samples/{s.id}/pass/"), {}, format="json")
+        done_s = pm.post(
+            self.f.url(f"audits/{a_str.data['id']}/complete/"),
+            {
+                "decision": "partial_reject",
+                "reason": "Tầng ann1 lỗi hướng cuboid",
+                "stratum_decisions": {self.f.ann1.username: "reject", self.f.ann2.username: "accept"},
+            },
+            format="json",
+        )
+        self.assertEqual(done_s.status_code, 200, done_s.data)
+        self.assertEqual(done_s.data["decision"], "partial_reject")
+        self.assertEqual(set(Job.objects.filter(pk__in=[j.pk for j in s_a1]).values_list("status", flat=True)), {JobStatus.REWORK})
+        self.assertEqual(set(Job.objects.filter(pk__in=[j.pk for j in s_a2]).values_list("status", flat=True)), {JobStatus.APPROVED})
 
     def test_qc1_reject_rolls_back_atomically_on_failure(self):
         from unittest.mock import patch

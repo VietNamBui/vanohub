@@ -20,7 +20,7 @@ export default function ProjectListPage() {
       {isLoading && <StateView kind="loading" />}
       {error != null && <StateView kind="error" description={getErrorMessage(error)} action={{ label: 'Thử lại', onClick: retry }} />}
       {projects?.length === 0 && (
-        <StateView kind="empty" title="Bạn chưa được phân vào dự án nào" description="Liên hệ Director để được giao dự án." />
+        <StateView kind="empty" title="Bạn chưa được phân vào dự án nào" description="Liên hệ Project Manager để được giao dự án." />
       )}
       <Row gutter={[16, 16]}>
         {projects?.map((project) => (

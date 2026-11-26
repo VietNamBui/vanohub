@@ -54,6 +54,8 @@ export default function DeliveryPage() {
           locale={{ emptyText: 'Chưa bàn giao lần nào' }}
           columns={[
             { title: 'Batch', render: (_, d) => `${d.dataset_name} / ${d.batch_name}` },
+            { title: 'Người nhận', dataIndex: 'recipient' },
+            { title: 'Đầu ra', dataIndex: 'output_path', ellipsis: true },
             { title: 'Số job', dataIndex: 'job_count', align: 'right' },
             { title: 'Người bàn giao', render: (_, d) => <UserName user={d.delivered_by} /> },
             { title: 'Thời gian', dataIndex: 'delivered_at', render: formatDateTime },
@@ -66,14 +68,16 @@ export default function DeliveryPage() {
 
       <Modal open={delivering !== null} title={`Bàn giao ${delivering?.batch_name}`} okText="Bàn giao" confirmLoading={pending}
         onCancel={() => setDelivering(null)} onOk={() => form.submit()} destroyOnHidden>
-        <Form form={form} layout="vertical" preserve={false} onFinish={async (v) => {
-          if (delivering && (await run(() => createDelivery(projectId, { batch: delivering.batch, note: v.note }), 'Đã bàn giao'))) {
+        <Form form={form} layout="vertical" preserve={false} onFinish={async (v: { recipient: string; output_path: string; note?: string }) => {
+          if (delivering && (await run(() => createDelivery(projectId, { batch: delivering.batch, recipient: v.recipient, output_path: v.output_path, note: v.note }), 'Đã bàn giao'))) {
             setDelivering(null)
             reload()
           }
         }}>
           <Space orientation="vertical" style={{ width: '100%' }}>
             <span>{delivering?.job_count} job sẽ chuyển sang trạng thái Đã bàn giao và batch bị khoá.</span>
+            <Form.Item name="recipient" label="Người nhận" rules={[{ required: true, message: 'Vui lòng nhập người nhận bàn giao.' }]}><Input placeholder="Tên khách hàng / người nhận" /></Form.Item>
+            <Form.Item name="output_path" label="Đường dẫn đầu ra" rules={[{ required: true, message: 'Vui lòng nhập đường dẫn đầu ra.' }]}><Input placeholder="VD: s3://bucket/path hoặc link bàn giao" /></Form.Item>
             <Form.Item name="note" label="Ghi chú"><Input.TextArea rows={3} /></Form.Item>
           </Space>
         </Form>

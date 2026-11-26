@@ -11,6 +11,6 @@ class TeamMemberInline(admin.TabularInline):
 
 @admin.register(Team)
 class TeamAdmin(admin.ModelAdmin):
-    list_display = ["name", "project", "leader"]
+    list_display = ["name", "project"]
     list_filter = ["project"]
     inlines = [TeamMemberInline]

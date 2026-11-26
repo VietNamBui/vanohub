@@ -14,7 +14,6 @@ import type { AnnotatorRequestStatus } from '../types'
 type ReqFilter = 'all' | 'pending' | 'error_dispute' | 'data_issue' | 'resolved'
 
 const STATUS_BADGE_COLOR: Record<AnnotatorRequestStatus, 'warning' | 'success' | 'error' | 'gray'> = {
-  pending_tl: 'warning',
   pending_pm: 'warning',
   resolved: 'success',
   rejected: 'error',
@@ -27,10 +26,10 @@ export default function AnnotatorRequestsPage() {
 
   const req = useRequest(`annotator-requests:${projectId}`, () => listAnnotatorRequests(projectId))
   const allItems = req.data ?? []
-  const openCount = allItems.filter((r) => r.status === 'pending_tl' || r.status === 'pending_pm').length
+  const openCount = allItems.filter((r) => r.status === 'pending_pm').length
 
   const visible = allItems.filter((item) => {
-    if (filter === 'pending') return item.status === 'pending_tl' || item.status === 'pending_pm'
+    if (filter === 'pending') return item.status === 'pending_pm'
     if (filter === 'error_dispute') return item.request_type === 'error_dispute'
     if (filter === 'data_issue') return item.request_type === 'data_issue'
     if (filter === 'resolved') return item.status === 'resolved' || item.status === 'rejected'

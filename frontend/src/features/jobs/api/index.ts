@@ -23,6 +23,7 @@ export const listJobs = async (projectId: number, filters: JobFilters) =>
         ...filters,
         escalated: filters.escalated ? 1 : undefined,
         overdue: filters.overdue ? 1 : undefined,
+        due_soon: filters.due_soon ? 1 : undefined,
         unassigned: filters.unassigned ? 1 : undefined,
         locked: filters.locked ? 1 : undefined,
       }),
@@ -55,6 +56,8 @@ export const bulkAssign = async (projectId: number, ids: number[], data: AssignI
   (await apiClient.post<{ updated: number }>(p(projectId, 'jobs/bulk-assign/'), { ids, ...data })).data
 export const bulkDeadline = async (projectId: number, ids: number[], deadline: string | null, note = '') =>
   (await apiClient.post<{ updated: number }>(p(projectId, 'jobs/bulk-deadline/'), { ids, deadline, note })).data
+export const bulkMoveBatch = async (projectId: number, ids: number[], batch: number, note = '') =>
+  (await apiClient.post<{ updated: number; batch: number; batch_name: string }>(p(projectId, 'jobs/bulk-move-batch/'), { ids, batch, note })).data
 
 export const getJobQueue = async (projectId: number, batch?: number) =>
   (
@@ -116,6 +119,12 @@ export const createAnnotatorRequest = async (
     reason: string
   },
 ) => (await apiClient.post<AnnotatorRequest>(p(projectId, 'annotator/requests/'), payload)).data
+
+export const resolveAnnotatorRequest = async (
+  projectId: number,
+  requestId: number,
+  payload: { status: 'pending_pm' | 'resolved' | 'rejected'; progress_note?: string; resolution_note?: string },
+) => (await apiClient.post<AnnotatorRequest>(p(projectId, `annotator/requests/${requestId}/resolve/`), payload)).data
 
 export const quickSearchAnnotator = async (projectId: number, q: string) =>
   (await apiClient.get<AnnotatorQuickSearchResult>(p(projectId, 'annotator/search/'), { params: cleanParams({ q }) })).data

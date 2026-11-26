@@ -20,3 +20,10 @@ export async function changePassword(payload: { current_password: string; new_pa
   const { data } = await apiClient.post<{ detail: string }>('/auth/change-password/', payload)
   return data
 }
+
+export async function listOrgUsers(search?: string): Promise<{ id: number; username: string; full_name: string; email: string }[]> {
+  const { data } = await apiClient.get<{ id: number; username: string; full_name: string; email: string }[]>('/auth/users/', {
+    params: search ? { search } : undefined,
+  })
+  return data
+}

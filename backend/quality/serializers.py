@@ -37,11 +37,31 @@ class SampleJobSerializer(serializers.ModelSerializer):
     qc1_reviewer = UserBriefSerializer(read_only=True)
     batch_name = serializers.CharField(source="batch.name", read_only=True)
     cvat_url = serializers.CharField(read_only=True)
+    is_overdue = serializers.BooleanField(read_only=True)
+    due_state = serializers.CharField(read_only=True)
+    hours_remaining = serializers.FloatField(read_only=True)
+    max_rework_rounds = serializers.IntegerField(source="project.max_rework_rounds", read_only=True)
 
     class Meta:
         model = Job
-        fields = ["id", "name", "status", "batch_name", "annotator", "qc1_reviewer", "rework_round",
-                  "object_count", "frame_count", "cvat_job_id", "cvat_url"]
+        fields = [
+            "id",
+            "name",
+            "status",
+            "batch_name",
+            "annotator",
+            "qc1_reviewer",
+            "deadline",
+            "is_overdue",
+            "due_state",
+            "hours_remaining",
+            "rework_round",
+            "max_rework_rounds",
+            "object_count",
+            "frame_count",
+            "cvat_job_id",
+            "cvat_url",
+        ]
 
 
 class AuditSampleSerializer(serializers.ModelSerializer):
@@ -61,16 +81,81 @@ class AuditSerializer(serializers.ModelSerializer):
     batch_name = serializers.CharField(source="batch.name", read_only=True)
     dataset_name = serializers.CharField(source="batch.dataset.name", read_only=True)
     created_by = UserBriefSerializer(read_only=True)
+    decided_by = UserBriefSerializer(read_only=True)
+    decision_label = serializers.CharField(source="get_decision_display", read_only=True)
     sample_count = serializers.IntegerField(read_only=True)
     passed = serializers.IntegerField(read_only=True)
     rejected = serializers.IntegerField(read_only=True)
     pending = serializers.IntegerField(read_only=True)
+    strata_summary = serializers.SerializerMethodField()
 
     class Meta:
         model = Audit
-        fields = ["id", "batch", "batch_name", "dataset_name", "status", "method", "sampling_rate", "stratify_by",
-                  "seed", "eligible_count", "note", "created_by", "created_at", "completed_at",
-                  "sample_count", "passed", "rejected", "pending"]
+        fields = [
+            "id",
+            "batch",
+            "batch_name",
+            "dataset_name",
+            "status",
+            "decision",
+            "decision_label",
+            "decision_reason",
+            "decided_by",
+            "stratum_decisions",
+            "strata_summary",
+            "method",
+            "sampling_rate",
+            "stratify_by",
+            "seed",
+            "eligible_count",
+            "note",
+            "created_by",
+            "created_at",
+            "completed_at",
+            "sample_count",
+            "passed",
+            "rejected",
+            "pending",
+        ]
+
+    def get_strata_summary(self, audit):
+        if audit.method != SamplingMethod.STRATIFIED:
+            return []
+        eligible_by_stratum = {}
+        for _, stratum in (audit.eligible_job_strata or {}).items():
+            eligible_by_stratum[stratum] = eligible_by_stratum.get(stratum, 0) + 1
+        samples_by_stratum = {}
+        for s in audit.samples.all():
+            bucket = samples_by_stratum.setdefault(
+                s.stratum, {"sampled": 0, "passed": 0, "rejected": 0, "pending": 0}
+            )
+            bucket["sampled"] += 1
+            if s.result == AuditSample.Result.PASS:
+                bucket["passed"] += 1
+            elif s.result == AuditSample.Result.REJECT:
+                bucket["rejected"] += 1
+            else:
+                bucket["pending"] += 1
+        names = sorted(set(eligible_by_stratum) | set(samples_by_stratum))
+        return [
+            {
+                "stratum": name,
+                "eligible": eligible_by_stratum.get(name, samples_by_stratum.get(name, {}).get("sampled", 0)),
+                **samples_by_stratum.get(name, {"sampled": 0, "passed": 0, "rejected": 0, "pending": 0}),
+                "decision": (audit.stratum_decisions or {}).get(name, ""),
+            }
+            for name in names
+        ]
+
+
+class AuditCompleteSerializer(serializers.Serializer):
+    decision = serializers.ChoiceField(choices=Audit.Decision.choices, required=False, default=Audit.Decision.ACCEPT)
+    reason = serializers.CharField(required=False, allow_blank=True, default="")
+    stratum_decisions = serializers.DictField(
+        child=serializers.ChoiceField(choices=["accept", "reject"]),
+        required=False,
+        default=dict,
+    )
 
 
 class AuditInputSerializer(serializers.Serializer):

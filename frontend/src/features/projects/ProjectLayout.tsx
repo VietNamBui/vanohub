@@ -78,13 +78,13 @@ function GearIcon() {
  * Menu điều hướng theo vai trò.
  * Annotator thấy cấu trúc đúng thiết kế: Dashboard (Tổng quan cá nhân, Phân tích cá nhân),
  * Công việc (Job của tôi, Cần sửa, Yêu cầu của tôi), Hướng dẫn gán nhãn + Hỗ trợ / Cài đặt ở cuối.
- * Các vai trò khác (PM, Director, TL, QC1, QC2) giữ đầy đủ các nhóm quản lý của mình.
+ * Các vai trò khác (PM, QC1, QC2) giữ đầy đủ các nhóm quản lý của mình.
  */
 function buildMenu(can: (cap: Capability) => boolean): NavGroup[] {
   const allowed = (cap: Capability | Capability[]) => (Array.isArray(cap) ? cap.some(can) : can(cap))
   const isAnnotator = can('annotate_jobs')
   const hasManagementOrQc =
-    can('view_dashboard') || can('view_jobs') || can('lead_team') || can('perform_qc1') || can('perform_audit') || can('manage_team')
+    can('view_dashboard') || can('view_jobs') || can('perform_qc1') || can('perform_audit') || can('manage_team')
 
   const groups: NavGroup[] = []
 
@@ -95,7 +95,6 @@ function buildMenu(can: (cap: Capability) => boolean): NavGroup[] {
       { key: 'annotator/analytics', label: 'Phân tích cá nhân', cap: 'annotate_jobs' },
       { key: 'overview', label: 'Tổng quan dự án', cap: 'view_dashboard' },
       { key: 'team-ranking', label: 'Xếp hạng team', cap: 'view_dashboard' },
-      { key: 'leader/overview', label: 'Tổng quan team', cap: 'lead_team' },
       { key: 'qc1/dashboard', label: 'Tổng quan QC1', cap: ['perform_qc1', 'view_dashboard'] },
       { key: 'qc2/dashboard', label: 'Tổng quan QC2', cap: 'perform_audit' },
     ] satisfies NavItem[]
@@ -111,7 +110,6 @@ function buildMenu(can: (cap: Capability) => boolean): NavGroup[] {
       { key: 'annotator/jobs', label: 'Job của tôi', cap: 'annotate_jobs', matchPrefix: 'annotator/jobs' },
       { key: 'annotator/rework', label: 'Cần sửa', cap: 'annotate_jobs' },
       { key: 'annotator/requests', label: 'Yêu cầu của tôi', cap: 'annotate_jobs' },
-      { key: 'leader/jobs', label: 'Job của team', cap: 'lead_team' },
       { key: 'datasets', label: 'Datasets', cap: 'view_jobs' },
       { key: 'batches', label: 'Batches', cap: 'view_jobs' },
       { key: 'jobs', label: 'Jobs', cap: 'view_jobs' },
@@ -145,8 +143,6 @@ function buildMenu(can: (cap: Capability) => boolean): NavGroup[] {
       [
         { key: 'teams', label: 'Team & Members', cap: 'manage_team' },
         { key: 'workload', label: 'Tải công việc', cap: ['manage_team', 'view_dashboard'] },
-        { key: 'leader/members', label: 'Thành viên team', cap: 'lead_team' },
-        { key: 'leader/workload', label: 'Tải công việc team', cap: 'lead_team' },
       ] satisfies NavItem[]
     ).filter((i) => allowed(i.cap))
     if (peopleItems.length > 0) {

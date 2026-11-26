@@ -22,8 +22,6 @@ class ProjectApiTests(TestCase):
         self.qc2_only = self._user("qc2", Role.QC2, self.project_a)
         self.annotator = self._user("ann", Role.ANNOTATOR, self.project_b)
         self.outsider = User.objects.create_user("outsider", password="pw")
-        self.director = User.objects.create_user("director", password="pw")
-        RoleAssignment.objects.create(user=self.director, role=Role.DIRECTOR)
 
     def _user(self, username, role, project):
         user = User.objects.create_user(username, password="pw")
@@ -57,12 +55,6 @@ class ProjectApiTests(TestCase):
     def test_project_outside_scope_returns_404(self):
         self.assertEqual(self._detail(self.pm, self.project_b).status_code, 404)
 
-    def test_director_sees_all_projects(self):
-        names = {p["name"] for p in self._list(self.director).data}
-        self.assertEqual(names, {"Project A", "Project B"})
-        # Director có quyền xem nhưng không có vai trò nào trong dự án.
-        self.assertEqual(self._detail(self.director, self.project_a).data["my_roles"], [])
-
     def test_detail_member_counts_include_implied_roles(self):
         response = self._detail(self.pm, self.project_a)
         self.assertEqual(response.status_code, 200)
@@ -71,12 +63,12 @@ class ProjectApiTests(TestCase):
         self.assertEqual(response.data["member_counts"], {Role.PROJECT_MANAGER: 1, Role.QC2: 2})
 
     def test_user_with_two_roles_is_counted_once(self):
-        RoleAssignment.objects.create(user=self.pm, role=Role.TEAM_LEADER, project=self.project_a)
+        RoleAssignment.objects.create(user=self.pm, role=Role.QC1, project=self.project_a)
         response = self._detail(self.pm, self.project_a)
         self.assertEqual(response.data["member_total"], 2)
         self.assertEqual(
             response.data["my_roles"],
-            sorted([Role.PROJECT_MANAGER, Role.QC2, Role.TEAM_LEADER, Role.QC1]),
+            sorted([Role.PROJECT_MANAGER, Role.QC2, Role.QC1]),
         )
 
 
@@ -110,13 +102,19 @@ class DataManagementTests(TestCase):
         self.assertEqual(qc2.patch(self.f.url("settings/"), {"sampling_rate": 20}, format="json").status_code, 403)
         self.assertEqual(self.pm.patch(self.f.url("settings/"), {"sampling_rate": 20}, format="json").status_code, 200)
 
-    def test_delivery_requires_all_jobs_approved(self):
+    def test_delivery_requires_all_jobs_approved_and_recipient_output_path(self):
         job = self.f.job(status=JobStatus.PENDING_QC2)
-        refused = self.pm.post(self.f.url("deliveries/"), {"batch": self.f.batch.id}, format="json")
+        payload = {"batch": self.f.batch.id, "recipient": "Client A", "output_path": "s3://bucket/batch-1"}
+        refused = self.pm.post(self.f.url("deliveries/"), payload, format="json")
         self.assertEqual(refused.status_code, 400)
         Job.objects.filter(pk=job.pk).update(status=JobStatus.APPROVED)
-        ok = self.pm.post(self.f.url("deliveries/"), {"batch": self.f.batch.id}, format="json")
+        # Thiếu người nhận / đường dẫn đầu ra → 400
+        missing = self.pm.post(self.f.url("deliveries/"), {"batch": self.f.batch.id}, format="json")
+        self.assertEqual(missing.status_code, 400)
+        ok = self.pm.post(self.f.url("deliveries/"), payload, format="json")
         self.assertEqual(ok.status_code, 201, ok.data)
+        self.assertEqual(ok.data["recipient"], "Client A")
+        self.assertEqual(ok.data["output_path"], "s3://bucket/batch-1")
         job.refresh_from_db()
         self.assertEqual(job.status, JobStatus.DELIVERED)
 
@@ -164,7 +162,19 @@ class CvatSyncTests(TestCase):
         self.assertEqual(result["created"], 2)
         j101 = Job.objects.get(cvat_job_id=101)
         self.assertEqual((j101.status, j101.annotator, j101.frame_count), (JobStatus.ANNOTATING, self.f.ann1, 10))
-        self.assertEqual(Job.objects.get(cvat_job_id=102).status, JobStatus.PENDING_QC2)
+        self.assertEqual(Job.objects.get(cvat_job_id=102).status, JobStatus.QC1_PASSED)
+        self.f.batch.refresh_from_db()
+        self.assertEqual(self.f.batch.last_sync_status, "ok")
+
+    def test_import_prefers_cvat_username_mapping(self):
+        self.f.ann2.cvat_username = "cvat_special_ann"
+        self.f.ann2.save(update_fields=["cvat_username"])
+        client = FakeCvat([
+            {"id": 150, "stage": "annotation", "state": "new", "start_frame": 0, "stop_frame": 4,
+             "assignee": {"username": "cvat_special_ann"}},
+        ])
+        sync.import_task_jobs(self.f.batch, 9, self.f.pm, client=client)
+        self.assertEqual(Job.objects.get(cvat_job_id=150).annotator, self.f.ann2)
 
     def test_sync_never_overrides_jobs_already_in_qc2(self):
         job = self.f.job(status=JobStatus.APPROVED, cvat_job_id=201)
@@ -244,3 +254,70 @@ class BatchTeamTests(TestCase):
         self.team.delete()
         self.f.batch.refresh_from_db()
         self.assertIsNone(self.f.batch.team)
+
+
+class ProjectCreateAndBatchConfirmQc2Tests(TestCase):
+    def setUp(self):
+        from teams.models import Team
+
+        self.f = ProjectFixture()
+        self.team = Team.objects.create(project=self.f.project, name="Team Alpha")
+        self.f.batch.team = self.team
+        self.f.batch.save()
+        self.pm_client = self.f.client(self.f.pm)
+        self.qc1_client = self.f.client(self.f.qc1)
+        self.ann_client = self.f.client(self.f.ann1)
+
+    def test_pm_creates_project_and_assigns_pms_while_non_pm_forbidden(self):
+        created = self.pm_client.post(
+            reverse("project-list"),
+            {
+                "name": "Project C",
+                "description": "Created by PM",
+                "pm_ids": [self.f.pm.id],
+                "escalation_policy": "warn_only",
+            },
+            format="json",
+        )
+        self.assertEqual(created.status_code, 201, created.data)
+        self.assertEqual([u["id"] for u in created.data["project_managers"]], [self.f.pm.id])
+        self.assertEqual(created.data["escalation_policy"], "warn_only")
+
+        # Non-PM không được tạo project
+        self.assertEqual(
+            self.ann_client.post(reverse("project-list"), {"name": "Illegal"}, format="json").status_code, 403
+        )
+        self.assertEqual(
+            self.qc1_client.post(reverse("project-list"), {"name": "Illegal"}, format="json").status_code, 403
+        )
+        # Non-PM trong dự án không được chỉnh sửa project
+        self.assertEqual(
+            self.ann_client.patch(
+                reverse("project-detail", args=[self.f.project.id]), {"name": "Nope"}, format="json"
+            ).status_code,
+            403,
+        )
+
+    def test_pm_confirms_batch_to_qc2_only_when_100_percent_passed(self):
+        from .models import UserNotification
+
+        j1 = self.f.job(status=JobStatus.QC1_PASSED, annotator=self.f.ann1)
+        j2 = self.f.job(status=JobStatus.PENDING_QC1, annotator=self.f.ann2)
+        # QC1 không có quyền confirm_qc2
+        self.assertEqual(
+            self.qc1_client.post(self.f.url(f"batches/{self.f.batch.id}/confirm-qc2/"), {}, format="json").status_code,
+            403,
+        )
+        # Còn j2 chưa đạt QC1 → từ chối
+        early = self.pm_client.post(self.f.url(f"batches/{self.f.batch.id}/confirm-qc2/"), {}, format="json")
+        self.assertEqual(early.status_code, 400)
+
+        Job.objects.filter(pk=j2.pk).update(status=JobStatus.QC1_PASSED)
+        ok = self.pm_client.post(self.f.url(f"batches/{self.f.batch.id}/confirm-qc2/"), {"note": "xong"}, format="json")
+        self.assertEqual(ok.status_code, 200, ok.data)
+        self.assertEqual(set(Job.objects.filter(pk__in=[j1.pk, j2.pk]).values_list("status", flat=True)), {JobStatus.PENDING_QC2})
+        self.assertTrue(
+            UserNotification.objects.filter(
+                recipient=self.f.qc2, category=UserNotification.Category.REVIEW_NEEDED
+            ).exists()
+        )

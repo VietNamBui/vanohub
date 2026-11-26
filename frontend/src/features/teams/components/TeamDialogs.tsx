@@ -52,19 +52,14 @@ export default function TeamDialogs({ state, ...props }: Props) {
 
 type DialogProps = Omit<Props, 'state'>
 
-const NO_LEADER = 0
-
 const memberItem = (m: Member): SelectItemType => ({ id: m.user.id, label: m.user.full_name, supportingText: m.user.username })
 
-function TeamFormDialog({ projectId, members, onClose, onDone, team }: DialogProps & { team?: Team }) {
+function TeamFormDialog({ projectId, onClose, onDone, team }: DialogProps & { team?: Team }) {
   const [name, setName] = useState(team?.name ?? '')
-  const [leader, setLeader] = useState<number>(team?.leader ?? NO_LEADER)
   const { run, pending } = useAction()
-  // Backend chỉ nhận leader có vai trò Team Leader trong dự án.
-  const leaders = members.filter((m) => m.roles.includes('team_leader'))
 
   async function submit() {
-    const data = { name: name.trim(), leader: leader === NO_LEADER ? null : leader }
+    const data = { name: name.trim() }
     const ok = team
       ? await run(() => updateTeam(projectId, team.id, data), 'Đã lưu team')
       : await run(() => createTeam(projectId, data), 'Đã tạo team')
@@ -74,15 +69,6 @@ function TeamFormDialog({ projectId, members, onClose, onDone, team }: DialogPro
   return (
     <FormDialog isOpen title={team ? 'Sửa team' : 'Tạo team'} onClose={onClose} onSubmit={submit} pending={pending}>
       <Input label="Tên team" isRequired autoFocus value={name} onChange={setName} placeholder="VD: Team Alpha" />
-      <Select
-        label="Team Leader"
-        hint="Chỉ hiện người có vai trò Team Leader trong dự án."
-        items={[{ id: NO_LEADER, label: 'Chưa có leader' }, ...leaders.map(memberItem)]}
-        selectedKey={leader}
-        onSelectionChange={(key) => setLeader(Number(key))}
-      >
-        {(item) => <Select.Item id={item.id} label={item.label} supportingText={item.supportingText} />}
-      </Select>
     </FormDialog>
   )
 }

@@ -6,6 +6,7 @@ export type JobStatus =
   | 'annotating'
   | 'pending_qc1'
   | 'qc1_reviewing'
+  | 'qc1_passed'
   | 'rework'
   | 'pending_qc2'
   | 'approved'
@@ -35,6 +36,7 @@ export interface Job {
   hours_remaining?: number | null
   rework_round: number
   max_rework_rounds: number
+  escalation_policy?: 'block' | 'warn_only'
   rework_scope?: ReworkScope
   rework_scope_label?: string
   is_escalated: boolean
@@ -76,12 +78,19 @@ export interface JobFilters {
   page_size?: number
   stage?: Stage | ''
   status?: string
-  dataset?: number
-  batch?: number
+  dataset?: number | string
+  batch?: number | string
   assignee?: number
+  annotator?: number
+  qc1_reviewer?: number
+  min_rework?: number
+  max_rework?: number
+  deadline_from?: string
+  deadline_to?: string
   search?: string
   escalated?: boolean
   overdue?: boolean
+  due_soon?: boolean
   unassigned?: boolean
   locked?: boolean
   ordering?: string
@@ -114,7 +123,7 @@ export interface AnnotatorMetric {
 }
 
 export type AnnotatorRequestType = 'error_dispute' | 'data_issue'
-export type AnnotatorRequestStatus = 'pending_tl' | 'pending_pm' | 'resolved' | 'rejected'
+export type AnnotatorRequestStatus = 'pending_pm' | 'resolved' | 'rejected'
 
 export interface AnnotatorRequest {
   id: number
@@ -192,7 +201,6 @@ export interface AnnotatorDashboard {
   }[]
   meta: {
     team_name: string | null
-    team_leader_name: string | null
     project_name: string
     last_cvat_sync_at: string | null
     wip_limit: number

@@ -15,9 +15,6 @@ class ExpandRolesTests(TestCase):
     def test_qc2_does_not_imply_pm(self):
         self.assertEqual(expand_roles([Role.QC2]), {Role.QC2})
 
-    def test_team_leader_implies_qc1(self):
-        self.assertEqual(expand_roles([Role.TEAM_LEADER]), {Role.TEAM_LEADER, Role.QC1})
-
 
 class RoleAssignmentConstraintTests(TestCase):
     def setUp(self):
@@ -28,19 +25,10 @@ class RoleAssignmentConstraintTests(TestCase):
         with self.assertRaises(IntegrityError):
             RoleAssignment.objects.create(user=self.user, role=Role.PROJECT_MANAGER, project=None)
 
-    def test_director_must_not_have_project(self):
-        with self.assertRaises(IntegrityError):
-            RoleAssignment.objects.create(user=self.user, role=Role.DIRECTOR, project=self.project)
-
     def test_same_role_same_project_is_rejected(self):
         RoleAssignment.objects.create(user=self.user, role=Role.QC2, project=self.project)
         with self.assertRaises(IntegrityError):
             RoleAssignment.objects.create(user=self.user, role=Role.QC2, project=self.project)
-
-    def test_director_cannot_be_assigned_twice(self):
-        RoleAssignment.objects.create(user=self.user, role=Role.DIRECTOR)
-        with self.assertRaises(IntegrityError):
-            RoleAssignment.objects.create(user=self.user, role=Role.DIRECTOR)
 
 
 class AuthApiTests(TestCase):
@@ -62,8 +50,16 @@ class AuthApiTests(TestCase):
         me = self.client.get(reverse("me"))
         self.assertEqual(me.status_code, 200)
         self.assertEqual(me.data["username"], "bob")
-        self.assertFalse(me.data["is_director"])
+        self.assertNotIn("is_director", me.data)
         self.assertEqual(me.data["role_assignments"][0]["role"], Role.PROJECT_MANAGER)
+
+    def test_users_list_requires_pm(self):
+        self.client.force_authenticate(self.user)
+        self.assertEqual(self.client.get(reverse("users_list")).status_code, 200)
+        ann = User.objects.create_user("ann", password="pw")
+        RoleAssignment.objects.create(user=ann, role=Role.ANNOTATOR, project=self.project)
+        self.client.force_authenticate(ann)
+        self.assertEqual(self.client.get(reverse("users_list")).status_code, 403)
 
     def test_wrong_password_is_rejected(self):
         response = self.client.post(

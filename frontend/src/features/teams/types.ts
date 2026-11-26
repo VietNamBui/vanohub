@@ -11,8 +11,6 @@ export interface TeamMember {
 export interface Team {
   id: number
   name: string
-  leader: number | null
-  leader_detail: UserBrief | null
   members: TeamMember[]
   created_at: string
 }

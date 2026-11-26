@@ -8,17 +8,18 @@ from django.utils import timezone
 from django.utils.dateparse import parse_date
 from rest_framework import mixins, status, viewsets
 from rest_framework.decorators import action
-from rest_framework.exceptions import NotFound, ValidationError
+from rest_framework.exceptions import NotFound, PermissionDenied, ValidationError
 from rest_framework.pagination import PageNumberPagination
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from accounts.models import Role, RoleAssignment, expand_roles
-from accounts.permissions import CAPABILITY_ROLES, DIRECTOR_CAPABILITIES, Cap, ProjectScopedViewMixin
+from accounts.permissions import CAPABILITY_ROLES, Cap, ProjectScopedViewMixin
 from accounts.serializers import UserBriefSerializer
 from cvat_integration.client import CvatError
 from cvat_integration.sync import import_task_jobs, sync_batch
 from jobs.models import ACTIVE_ANNOTATOR_STATUSES, OPEN_STATUSES, Job, JobStatus
+from quality.models import Audit, AuditSample
 from teams.models import TeamMember
 
 from .models import (
@@ -32,6 +33,7 @@ from .models import (
     Project,
     UserNotification,
 )
+from .notifications import notify_review_needed, project_users_with_roles
 from .serializers import (
     ActivityLogSerializer,
     AnnouncementSerializer,
@@ -42,6 +44,7 @@ from .serializers import (
     ProjectDetailSerializer,
     ProjectListSerializer,
     ProjectSettingsSerializer,
+    ProjectWriteSerializer,
 )
 
 
@@ -51,23 +54,118 @@ class StandardPagination(PageNumberPagination):
     max_page_size = 500
 
 
-class ProjectViewSet(viewsets.ReadOnlyModelViewSet):
-    """GET /api/projects/ và /api/projects/{id}/ — chỉ dự án trong phạm vi (Director thấy tất cả)."""
+class ProjectViewSet(
+    mixins.ListModelMixin,
+    mixins.RetrieveModelMixin,
+    mixins.CreateModelMixin,
+    mixins.UpdateModelMixin,
+    viewsets.GenericViewSet,
+):
+    """/api/projects/ — Người dùng xem dự án của mình; PM tạo/sửa dự án & gán PM."""
 
-    def get_queryset(self):
+    def _base_queryset(self):
         user = self.request.user
-        queryset = Project.objects.all()
-        if not user.is_director():
-            queryset = queryset.filter(role_assignments__user=user).distinct()
-        queryset = queryset.prefetch_related(
-            Prefetch("role_assignments", queryset=RoleAssignment.objects.filter(user=user), to_attr="my_assignments")
+        now = timezone.now()
+        done = [JobStatus.APPROVED, JobStatus.DELIVERED]
+        queryset = Project.objects.annotate(
+            job_count=Count("jobs", distinct=True),
+            done_count=Count("jobs", filter=Q(jobs__status__in=done), distinct=True),
+            overdue_count=Count(
+                "jobs", filter=Q(jobs__deadline__lt=now, jobs__status__in=OPEN_STATUSES), distinct=True
+            ),
+            escalated_count=Count("jobs", filter=Q(jobs__is_escalated=True), distinct=True),
+        ).prefetch_related(
+            Prefetch("role_assignments", queryset=RoleAssignment.objects.filter(user=user), to_attr="my_assignments"),
+            Prefetch(
+                "role_assignments",
+                queryset=RoleAssignment.objects.filter(role=Role.PROJECT_MANAGER).select_related("user"),
+                to_attr="pm_assignments",
+            ),
         )
-        if self.action == "retrieve":
+        if self.action in {"retrieve", "create", "update", "partial_update"}:
             queryset = queryset.prefetch_related("role_assignments")
         return queryset
 
+    def get_queryset(self):
+        return self._base_queryset().filter(role_assignments__user=self.request.user).distinct()
+
     def get_serializer_class(self):
+        if self.action in {"create", "update", "partial_update"}:
+            return ProjectWriteSerializer
         return ProjectDetailSerializer if self.action == "retrieve" else ProjectListSerializer
+
+    def _require_any_pm(self):
+        if not self.request.user.is_pm():
+            raise PermissionDenied("Chỉ Project Manager mới được tạo dự án.")
+
+    def _require_project_pm(self, project):
+        user = self.request.user
+        if not user.is_superuser and not RoleAssignment.objects.filter(
+            project=project, user=user, role=Role.PROJECT_MANAGER
+        ).exists():
+            raise PermissionDenied("Chỉ Project Manager của dự án mới được chỉnh sửa thông tin dự án và gán PM.")
+
+    def _sync_pms(self, project, pm_ids, actor):
+        current_ids = set(
+            RoleAssignment.objects.filter(project=project, role=Role.PROJECT_MANAGER).values_list("user_id", flat=True)
+        )
+        target_ids = set(pm_ids)
+        to_remove = current_ids - target_ids
+        to_add = target_ids - current_ids
+        if to_remove:
+            RoleAssignment.objects.filter(
+                project=project, role=Role.PROJECT_MANAGER, user_id__in=to_remove
+            ).delete()
+        for uid in to_add:
+            RoleAssignment.objects.create(
+                project=project, user_id=uid, role=Role.PROJECT_MANAGER, granted_by=actor
+            )
+
+    def create(self, request, *args, **kwargs):
+        self._require_any_pm()
+        serializer = ProjectWriteSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        pm_ids = serializer.validated_data.pop("pm_ids", []) or [request.user.id]
+        with transaction.atomic():
+            project = serializer.save(created_by=request.user)
+            self._sync_pms(project, pm_ids, request.user)
+            ActivityLog.record(
+                project=project,
+                actor=request.user,
+                action="project.create",
+                target=project,
+                after={"name": project.name, "pm_ids": pm_ids},
+            )
+        fresh = self._base_queryset().get(pk=project.pk)
+        return Response(
+            ProjectDetailSerializer(fresh, context=self.get_serializer_context()).data,
+            status=status.HTTP_201_CREATED,
+        )
+
+    def update(self, request, *args, **kwargs):
+        partial = kwargs.pop("partial", False)
+        project = self.get_object()
+        self._require_project_pm(project)
+        serializer = ProjectWriteSerializer(project, data=request.data, partial=partial)
+        serializer.is_valid(raise_exception=True)
+        pm_ids = serializer.validated_data.pop("pm_ids", None)
+        with transaction.atomic():
+            project = serializer.save()
+            if pm_ids is not None:
+                self._sync_pms(project, pm_ids, request.user)
+            ActivityLog.record(
+                project=project,
+                actor=request.user,
+                action="project.update",
+                target=project,
+                after={"name": project.name, **({"pm_ids": pm_ids} if pm_ids is not None else {})},
+            )
+        fresh = self._base_queryset().get(pk=project.pk)
+        return Response(ProjectDetailSerializer(fresh, context=self.get_serializer_context()).data)
+
+    def partial_update(self, request, *args, **kwargs):
+        kwargs["partial"] = True
+        return self.update(request, *args, **kwargs)
 
 
 class ProjectSettingsView(ProjectScopedViewMixin, APIView):
@@ -123,9 +221,8 @@ class ProjectMembersView(ProjectScopedViewMixin, APIView):
         return Response(data)
 
 
-# ĐỀ XUẤT (chưa chốt): PM gán thêm được các vai trò trong dự án, trừ PM và Director
-# (hai vai trò này do Director quản lý). Vai trò ngầm định (PM → QC2, TL → QC1) đã có thì không gán lại.
-GRANTABLE_ROLES = [Role.QC2, Role.TEAM_LEADER, Role.QC1, Role.ANNOTATOR]
+# PM gán thêm được các vai trò trong dự án (trừ PM). Vai trò ngầm định (PM → QC2) đã có thì không gán lại.
+GRANTABLE_ROLES = [Role.QC2, Role.QC1, Role.ANNOTATOR]
 
 
 class ProjectMemberRolesView(ProjectScopedViewMixin, APIView):
@@ -157,8 +254,7 @@ class PermissionMatrixView(ProjectScopedViewMixin, APIView):
         self.get_project()
         return Response({
             "capabilities": {cap: sorted(roles) for cap, roles in CAPABILITY_ROLES.items()},
-            "director_capabilities": sorted(DIRECTOR_CAPABILITIES),
-            "implied_roles": {Role.PROJECT_MANAGER: [Role.QC2], Role.TEAM_LEADER: [Role.QC1]},
+            "implied_roles": {Role.PROJECT_MANAGER: [Role.QC2]},
         })
 
 
@@ -212,19 +308,35 @@ class DatasetViewSet(ProjectScopedViewMixin, mixins.ListModelMixin, mixins.Retri
         return Response(self.get_serializer(self.get_object()).data)
 
 
+BLOCKING_QC2_STATUSES = [
+    JobStatus.PENDING_ANNOTATION,
+    JobStatus.ANNOTATING,
+    JobStatus.REWORK,
+    JobStatus.PENDING_QC1,
+    JobStatus.QC1_REVIEWING,
+]
+
+
 class BatchViewSet(ProjectScopedViewMixin, mixins.ListModelMixin, mixins.RetrieveModelMixin,
                    mixins.CreateModelMixin, mixins.UpdateModelMixin, viewsets.GenericViewSet):
     serializer_class = BatchSerializer
-    required_capabilities = {"list": [Cap.VIEW_JOBS, Cap.MANAGE_AUDITS], "retrieve": Cap.VIEW_JOBS, "*": Cap.MANAGE_DATA}
+    required_capabilities = {
+        "list": [Cap.VIEW_JOBS, Cap.MANAGE_AUDITS],
+        "retrieve": Cap.VIEW_JOBS,
+        "confirm_qc2": Cap.MANAGE_DATA,
+        "*": Cap.MANAGE_DATA,
+    }
 
     def get_queryset(self):
         done = [JobStatus.APPROVED, JobStatus.DELIVERED]
         queryset = (
             Batch.objects.filter(dataset__project=self.project)
-            .select_related("dataset", "team")
+            .select_related("dataset", "team", "qc2_confirmed_by")
             .annotate(
                 job_count=Count("jobs"),
                 done_count=Count("jobs", filter=Q(jobs__status__in=done)),
+                qc1_passed_count=Count("jobs", filter=Q(jobs__status=JobStatus.QC1_PASSED)),
+                blocking_qc2_count=Count("jobs", filter=Q(jobs__status__in=BLOCKING_QC2_STATUSES)),
                 pending_qc2_count=Count("jobs", filter=Q(jobs__status=JobStatus.PENDING_QC2)),
                 escalated_count=Count("jobs", filter=Q(jobs__is_escalated=True)),
             )
@@ -265,6 +377,54 @@ class BatchViewSet(ProjectScopedViewMixin, mixins.ListModelMixin, mixins.Retriev
         _set_status(self.get_object(), DataStatus.ACTIVE, project=self.project, actor=request.user, action="batch.unlock")
         return Response(self.get_serializer(self.get_object()).data)
 
+    @action(detail=True, methods=["post"], url_path="confirm-qc2")
+    def confirm_qc2(self, request, project_id, pk=None):
+        """PM xác nhận chuyển cả batch sang QC2 khi 100% job trong batch đã đạt QC1."""
+        batch = self.get_object()
+        if batch.status != DataStatus.ACTIVE:
+            raise ValidationError("Batch đã khoá hoặc đã bàn giao.")
+        if batch.dataset.status != DataStatus.ACTIVE:
+            raise ValidationError("Dataset của batch đã khoá hoặc đã bàn giao.")
+
+        with transaction.atomic():
+            jobs_qs = Job.objects.select_for_update().filter(batch=batch)
+            if not jobs_qs.exists():
+                raise ValidationError("Batch chưa có job nào.")
+            blocking = jobs_qs.filter(status__in=BLOCKING_QC2_STATUSES).count()
+            if blocking > 0:
+                raise ValidationError(
+                    f"Còn {blocking} job chưa đạt QC1 — chỉ xác nhận chuyển QC2 khi 100% job trong batch đã đạt QC1."
+                )
+            ready_qs = jobs_qs.filter(status=JobStatus.QC1_PASSED)
+            moved_count = ready_qs.count()
+            if moved_count == 0:
+                raise ValidationError("Batch không có job nào ở trạng thái Đạt QC1 cần chuyển sang QC2.")
+
+            ready_qs.update(status=JobStatus.PENDING_QC2, updated_at=timezone.now())
+            batch.qc2_confirmed_by = request.user
+            batch.qc2_confirmed_at = timezone.now()
+            batch.save(update_fields=["qc2_confirmed_by", "qc2_confirmed_at"])
+
+            note = (request.data.get("note") or "").strip()
+            ActivityLog.record(
+                project=self.project,
+                actor=request.user,
+                action="batch.confirm_qc2",
+                target=batch,
+                after={"moved_to_pending_qc2": moved_count},
+                note=note,
+            )
+            recipients = project_users_with_roles(self.project, Role.PROJECT_MANAGER, Role.QC2)
+            notify_review_needed(
+                self.project,
+                recipients,
+                title=f"Batch {batch.name} đã được xác nhận chuyển QC2",
+                body=f"{moved_count} job đã sẵn sàng tạo đợt audit QC2.",
+                action_url=f"/projects/{self.project.id}/audits",
+                actor=request.user,
+            )
+        return Response(self.get_serializer(self.get_queryset().get(pk=batch.pk)).data)
+
     @action(detail=True, methods=["post"], url_path="import-cvat")
     def import_cvat(self, request, project_id, pk=None):
         """Nhập các job của một CVAT Task vào batch này."""
@@ -277,6 +437,10 @@ class BatchViewSet(ProjectScopedViewMixin, mixins.ListModelMixin, mixins.Retriev
         try:
             result = import_task_jobs(batch, int(task_id), request.user)
         except CvatError as exc:
+            batch.last_sync_status = Batch.SyncStatus.ERROR
+            batch.last_sync_error = str(exc)
+            batch.last_synced_at = timezone.now()
+            batch.save(update_fields=["last_sync_status", "last_sync_error", "last_synced_at"])
             return Response({"detail": str(exc)}, status=status.HTTP_502_BAD_GATEWAY)
         return Response(result)
 
@@ -288,16 +452,24 @@ class BatchViewSet(ProjectScopedViewMixin, mixins.ListModelMixin, mixins.Retriev
         try:
             result = sync_batch(batch, request.user, count_objects=bool(request.data.get("count_objects")))
         except CvatError as exc:
+            batch.last_sync_status = Batch.SyncStatus.ERROR
+            batch.last_sync_error = str(exc)
+            batch.last_synced_at = timezone.now()
+            batch.save(update_fields=["last_sync_status", "last_sync_error", "last_synced_at"])
             return Response({"detail": str(exc)}, status=status.HTTP_502_BAD_GATEWAY)
         return Response(result)
 
 
 class DeliveryViewSet(ProjectScopedViewMixin, mixins.ListModelMixin, mixins.CreateModelMixin,
                       mixins.UpdateModelMixin, viewsets.GenericViewSet):
-    """Bàn giao theo batch. Điều kiện (ĐỀ XUẤT, L4 bỏ qua): mọi job của batch đã ở trạng thái Đã duyệt."""
+    """Bàn giao theo batch: mọi job của batch ở trạng thái Đã duyệt, ghi người nhận & đường dẫn đầu ra."""
 
     serializer_class = DeliverySerializer
-    required_capabilities = {"list": [Cap.MANAGE_DELIVERY, Cap.VIEW_DASHBOARD], "*": Cap.MANAGE_DELIVERY}
+    required_capabilities = {
+        "list": [Cap.MANAGE_DELIVERY, Cap.VIEW_DASHBOARD],
+        "candidates": [Cap.MANAGE_DELIVERY, Cap.VIEW_DASHBOARD],
+        "*": Cap.MANAGE_DELIVERY,
+    }
 
     def get_queryset(self):
         return Delivery.objects.filter(project=self.project).select_related("batch__dataset", "delivered_by")
@@ -338,12 +510,21 @@ class DeliveryViewSet(ProjectScopedViewMixin, mixins.ListModelMixin, mixins.Crea
             jobs.update(status=JobStatus.DELIVERED)
             batch.status = DataStatus.DELIVERED
             batch.save(update_fields=["status"])
-            ActivityLog.record(project=self.project, actor=self.request.user, action="batch.deliver", target=batch,
-                               after={"delivery": delivery.id, "jobs": jobs.count()})
+            ActivityLog.record(
+                project=self.project,
+                actor=self.request.user,
+                action="batch.deliver",
+                target=batch,
+                after={
+                    "delivery": delivery.id,
+                    "jobs": jobs.count(),
+                    "recipient": delivery.recipient,
+                    "output_path": delivery.output_path,
+                },
+            )
 
     def perform_update(self, serializer):
-        # Sau khi bàn giao chỉ cho sửa ghi chú và phản hồi khách hàng.
-        allowed = {"note", "client_feedback"}
+        allowed = {"recipient", "output_path", "note", "client_feedback"}
         extra = set(serializer.validated_data) - allowed
         if extra:
             raise ValidationError(f"Không được sửa: {', '.join(sorted(extra))}")
@@ -449,39 +630,79 @@ class ProjectNotificationsView(ProjectScopedViewMixin, APIView):
                 "created_at": n.created_at.isoformat(),
             })
 
-        # 2. Cảnh báo job sắp / quá hạn đang giữ (TB03 + DB06)
-        if user.notify_deadline and self.has_cap(Cap.ANNOTATE_JOBS):
-            urgent_jobs = (
-                Job.objects.filter(
+        # 2. Cảnh báo job sắp / quá hạn (<= 24h) theo phạm vi từng vai trò
+        if user.notify_deadline:
+            cutoff = now + timedelta(hours=24)
+            seen_deadline_jobs = set(notified_deadline_job_ids)
+
+            def _append_deadline(job, action_url, suffix):
+                if job.id in seen_deadline_jobs:
+                    return
+                seen_deadline_jobs.add(job.id)
+                overdue = job.deadline < now
+                hours = max(1, round(abs((job.deadline - now).total_seconds()) / 3600))
+                items.append({
+                    "id": f"due-{self.project.id}-{job.id}",
+                    "notification_id": None,
+                    "source": "deadline",
+                    "category": UserNotification.Category.DEADLINE,
+                    "title": f"{job.name} đã quá hạn" if overdue else f"{job.name} sắp đến hạn",
+                    "body": (
+                        f"Quá hạn {hours} giờ — {suffix}"
+                        if overdue
+                        else f"Còn {hours} giờ — {suffix}"
+                    ),
+                    "job_id": job.id,
+                    "action_url": action_url,
+                    "is_read": False,
+                    "is_pinned_pending": True,
+                    "created_at": job.updated_at.isoformat(),
+                })
+
+            if self.has_cap(Cap.ANNOTATE_JOBS):
+                for j in Job.objects.filter(
                     project=self.project,
                     annotator=user,
                     status__in=ACTIVE_ANNOTATOR_STATUSES,
                     deadline__isnull=False,
-                    deadline__lte=now + timedelta(hours=24),
+                    deadline__lte=cutoff,
+                ).order_by("deadline", "id")[:8]:
+                    _append_deadline(j, f"/projects/{self.project.id}/annotator/jobs/{j.id}", "ưu tiên xử lý ngay.")
+
+            if self.has_cap(Cap.PERFORM_QC1):
+                for j in Job.objects.filter(
+                    project=self.project,
+                    qc1_reviewer=user,
+                    status__in=[JobStatus.PENDING_QC1, JobStatus.QC1_REVIEWING],
+                    deadline__isnull=False,
+                    deadline__lte=cutoff,
+                ).order_by("deadline", "id")[:8]:
+                    _append_deadline(j, f"/projects/{self.project.id}/qc1/work", "cần kiểm tra QC1 trước hạn.")
+
+            if self.has_cap(Cap.PERFORM_AUDIT):
+                qc2_job_ids = list(
+                    AuditSample.objects.filter(
+                        audit__project=self.project,
+                        audit__status=Audit.Status.IN_PROGRESS,
+                        auditor=user,
+                        result=AuditSample.Result.PENDING,
+                    ).values_list("job_id", flat=True)
                 )
-                .exclude(pk__in=notified_deadline_job_ids)
-                .order_by("deadline", "id")[:10]
-            )
-            for j in urgent_jobs:
-                overdue = j.deadline < now
-                hours = max(1, round(abs((j.deadline - now).total_seconds()) / 3600))
-                items.append({
-                    "id": f"due-{j.id}",
-                    "notification_id": None,
-                    "source": "deadline",
-                    "category": UserNotification.Category.DEADLINE,
-                    "title": f"{j.name} đã quá hạn" if overdue else f"{j.name} sắp đến hạn",
-                    "body": (
-                        f"Quá hạn {hours} giờ — ưu tiên xử lý ngay (DB06)."
-                        if overdue
-                        else f"Còn {hours} giờ — ưu tiên làm trước (DB06)."
-                    ),
-                    "job_id": j.id,
-                    "action_url": f"/projects/{self.project.id}/annotator/jobs/{j.id}",
-                    "is_read": False,
-                    "is_pinned_pending": True,
-                    "created_at": j.updated_at.isoformat(),
-                })
+                if qc2_job_ids:
+                    for j in Job.objects.filter(
+                        pk__in=qc2_job_ids, deadline__isnull=False, deadline__lte=cutoff
+                    ).order_by("deadline", "id")[:8]:
+                        _append_deadline(j, f"/projects/{self.project.id}/qc2/work", "mẫu QC2 sắp/quá hạn.")
+
+            if self.has_cap(Cap.MANAGE_JOBS):
+                for j in Job.objects.filter(
+                    project=self.project,
+                    status__in=OPEN_STATUSES,
+                    deadline__isnull=False,
+                    deadline__lte=cutoff,
+                ).order_by("deadline", "id")[:6]:
+                    url = f"/projects/{self.project.id}/jobs?{'overdue=1' if j.deadline < now else 'due_soon=1'}"
+                    _append_deadline(j, url, "job dự án sắp/quá hạn.")
 
         # 3. Thông báo dự án (Announcement) phù hợp vai trò / team
         announcements = Announcement.objects.filter(project=self.project).select_related("sender", "target_team")[:20]

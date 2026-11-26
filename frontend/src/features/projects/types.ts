@@ -2,12 +2,21 @@ import type { UserBrief } from '../../shared/api/types'
 import type { Capability } from '../../shared/types/capabilities'
 import type { Role } from '../../shared/types/roles'
 
+export type EscalationPolicy = 'block' | 'warn_only'
+
 export interface ProjectSummary {
   id: number
   name: string
   description: string
+  cvat_project_id: number | null
   created_at: string
   my_roles: Role[] // vai trò có hiệu lực (đã gồm PM → QC2)
+  project_managers: UserBrief[]
+  job_count: number
+  done_count: number
+  overdue_count: number
+  escalated_count: number
+  progress_percent: number
 }
 
 export interface ProjectDetail extends ProjectSummary {
@@ -15,7 +24,19 @@ export interface ProjectDetail extends ProjectSummary {
   member_counts: Partial<Record<Role, number>>
   member_total: number
   my_capabilities: Capability[]
-  cvat_project_id: number | null
+  max_rework_rounds: number
+  escalation_policy: EscalationPolicy
+  annotator_wip_limit: number
+}
+
+export interface ProjectWriteInput {
+  name: string
+  description?: string
+  cvat_project_id?: number | null
+  max_rework_rounds?: number
+  escalation_policy?: EscalationPolicy
+  annotator_wip_limit?: number
+  pm_ids?: number[]
 }
 
 export type SamplingMethod = 'random' | 'stratified'
@@ -24,6 +45,7 @@ export type StratifyBy = 'annotator' | 'qc1_reviewer' | 'dataset'
 export interface ProjectSettings {
   cvat_project_id: number | null
   max_rework_rounds: number
+  escalation_policy: EscalationPolicy
   annotator_wip_limit?: number
   sampling_method: SamplingMethod
   sampling_rate: number
@@ -55,6 +77,8 @@ export interface Dataset {
   done_count: number
 }
 
+export type SyncStatus = '' | 'ok' | 'error'
+
 export interface Batch {
   id: number
   dataset: number
@@ -66,11 +90,26 @@ export interface Batch {
   team_name: string | null
   cvat_task_id: number | null
   last_synced_at: string | null
+  last_sync_status: SyncStatus
+  last_sync_error: string
+  qc2_confirmed_by: UserBrief | null
+  qc2_confirmed_at: string | null
   created_at: string
   job_count: number
   done_count: number
+  qc1_passed_count: number
   pending_qc2_count: number
   escalated_count: number
+  ready_for_qc2_confirm: boolean
+}
+
+export interface CvatTaskItem {
+  id: number
+  name: string
+  project_id: number | null
+  status: string
+  size: number
+  subset: string
 }
 
 export interface Delivery {
@@ -78,6 +117,8 @@ export interface Delivery {
   batch: number
   batch_name: string
   dataset_name: string
+  recipient: string
+  output_path: string
   note: string
   client_feedback: string
   delivered_by: UserBrief | null
@@ -130,7 +171,6 @@ export interface Guideline {
 
 export interface PermissionMatrix {
   capabilities: Record<Capability, Role[]>
-  director_capabilities: Capability[]
   implied_roles: Partial<Record<Role, Role[]>>
 }
 
@@ -186,7 +226,15 @@ export interface MemberPerformance {
   rework_rate: number | null
 }
 
-export type NotificationCategory = 'rework' | 'deadline' | 'dispute' | 'qc_pass' | 'announcement'
+export type NotificationCategory =
+  | 'assigned'
+  | 'rework'
+  | 'review_needed'
+  | 'escalated'
+  | 'deadline'
+  | 'dispute'
+  | 'qc_pass'
+  | 'announcement'
 
 export interface UnifiedNotification {
   id: string

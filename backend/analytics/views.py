@@ -24,7 +24,7 @@ from teams.models import Team, TeamMember
 
 PERIODS = {"day": 1, "week": 7, "month": 30}
 DONE = STAGE_STATUSES["done"]
-REACHED_QC2 = [JobStatus.PENDING_QC2, *DONE]
+REACHED_QC2 = [JobStatus.QC1_PASSED, JobStatus.PENDING_QC2, *DONE]
 
 
 def _metric(value, *, status="ok", formula=""):
@@ -156,20 +156,26 @@ class TeamRankingView(ProjectScopedViewMixin, APIView):
 class Qc2SummaryView(ProjectScopedViewMixin, APIView):
     """GET /api/projects/{id}/qc2-summary/ — dashboard QC2 (QC2-01). PM xem toàn dự án, QC2 xem của mình."""
 
-    required_capabilities = {"*": Cap.PERFORM_AUDIT}
+    required_capabilities = {"*": [Cap.PERFORM_AUDIT, Cap.VIEW_DASHBOARD]}
 
     def get(self, request, project_id):
         samples = AuditSample.objects.filter(audit__project=self.project)
-        scope = "project" if self.has_cap(Cap.MANAGE_AUDITS) and request.query_params.get("scope") != "mine" else "mine"
+        can_project_scope = self.has_cap(Cap.MANAGE_AUDITS) or self.has_cap(Cap.VIEW_DASHBOARD)
+        scope = "project" if can_project_scope and request.query_params.get("scope") != "mine" else "mine"
         if scope == "mine":
             samples = samples.filter(Q(auditor=request.user) | Q(reviewed_by=request.user))
         since = _period_start(request)
+        now = timezone.now()
+        cutoff = now + timedelta(hours=24)
+        pending_filter = Q(result=AuditSample.Result.PENDING, audit__status=Audit.Status.IN_PROGRESS)
         stats = samples.aggregate(
             assigned=Count("id"),
-            pending=Count("id", filter=Q(result=AuditSample.Result.PENDING, audit__status=Audit.Status.IN_PROGRESS)),
+            pending=Count("id", filter=pending_filter),
             passed=Count("id", filter=Q(result=AuditSample.Result.PASS)),
             rejected=Count("id", filter=Q(result=AuditSample.Result.REJECT)),
             audited_in_period=Count("id", filter=Q(reviewed_at__gte=since)),
+            overdue=Count("id", filter=pending_filter & Q(job__deadline__lt=now)),
+            due_soon=Count("id", filter=pending_filter & Q(job__deadline__gte=now, job__deadline__lte=cutoff)),
         )
         errors = ReviewError.objects.filter(audit_sample__in=samples)
         by_category = list(errors.values("category__name").annotate(n=Count("id")).order_by("-n")[:10])
@@ -282,7 +288,14 @@ class AnnotatorDashboardView(ProjectScopedViewMixin, APIView):
             rework=Count("id", filter=Q(status=JobStatus.REWORK)),
             waiting_review=Count(
                 "id",
-                filter=Q(status__in=[JobStatus.PENDING_QC1, JobStatus.QC1_REVIEWING, JobStatus.PENDING_QC2]),
+                filter=Q(
+                    status__in=[
+                        JobStatus.PENDING_QC1,
+                        JobStatus.QC1_REVIEWING,
+                        JobStatus.QC1_PASSED,
+                        JobStatus.PENDING_QC2,
+                    ]
+                ),
             ),
             done=Count("id", filter=Q(status__in=DONE)),
             objects_done=Sum("object_count", filter=Q(status__in=DONE)),
@@ -328,15 +341,10 @@ class AnnotatorDashboardView(ProjectScopedViewMixin, APIView):
         # --- Dữ liệu mở rộng theo thiết kế Tổng quan cá nhân ---
         membership = (
             TeamMember.objects.filter(user=user, team__project=project)
-            .select_related("team__leader")
+            .select_related("team")
             .first()
         )
         team_name = membership.team.name if membership else None
-        team_leader_name = (
-            membership.team.leader.get_full_name() or membership.team.leader.username
-            if membership and membership.team.leader
-            else None
-        )
         last_sync = (
             Batch.objects.filter(dataset__project=project, last_synced_at__isnull=False)
             .order_by("-last_synced_at")
@@ -433,6 +441,7 @@ class AnnotatorDashboardView(ProjectScopedViewMixin, APIView):
                 status__in=[
                     JobStatus.PENDING_QC1,
                     JobStatus.QC1_REVIEWING,
+                    JobStatus.QC1_PASSED,
                     JobStatus.PENDING_QC2,
                     JobStatus.APPROVED,
                     JobStatus.DELIVERED,
@@ -455,7 +464,7 @@ class AnnotatorDashboardView(ProjectScopedViewMixin, APIView):
             "job__batch", "review_error__category", "created_by", "handler"
         )
         pending_req_count = req_qs.filter(
-            status__in=[AnnotatorRequest.Status.PENDING_TL, AnnotatorRequest.Status.PENDING_PM]
+            status=AnnotatorRequest.Status.PENDING_PM
         ).count()
         recent_req_items = AnnotatorRequestSerializer(req_qs[:5], many=True).data
 
@@ -501,7 +510,6 @@ class AnnotatorDashboardView(ProjectScopedViewMixin, APIView):
             ],
             "meta": {
                 "team_name": team_name,
-                "team_leader_name": team_leader_name,
                 "project_name": project.name,
                 "last_cvat_sync_at": last_sync,
                 "wip_limit": project.annotator_wip_limit,
@@ -762,10 +770,15 @@ class Qc1SummaryView(ProjectScopedViewMixin, APIView):
         now = timezone.now()
         length = now - since
 
+        cutoff = now + timedelta(hours=24)
+        qc1_open = Q(status__in=[JobStatus.PENDING_QC1, JobStatus.QC1_REVIEWING])
         queue_stats = jobs.aggregate(
             assigned=Count("id"),
             pending=Count("id", filter=Q(status=JobStatus.PENDING_QC1)),
             reviewing=Count("id", filter=Q(status=JobStatus.QC1_REVIEWING)),
+            qc1_passed=Count("id", filter=Q(status=JobStatus.QC1_PASSED)),
+            overdue=Count("id", filter=qc1_open & Q(deadline__lt=now)),
+            due_soon=Count("id", filter=qc1_open & Q(deadline__gte=now, deadline__lte=cutoff)),
         )
         decision_stats = logs.aggregate(
             passed=Count("id", filter=Q(action="qc1.pass")),

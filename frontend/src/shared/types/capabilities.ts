@@ -14,7 +14,6 @@ export type Capability =
   | 'manage_delivery'
   | 'send_announcement'
   | 'view_activity'
-  | 'lead_team'
   | 'annotate_jobs'
   | 'perform_qc1'
 
@@ -33,7 +32,6 @@ export const CAPABILITY_LABELS: Record<Capability, string> = {
   manage_delivery: 'Bàn giao',
   send_announcement: 'Gửi thông báo',
   view_activity: 'Xem nhật ký hoạt động',
-  lead_team: 'Dẫn dắt team: giao lại job, deadline, cấp QC1 trong team',
   annotate_jobs: 'Thực hiện gán nhãn và nộp bài (Annotator)',
   perform_qc1: 'Thực hiện kiểm tra Level 1 QC (Pass / Reject, ghi lỗi)',
 }

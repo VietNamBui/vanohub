@@ -23,10 +23,8 @@ from teams.models import Team, TeamMember
 PROJECT_NAME = "[DEMO] Robotaxi 3D Cuboid"
 PASSWORD = "Demo@12345"
 USERS = {
-    "director_demo": [Role.DIRECTOR],
     "pm_demo": [Role.PROJECT_MANAGER],
     "qc2_demo": [Role.QC2],
-    "tl_demo": [Role.TEAM_LEADER],
     "qc1_demo": [Role.QC1, Role.ANNOTATOR],
     "ann1_demo": [Role.ANNOTATOR],
     "ann2_demo": [Role.ANNOTATOR],
@@ -72,19 +70,19 @@ class Command(BaseCommand):
             users[username] = user
 
         project = Project.objects.create(
-            name=PROJECT_NAME, description="Dữ liệu giả để thử luồng PM / QC2 / Annotator — không phải dữ liệu thật.",
-            created_by=users["director_demo"], sampling_rate=30, max_rework_rounds=2,
+            name=PROJECT_NAME, description="Dữ liệu giả để thử luồng PM / QC2 / QC1 / Annotator — không phải dữ liệu thật.",
+            created_by=users["pm_demo"], sampling_rate=30, max_rework_rounds=2,
             annotator_wip_limit=2, kpi_annotation_target=1200,
         )
         for username, roles in USERS.items():
             for role in roles:
                 RoleAssignment.objects.get_or_create(
-                    user=users[username], role=role, project=None if role == Role.DIRECTOR else project
+                    user=users[username], role=role, project=project
                 )
 
-        team_a = Team.objects.create(project=project, name="Team A", leader=users["tl_demo"])
+        team_a = Team.objects.create(project=project, name="Team A")
         team_b = Team.objects.create(project=project, name="Team B")
-        for name in ("tl_demo", "qc1_demo", "ann1_demo", "ann2_demo"):
+        for name in ("qc1_demo", "ann1_demo", "ann2_demo"):
             TeamMember.objects.create(team=team_a, user=users[name])
         for name in ("ann3_demo", "ann4_demo"):
             TeamMember.objects.create(team=team_b, user=users[name], capacity=4)
@@ -100,19 +98,19 @@ class Command(BaseCommand):
 
         ds_front = Dataset.objects.create(project=project, name="Front camera 11/2026", created_by=users["pm_demo"])
         ds_lidar = Dataset.objects.create(project=project, name="Lidar night 11/2026", created_by=users["pm_demo"])
-        # B01, B02 giao cho Team A (tl_demo là leader) → TL thấy "Job của team".
         b01 = Batch.objects.create(dataset=ds_front, name="B01", deadline=now + timedelta(days=2), team=team_a)
         b02 = Batch.objects.create(dataset=ds_front, name="B02", deadline=now + timedelta(days=5), team=team_a)
+        b04 = Batch.objects.create(dataset=ds_front, name="B04-QC1-Ready", deadline=now + timedelta(days=3), team=team_a)
         b03 = Batch.objects.create(dataset=ds_lidar, name="N01", deadline=now + timedelta(days=7))
 
         annotators = [users[n] for n in ("ann1_demo", "ann2_demo", "ann3_demo", "ann4_demo")]
-        qc1 = [users["qc1_demo"], users["tl_demo"]]
+        qc1 = [users["qc1_demo"]]
 
         def make(batch, index, status, **extra):
             annotator = annotators[index % len(annotators)]
             return Job.objects.create(
                 project=project, batch=batch, name=f"{batch.name}-{index:03d}", status=status,
-                annotator=annotator, qc1_reviewer=qc1[index % 2] if status not in (
+                annotator=annotator, qc1_reviewer=qc1[0] if status not in (
                     JobStatus.PENDING_ANNOTATION, JobStatus.ANNOTATING) else None,
                 deadline=batch.deadline, frame_count=100, object_count=40 + index * 3, **extra,
             )
@@ -120,6 +118,9 @@ class Command(BaseCommand):
         # B01: 12 job đã qua QC1, chờ QC2 → dùng để thử tạo audit.
         for i in range(1, 13):
             make(b01, i, JobStatus.PENDING_QC2)
+        # B04: 4 job đạt QC1 100% → dùng để PM thử "Xác nhận chuyển QC2" theo batch.
+        for i in range(1, 5):
+            make(b04, i, JobStatus.QC1_PASSED)
         # B02: trạng thái trộn lẫn, có job quá hạn và escalated.
         mix = [JobStatus.ANNOTATING, JobStatus.ANNOTATING, JobStatus.PENDING_QC1, JobStatus.QC1_REVIEWING,
                JobStatus.REWORK, JobStatus.PENDING_QC2, JobStatus.APPROVED, JobStatus.PENDING_ANNOTATION]
@@ -161,11 +162,11 @@ class Command(BaseCommand):
                 AnnotatorRequest.objects.create(
                     project=project, job=ann1_rework, review_error=e1,
                     request_type=AnnotatorRequest.RequestType.ERROR_DISPUTE,
-                    status=AnnotatorRequest.Status.PENDING_TL,
+                    status=AnnotatorRequest.Status.PENDING_PM,
                     title=f"Không đồng ý lỗi '{e1.category.name}' frame 214",
                     reason="Điểm point cloud đuôi xe bị nhiễu mưa.",
-                    progress_note="TL đang đối chiếu frame 214. Nếu chưa phân xử được, TL sẽ chuyển PM.",
-                    created_by=users["ann1_demo"], handler=users["tl_demo"], handler_role="TL",
+                    progress_note="PM đang đối chiếu frame 214.",
+                    created_by=users["ann1_demo"], handler=users["pm_demo"], handler_role="PM",
                 )
                 UserNotification.objects.create(
                     recipient=users["ann1_demo"], project=project, job=ann1_rework,

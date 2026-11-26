@@ -5,6 +5,7 @@ import type {
   ActivityLog,
   Announcement,
   Batch,
+  CvatTaskItem,
   Dataset,
   Delivery,
   DeliveryCandidate,
@@ -17,6 +18,7 @@ import type {
   ProjectOverview,
   ProjectSettings,
   ProjectSummary,
+  ProjectWriteInput,
   TeamRanking,
 } from './types'
 
@@ -24,6 +26,9 @@ const p = (projectId: number, path: string) => `/projects/${projectId}/${path}`
 
 export const listProjects = async () => (await apiClient.get<ProjectSummary[]>('/projects/')).data
 export const getProject = async (id: number) => (await apiClient.get<ProjectDetail>(`/projects/${id}/`)).data
+export const createProject = async (data: ProjectWriteInput) => (await apiClient.post<ProjectDetail>('/projects/', data)).data
+export const updateProject = async (id: number, data: Partial<ProjectWriteInput>) =>
+  (await apiClient.patch<ProjectDetail>(`/projects/${id}/`, data)).data
 
 // --- Cấu hình & thành viên ---
 export const getSettings = async (id: number) => (await apiClient.get<ProjectSettings>(p(id, 'settings/'))).data
@@ -66,15 +71,22 @@ export const syncBatchWithCvat = async (id: number, batchId: number, countObject
       count_objects: countObjects,
     })
   ).data
+export const confirmBatchQc2 = async (id: number, batchId: number, note = '') =>
+  (await apiClient.post<Batch>(p(id, `batches/${batchId}/confirm-qc2/`), { note })).data
 
 // --- Delivery ---
 export const listDeliveries = async (id: number) => (await apiClient.get<Delivery[]>(p(id, 'deliveries/'))).data
 export const listDeliveryCandidates = async (id: number) =>
   (await apiClient.get<DeliveryCandidate[]>(p(id, 'deliveries/candidates/'))).data
-export const createDelivery = async (id: number, data: { batch: number; note?: string }) =>
-  (await apiClient.post<Delivery>(p(id, 'deliveries/'), data)).data
-export const updateDelivery = async (id: number, deliveryId: number, data: { note?: string; client_feedback?: string }) =>
-  (await apiClient.patch<Delivery>(p(id, `deliveries/${deliveryId}/`), data)).data
+export const createDelivery = async (
+  id: number,
+  data: { batch: number; recipient: string; output_path: string; note?: string },
+) => (await apiClient.post<Delivery>(p(id, 'deliveries/'), data)).data
+export const updateDelivery = async (
+  id: number,
+  deliveryId: number,
+  data: { recipient?: string; output_path?: string; note?: string; client_feedback?: string },
+) => (await apiClient.patch<Delivery>(p(id, `deliveries/${deliveryId}/`), data)).data
 
 // --- Nhật ký, thông báo, guideline ---
 export const listActivity = async (
@@ -110,6 +122,8 @@ export const getMemberPerformance = async (id: number) =>
 // --- CVAT ---
 export const getCvatStatus = async () =>
   (await apiClient.get<{ connected: boolean; url: string; version?: string; detail?: string }>('/cvat/status/')).data
+export const listCvatTasks = async (params: { project_id?: number | null; search?: string } = {}) =>
+  (await apiClient.get<CvatTaskItem[]>('/cvat/tasks/', { params: cleanParams(params) })).data
 /** Gán thêm một vai trò trong dự án cho thành viên. Trả về toàn bộ vai trò hiệu lực sau khi gán. */
 export const addMemberRole = async (id: number, userId: number, role: Role) =>
   (await apiClient.post<{ user: number; roles: Role[] }>(p(id, `members/${userId}/roles/`), { role })).data

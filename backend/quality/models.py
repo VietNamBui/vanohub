@@ -49,17 +49,30 @@ class Audit(models.Model):
         IN_PROGRESS = "in_progress", "Đang audit"
         COMPLETED = "completed", "Đã chốt"
 
+    class Decision(models.TextChoices):
+        ACCEPT = "accept", "Chấp nhận batch"
+        REJECT = "reject", "Trả cả batch"
+        PARTIAL_REJECT = "partial_reject", "Trả theo tầng"
+
     project = models.ForeignKey("projects.Project", on_delete=models.CASCADE, related_name="audits")
     batch = models.ForeignKey("projects.Batch", on_delete=models.CASCADE, related_name="audits")
     status = models.CharField(max_length=20, choices=Status.choices, default=Status.IN_PROGRESS)
+    decision = models.CharField(max_length=20, choices=Decision.choices, blank=True, default="")
+    decision_reason = models.TextField(blank=True, default="")
+    decided_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name="+"
+    )
+    stratum_decisions = models.JSONField(default=dict, blank=True)
     method = models.CharField(max_length=20, choices=SamplingMethod.choices)
     sampling_rate = models.PositiveSmallIntegerField()
     stratify_by = models.CharField(max_length=20, choices=StratifyBy.choices, blank=True)
     seed = models.BigIntegerField()
     eligible_count = models.PositiveIntegerField()
     # Job đủ điều kiện TẠI LÚC TẠO audit. Khi chốt, job không được lấy mẫu trong danh sách này
-    # mới được duyệt — job vào hàng chờ QC2 sau đó phải chờ đợt audit sau.
+    # mới được duyệt hoặc trả sửa — job vào hàng chờ QC2 sau đó phải chờ đợt audit sau.
     eligible_job_ids = models.JSONField(default=list)
+    # Bản đồ {str(job_id): stratum_name} lưu tại lúc tạo audit để quyết định theo tầng nhất quán.
+    eligible_job_strata = models.JSONField(default=dict, blank=True)
     note = models.TextField(blank=True)
     created_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, related_name="+")
     created_at = models.DateTimeField(auto_now_add=True)

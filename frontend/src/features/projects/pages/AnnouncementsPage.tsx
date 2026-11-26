@@ -68,7 +68,7 @@ export default function AnnouncementsPage() {
                 }
               }}>
                 <Form.Item name="target_roles" label="Vai trò nhận" extra="Để trống = mọi vai trò.">
-                  <Select mode="multiple" allowClear options={ROLE_ORDER.filter((r) => r !== 'director').map((r) => ({ value: r, label: ROLE_LABELS[r] }))} />
+                  <Select mode="multiple" allowClear options={ROLE_ORDER.map((r) => ({ value: r, label: ROLE_LABELS[r] }))} />
                 </Form.Item>
                 <Form.Item name="target_team" label="Team nhận" extra="Để trống = mọi team.">
                   <Select allowClear options={teams?.map((t) => ({ value: t.id, label: t.name }))} />

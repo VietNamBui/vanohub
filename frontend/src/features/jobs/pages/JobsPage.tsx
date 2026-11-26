@@ -49,8 +49,14 @@ export default function JobsPage() {
   const key = `jobs:${projectId}:${JSON.stringify(filters)}:${version}`
   const { data, error, isLoading, retry } = useRequest(key, () => listJobs(projectId, filters))
   const { data: datasets } = useRequest(`datasets:${projectId}`, () => listDatasets(projectId))
+  const datasetId =
+    typeof filters.dataset === 'number'
+      ? filters.dataset
+      : filters.dataset
+        ? Number(filters.dataset)
+        : undefined
   const { data: batches } = useRequest(`batches:${projectId}:${filters.dataset ?? ''}`, () =>
-    listBatches(projectId, { dataset: filters.dataset }),
+    listBatches(projectId, { dataset: Number.isFinite(datasetId) ? datasetId : undefined }),
   )
 
   const { data: members } = useRequest(`members:${projectId}:all`, () => listMembers(projectId))

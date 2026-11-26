@@ -1,6 +1,6 @@
 from rest_framework import serializers
 
-from accounts.models import Role, User
+from accounts.models import User
 from accounts.serializers import UserBriefSerializer
 
 from .models import Team, TeamMember
@@ -15,18 +15,11 @@ class TeamMemberSerializer(serializers.ModelSerializer):
 
 
 class TeamSerializer(serializers.ModelSerializer):
-    leader_detail = UserBriefSerializer(source="leader", read_only=True)
     members = TeamMemberSerializer(many=True, read_only=True)
 
     class Meta:
         model = Team
-        fields = ["id", "name", "leader", "leader_detail", "members", "created_at"]
-
-    def validate_leader(self, leader):
-        project = self.context["project"]
-        if leader and Role.TEAM_LEADER not in leader.get_project_roles(project):
-            raise serializers.ValidationError("Leader phải có vai trò Team Leader trong dự án.")
-        return leader
+        fields = ["id", "name", "members", "created_at"]
 
     def validate_name(self, name):
         qs = Team.objects.filter(project=self.context["project"], name=name)

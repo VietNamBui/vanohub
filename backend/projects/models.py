@@ -14,8 +14,13 @@ class StratifyBy(models.TextChoices):
     DATASET = "dataset", "Theo dataset"
 
 
+class EscalationPolicy(models.TextChoices):
+    BLOCK = "block", "Khoá job chờ PM xử lý"
+    WARN_ONLY = "warn_only", "Chỉ cảnh báo (vẫn cho sửa)"
+
+
 class Project(models.Model):
-    """Một dự án Annotation. Director tạo dự án và giao PM (theo wireframe).
+    """Một dự án Annotation. Project Manager tạo dự án và quản lý vận hành.
 
     Các trường cấu hình (rework, sampling, ngưỡng) đặt thẳng trên Project vì mỗi dự án
     có đúng một bộ cấu hình — đơn giản hơn tách bảng riêng. Giá trị mặc định là ĐỀ XUẤT.
@@ -35,6 +40,12 @@ class Project(models.Model):
     # --- Cấu hình Rework & Sampling (PM-10) ---
     max_rework_rounds = models.PositiveSmallIntegerField(
         default=3, help_text="Vượt số vòng này thì job bị Escalated."
+    )
+    escalation_policy = models.CharField(
+        max_length=20,
+        choices=EscalationPolicy.choices,
+        default=EscalationPolicy.BLOCK,
+        help_text="Khoá cứng chờ PM gỡ hoặc chỉ cảnh báo vẫn cho sửa (PM cấu hình).",
     )
     annotator_wip_limit = models.PositiveSmallIntegerField(
         default=2,
@@ -90,14 +101,25 @@ class Dataset(models.Model):
 class Batch(models.Model):
     """Một lô công việc. Đề xuất ánh xạ: 1 Batch ↔ 1 CVAT Task, mỗi CVAT Job ↔ 1 Job."""
 
+    class SyncStatus(models.TextChoices):
+        IDLE = "", "Chưa đồng bộ"
+        OK = "ok", "Thành công"
+        ERROR = "error", "Lỗi"
+
     dataset = models.ForeignKey(Dataset, on_delete=models.CASCADE, related_name="batches")
     name = models.CharField(max_length=200)
     status = models.CharField(max_length=20, choices=DataStatus.choices, default=DataStatus.ACTIVE)
     deadline = models.DateTimeField(null=True, blank=True)
-    # Team phụ trách batch. Chỉ ghi nhận (chưa tự giao job cho thành viên team).
+    # Team phụ trách batch.
     team = models.ForeignKey("teams.Team", on_delete=models.SET_NULL, null=True, blank=True, related_name="batches")
     cvat_task_id = models.PositiveIntegerField(null=True, blank=True)
     last_synced_at = models.DateTimeField(null=True, blank=True)
+    last_sync_status = models.CharField(max_length=16, choices=SyncStatus.choices, blank=True, default=SyncStatus.IDLE)
+    last_sync_error = models.TextField(blank=True, default="")
+    qc2_confirmed_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name="+"
+    )
+    qc2_confirmed_at = models.DateTimeField(null=True, blank=True)
     created_by = models.ForeignKey(
         settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name="+"
     )
@@ -120,6 +142,8 @@ class Delivery(models.Model):
 
     project = models.ForeignKey(Project, on_delete=models.CASCADE, related_name="deliveries")
     batch = models.ForeignKey(Batch, on_delete=models.PROTECT, related_name="deliveries")
+    recipient = models.CharField(max_length=200, blank=True, default="", help_text="Người nhận / khách hàng")
+    output_path = models.CharField(max_length=500, blank=True, default="", help_text="Đường dẫn đầu ra / link bàn giao")
     note = models.TextField(blank=True)
     client_feedback = models.TextField(blank=True)
     delivered_by = models.ForeignKey(
@@ -196,10 +220,13 @@ class Guideline(models.Model):
 
 
 class UserNotification(models.Model):
-    """Thông báo cá nhân theo sự kiện hệ thống (TB03): rework, sắp hạn, phản hồi lỗi, đạt QC1."""
+    """Thông báo cá nhân theo sự kiện hệ thống (TB03): giao việc, trả sửa, cần duyệt, escalated, hạn, phản hồi."""
 
     class Category(models.TextChoices):
+        ASSIGNED = "assigned", "Được giao việc"
         REWORK = "rework", "Trả sửa (Rework)"
+        REVIEW_NEEDED = "review_needed", "Cần duyệt"
+        ESCALATED = "escalated", "Escalated (vượt giới hạn)"
         DEADLINE = "deadline", "Sắp / quá hạn"
         DISPUTE = "dispute", "Phản hồi lỗi / Yêu cầu"
         QC_PASS = "qc_pass", "Đạt QC1"

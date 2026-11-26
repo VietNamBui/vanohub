@@ -22,7 +22,6 @@ type TabKey = 'teams' | 'members'
  * PM-07 Phân roster & luân chuyển + PM-08 Team & Thành viên (giao diện Untitled UI).
  * Đề xuất (chưa chốt): mỗi người chỉ thuộc một team trong dự án → đổi team = điều chuyển.
  * "Quá tải" = số job đang annotate > sức chứa (giống trang Workload).
- * Tạo / khoá tài khoản là việc của Director, không có ở đây.
  */
 export default function TeamsPage() {
   const { project, projectId } = useProject()
@@ -35,8 +34,7 @@ export default function TeamsPage() {
 
   const overloaded = loadList.filter((w) => w.holding > w.capacity).length
   const keyword = search.trim().toLowerCase()
-  const shownTeams = teamList.filter((t) =>
-    !keyword || t.name.toLowerCase().includes(keyword) || t.leader_detail?.full_name.toLowerCase().includes(keyword))
+  const shownTeams = teamList.filter((t) => !keyword || t.name.toLowerCase().includes(keyword))
   const shownMembers = memberList.filter((m) =>
     !keyword || [m.user.full_name, m.user.username, m.team?.name ?? ''].some((s) => s.toLowerCase().includes(keyword)))
   const unassignedCount = memberList.filter((m) => !m.team).length
@@ -85,7 +83,7 @@ export default function TeamsPage() {
                 className="mt-4"
                 icon={SearchLg}
                 aria-label="Tìm kiếm"
-                placeholder={tab === 'teams' ? 'Tìm team hoặc leader…' : 'Tìm thành viên hoặc team…'}
+                placeholder={tab === 'teams' ? 'Tìm team…' : 'Tìm thành viên hoặc team…'}
                 value={search}
                 onChange={setSearch}
               />
@@ -118,7 +116,6 @@ function TeamsTable({ teams, isLoading, onOpen, onDelete }: {
     <Table aria-label="Danh sách team" size="sm" onRowAction={(key) => onOpen(Number(key))}>
       <Table.Header>
         <Table.Head id="name" label="Team" isRowHeader />
-        <Table.Head id="leader" label="Leader" />
         <Table.Head id="members" label="Thành viên" />
         <Table.Head id="actions" label="Thao tác" className="w-32" />
       </Table.Header>
@@ -126,7 +123,6 @@ function TeamsTable({ teams, isLoading, onOpen, onDelete }: {
         {(team) => (
           <Table.Row id={team.id} className="cursor-pointer">
             <Table.Cell className="font-medium text-primary">{team.name}</Table.Cell>
-            <Table.Cell>{team.leader_detail?.full_name ?? <span className="text-quaternary">Chưa có</span>}</Table.Cell>
             <Table.Cell className="tabular-nums">{team.members.length}</Table.Cell>
             <Table.Cell>
               <Button color="tertiary-destructive" size="sm" iconLeading={Trash01} aria-label={`Xoá ${team.name}`}

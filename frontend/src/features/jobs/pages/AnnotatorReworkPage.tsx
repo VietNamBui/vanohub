@@ -4,7 +4,6 @@ import { useState } from 'react'
 import { useNavigate } from 'react-router'
 import { Badge, BadgeWithDot } from '@/components/base/badges/badges'
 import { Button } from '@/components/base/buttons/button'
-import { useShell } from '../../../layouts/ShellContext'
 import { getErrorMessage } from '../../../shared/api/errors'
 import PageState from '../../../shared/components/ui/PageState'
 import { useRequest } from '../../../shared/hooks/useRequest'
@@ -27,7 +26,6 @@ const SEVERITY_BADGE: Record<string, 'gray' | 'warning' | 'error'> = {
 export default function AnnotatorReworkPage() {
   const { projectId } = useProject()
   const navigate = useNavigate()
-  const { teamLeaderName } = useShell()
   const [version, setVersion] = useState(0)
   const [disputeTarget, setDisputeTarget] = useState<{ job: JobDetail; errorId: number } | null>(null)
 
@@ -173,7 +171,6 @@ export default function AnnotatorReworkPage() {
           projectId={projectId}
           jobId={disputeTarget.job.id}
           jobName={disputeTarget.job.name}
-          teamLeaderName={teamLeaderName}
           errors={disputeTarget.job.errors}
           initialErrorId={disputeTarget.errorId}
           onClose={() => setDisputeTarget(null)}

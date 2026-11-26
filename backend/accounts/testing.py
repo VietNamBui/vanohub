@@ -12,7 +12,7 @@ from .models import Role, RoleAssignment, User
 def make_user(username, *roles, project=None):
     user = User.objects.create_user(username, password="pw")
     for role in roles:
-        RoleAssignment.objects.create(user=user, role=role, project=None if role == Role.DIRECTOR else project)
+        RoleAssignment.objects.create(user=user, role=role, project=project)
     return user
 
 

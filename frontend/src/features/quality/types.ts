@@ -1,5 +1,5 @@
 import type { UserBrief } from '../../shared/api/types'
-import type { JobStatus } from '../jobs/types'
+import type { DueState, JobStatus } from '../jobs/types'
 import type { SamplingMethod, StratifyBy } from '../projects/types'
 
 export type Severity = 'minor' | 'major' | 'critical'
@@ -20,7 +20,12 @@ export interface SampleJob {
   batch_name: string
   annotator: UserBrief | null
   qc1_reviewer: UserBrief | null
+  deadline: string | null
+  is_overdue: boolean
+  due_state?: DueState
+  hours_remaining?: number | null
   rework_round: number
+  max_rework_rounds?: number
   object_count: number
   frame_count: number
   cvat_job_id: number | null
@@ -54,12 +59,30 @@ export interface AuditSample {
   errors: ReviewError[]
 }
 
+export type AuditDecision = '' | 'accept' | 'reject' | 'partial_reject'
+
+export interface AuditStratumSummary {
+  stratum: string
+  eligible: number
+  sampled: number
+  passed: number
+  rejected: number
+  pending: number
+  decision: '' | 'accept' | 'reject'
+}
+
 export interface Audit {
   id: number
   batch: number
   batch_name: string
   dataset_name: string
   status: 'in_progress' | 'completed'
+  decision: AuditDecision
+  decision_label?: string
+  decision_reason: string
+  decided_by: UserBrief | null
+  stratum_decisions: Record<string, 'accept' | 'reject'>
+  strata_summary: AuditStratumSummary[]
   method: SamplingMethod
   sampling_rate: number
   stratify_by: StratifyBy | ''
@@ -73,6 +96,12 @@ export interface Audit {
   passed: number
   rejected: number
   pending: number
+}
+
+export interface AuditCompleteInput {
+  decision: 'accept' | 'reject' | 'partial_reject'
+  reason?: string
+  stratum_decisions?: Record<string, 'accept' | 'reject'>
 }
 
 export interface AuditInput {
@@ -126,7 +155,15 @@ export interface Qc2Summary {
   error_percent_in_job: PendingMetric
   audit_speed: PendingMetric
   scope: 'project' | 'mine'
-  stats: { assigned: number; pending: number; passed: number; rejected: number; audited_in_period: number }
+  stats: {
+    assigned: number
+    pending: number
+    passed: number
+    rejected: number
+    audited_in_period: number
+    overdue?: number
+    due_soon?: number
+  }
   pass_rate: number | null
   qc1_missed_errors: number
   reworked_after_audit: number
@@ -166,6 +203,9 @@ export interface Qc1Summary {
     assigned: number
     pending: number
     reviewing: number
+    qc1_passed?: number
+    overdue?: number
+    due_soon?: number
     passed: number
     rejected: number
     reviewed_in_period: number

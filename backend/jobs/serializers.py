@@ -20,6 +20,7 @@ class JobSerializer(serializers.ModelSerializer):
     due_state = serializers.CharField(read_only=True)
     hours_remaining = serializers.FloatField(read_only=True)
     max_rework_rounds = serializers.IntegerField(source="project.max_rework_rounds", read_only=True)
+    escalation_policy = serializers.CharField(source="project.escalation_policy", read_only=True)
     rework_scope_label = serializers.CharField(source="get_rework_scope_display", read_only=True)
     progress_percent = serializers.IntegerField(read_only=True)
     open_error_count = serializers.SerializerMethodField()
@@ -47,6 +48,7 @@ class JobSerializer(serializers.ModelSerializer):
             "hours_remaining",
             "rework_round",
             "max_rework_rounds",
+            "escalation_policy",
             "rework_scope",
             "rework_scope_label",
             "is_escalated",
@@ -158,6 +160,23 @@ class DeadlineSerializer(serializers.Serializer):
 
 class BulkSerializer(serializers.Serializer):
     ids = serializers.ListField(child=serializers.IntegerField(), min_length=1, max_length=500)
+
+
+class BulkMoveBatchSerializer(serializers.Serializer):
+    ids = serializers.ListField(child=serializers.IntegerField(), min_length=1, max_length=500)
+    batch = serializers.IntegerField()
+    note = serializers.CharField(allow_blank=True, required=False, default="")
+
+    def validate_batch(self, batch_id):
+        from projects.models import Batch, DataStatus
+
+        project = self.context["project"]
+        batch = Batch.objects.select_related("dataset").filter(pk=batch_id, dataset__project=project).first()
+        if not batch:
+            raise serializers.ValidationError("Batch đích không thuộc dự án này.")
+        if batch.status != DataStatus.ACTIVE or batch.dataset.status != DataStatus.ACTIVE:
+            raise serializers.ValidationError("Batch hoặc Dataset đích đã khoá hoặc đã bàn giao.")
+        return batch
 
 
 class AnnotatorStartSerializer(serializers.Serializer):

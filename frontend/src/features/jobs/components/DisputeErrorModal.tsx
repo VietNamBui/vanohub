@@ -14,14 +14,13 @@ interface Props {
   projectId: number
   jobId: number
   jobName: string
-  teamLeaderName?: string | null
   errors: JobErrorBrief[]
   initialErrorId?: number | null
   onClose: () => void
   onSubmitted?: () => void
 }
 
-/** Modal "Phản hồi lỗi của QC1" (564px) — chọn lỗi theo frame/object và gửi đến Team Leader. */
+/** Modal "Phản hồi lỗi của QC1" (564px) — chọn lỗi theo frame/object và gửi đến Project Manager. */
 export default function DisputeErrorModal(props: Props) {
   return (
     <ModalOverlay isOpen={props.isOpen} onOpenChange={(open) => !open && props.onClose()} isDismissable>
@@ -43,7 +42,6 @@ function DisputeErrorForm({
   projectId,
   jobId,
   jobName,
-  teamLeaderName,
   errors,
   initialErrorId,
   onClose,
@@ -78,7 +76,7 @@ function DisputeErrorForm({
           title,
           reason: combinedReason,
         }),
-      'Đã gửi phản hồi lỗi tới Team Leader',
+      'Đã gửi phản hồi lỗi tới Project Manager',
     )
     if (ok) {
       onSubmitted?.()
@@ -115,7 +113,7 @@ function DisputeErrorForm({
       <div>
         <h2 className="text-lg font-bold text-[#101828]">Phản hồi lỗi của QC1</h2>
         <p className="mt-1 text-sm text-[#475467]">
-          {jobName} · Gửi đến TL {teamLeaderName || 'phụ trách team'}.
+          {jobName} · Gửi đến Project Manager phụ trách dự án.
         </p>
       </div>
 

@@ -1,8 +1,9 @@
 import { apiClient } from '../../shared/api/client'
 import { cleanParams, type Paginated } from '../../shared/api/types'
-import type { Job, JobDetail } from '../jobs/types'
+import type { Job, JobDetail, ReworkScope } from '../jobs/types'
 import type {
   Audit,
+  AuditCompleteInput,
   AuditInput,
   AuditPreview,
   AuditSample,
@@ -32,8 +33,8 @@ export const previewAudit = async (projectId: number, data: AuditInput) =>
   (await apiClient.post<AuditPreview>(p(projectId, 'audits/preview/'), data)).data
 export const createAudit = async (projectId: number, data: AuditInput) =>
   (await apiClient.post<Audit>(p(projectId, 'audits/'), data)).data
-export const completeAudit = async (projectId: number, auditId: number) =>
-  (await apiClient.post<Audit>(p(projectId, `audits/${auditId}/complete/`))).data
+export const completeAudit = async (projectId: number, auditId: number, payload: AuditCompleteInput = { decision: 'accept' }) =>
+  (await apiClient.post<Audit>(p(projectId, `audits/${auditId}/complete/`), payload)).data
 
 // --- Mẫu audit (thực hiện QC2) ---
 export const listAuditSamples = async (
@@ -61,7 +62,7 @@ export const getAuditStrategy = async (projectId: number) =>
 // --- Level 1 QC (QC1) ---
 export const listQc1Jobs = async (
   projectId: number,
-  params: { scope?: Qc1Scope; tab?: Qc1JobTab; search?: string; page?: number; overdue?: boolean } = {},
+  params: { scope?: Qc1Scope; tab?: Qc1JobTab; search?: string; page?: number; overdue?: boolean; due_soon?: boolean } = {},
 ) =>
   (
     await apiClient.get<Paginated<Job>>(p(projectId, 'qc1/jobs/'), {
@@ -71,6 +72,7 @@ export const listQc1Jobs = async (
         search: params.search,
         page: params.page,
         overdue: params.overdue ? 1 : undefined,
+        due_soon: params.due_soon ? 1 : undefined,
       }),
     })
   ).data
@@ -84,8 +86,20 @@ export const startQc1Job = async (projectId: number, jobId: number, note = '') =
 export const passQc1Job = async (projectId: number, jobId: number, comment = '') =>
   (await apiClient.post<JobDetail>(p(projectId, `qc1/jobs/${jobId}/pass/`), { comment })).data
 
-export const rejectQc1Job = async (projectId: number, jobId: number, errors: ErrorInput[], comment = '') =>
-  (await apiClient.post<JobDetail>(p(projectId, `qc1/jobs/${jobId}/reject/`), { errors, comment })).data
+export const rejectQc1Job = async (
+  projectId: number,
+  jobId: number,
+  errors: ErrorInput[],
+  comment = '',
+  reworkScope: ReworkScope = 'partial',
+) =>
+  (
+    await apiClient.post<JobDetail>(p(projectId, `qc1/jobs/${jobId}/reject/`), {
+      errors,
+      comment,
+      rework_scope: reworkScope,
+    })
+  ).data
 
 export const getQc1Summary = async (projectId: number, period: string, scope?: 'mine') =>
   (await apiClient.get<Qc1Summary>(p(projectId, 'qc1-summary/'), { params: cleanParams({ period, scope }) })).data

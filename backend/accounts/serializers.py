@@ -18,7 +18,7 @@ class UserBriefSerializer(serializers.ModelSerializer):
 
 
 class RoleAssignmentSerializer(serializers.ModelSerializer):
-    project_name = serializers.CharField(source="project.name", default=None, read_only=True)
+    project_name = serializers.CharField(source="project.name", read_only=True)
 
     class Meta:
         model = RoleAssignment
@@ -29,7 +29,6 @@ class CurrentUserSerializer(serializers.ModelSerializer):
     """Thông tin của người đang đăng nhập, dùng cho GET/PATCH /api/auth/me/."""
 
     full_name = serializers.SerializerMethodField()
-    is_director = serializers.SerializerMethodField()
     role_assignments = RoleAssignmentSerializer(many=True, read_only=True)
 
     class Meta:
@@ -42,20 +41,17 @@ class CurrentUserSerializer(serializers.ModelSerializer):
             "full_name",
             "email",
             "avatar_url",
+            "cvat_username",
             "timezone_name",
             "notify_rework",
             "notify_deadline",
             "notify_request_updates",
             "notify_qc_pass",
-            "is_director",
             "role_assignments",
         ]
 
     def get_full_name(self, user):
         return user.get_full_name() or user.username
-
-    def get_is_director(self, user):
-        return user.is_director()
 
 
 class ProfileUpdateSerializer(serializers.ModelSerializer):
@@ -71,6 +67,7 @@ class ProfileUpdateSerializer(serializers.ModelSerializer):
             "full_name",
             "email",
             "avatar_url",
+            "cvat_username",
             "timezone_name",
             "notify_rework",
             "notify_deadline",

@@ -10,7 +10,7 @@ import { useProject } from '../../projects/projectContext'
 import { getWorkload, listTeams } from '../api'
 import type { Workload } from '../types'
 
-/** Tải công việc từng người (TL-09 / PM theo dõi workload). Xếp theo tải thấp nhất trước để chọn người nhận khi giao lại. */
+/** Tải công việc từng người (PM theo dõi workload). Xếp theo tải thấp nhất trước để chọn người nhận khi giao lại. */
 export default function WorkloadPage() {
   const { projectId } = useProject()
   const [team, setTeam] = useState<number>()

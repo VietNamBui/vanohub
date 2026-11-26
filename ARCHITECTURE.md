@@ -1,25 +1,25 @@
 # VanoHub System Architecture
 
-Combined system architecture across all repository branches (`main`, `origin/feature/project-manager`, `feature/director-annotator-qc1`) and uncommitted working-tree additions.
+Combined system architecture across all repository branches (`main`, `origin/feature/project-manager`, `annotator-qclv1`, `feature/issue-logger`).
 
 ```mermaid
 flowchart TB
     subgraph Legend["Branch Layering"]
         direction LR
-        B0["1. main (3e21fa1): Base Scaffold + DB"] --> B1["2. origin/feature/project-manager (47cb33d): Core RBAC · PM · QC2 · TL · CVAT"] --> B2["3. feature/director-annotator-qc1 (d4b06d7): Annotator + QC1"] -.-> B3["4. Working Tree (Uncommitted): Requests · Notifications · Analytics · Settings"]
+        B0["1. main (3e21fa1): Base Scaffold + DB"] --> B1["2. origin/feature/project-manager (47cb33d): Core RBAC · PM · QC2 · CVAT"] --> B2["3. annotator-qclv1 (25bd5f2): Annotator + QC1"] --> B3["4. feature/issue-logger: Requests · Notifications · Audit Decisions · Role Cut"]
     end
 
     subgraph Frontend["Frontend SPA (React 19 · TypeScript · Vite 8)"]
         subgraph FE_Shell["Shell & Routing"]
             FE_Base["[main] MainLayout · Placeholder Routes"]
             FE_Auth["[PM] RequireAuth · RequireCap · ProjectLayout · Untitled UI / AntD / Tailwind"]
-            FE_WIP_UI["[WIP] NotificationBell · QuickSearchModal · SupportCenterDrawer · AccountSettingsPage"]
+            FE_WIP_UI["[IssueLogger] NotificationBell · QuickSearchModal · SupportCenterDrawer · AccountSettingsPage"]
         end
 
         subgraph FE_Pages["Feature Modules"]
-            FE_PM["[PM] PM · Director · Team Leader · QC2 · CVAT Link Pages"]
-            FE_DAQ["[Dir/Ann/QC1] AnnotatorDashboard · AnnotatorJobs · AnnotatorJobPanel\nQc1Dashboard · Qc1Work · Qc1ReviewPanel"]
-            FE_WIP["[WIP] AnnotatorJobDetail · AnnotatorRework · AnnotatorRequests · AnnotatorAnalytics"]
+            FE_PM["[PM] PM · QC2 · CVAT Link Pages"]
+            FE_DAQ["[Ann/QC1] AnnotatorDashboard · AnnotatorJobs · AnnotatorJobPanel\nQc1Dashboard · Qc1Work · Qc1ReviewPanel"]
+            FE_WIP["[IssueLogger] AnnotatorJobDetail · AnnotatorRework · AnnotatorRequests · AnnotatorAnalytics"]
         end
 
         ApiClient["[PM] Axios Client (shared/api/client.ts)\nJWT Bearer + 401 Refresh (/auth/token/refresh/)"]
@@ -34,18 +34,18 @@ flowchart TB
 
         subgraph AuthLayer["accounts & RBAC"]
             AccBase["[main] Custom User Model"]
-            AccPM["[PM] JWT Auth · RoleAssignment · IMPLIED_ROLES (PM->QC2, TL->QC1)\nProjectScopedViewMixin · HasProjectCapability"]
-            AccDAQ["[Dir/Ann/QC1] + ANNOTATE_JOBS, PERFORM_QC1"]
-            AccWIP["[WIP] /auth/me/ · /auth/change-password/ · Profile & Notify Prefs"]
-            AccBase --> AccPM --> AccDAQ -.-> AccWIP
+            AccPM["[PM] JWT Auth · RoleAssignment · IMPLIED_ROLES (PM->QC2)\nProjectScopedViewMixin · HasProjectCapability"]
+            AccDAQ["[Ann/QC1] + ANNOTATE_JOBS, PERFORM_QC1"]
+            AccWIP["[IssueLogger] /auth/me/ · /auth/change-password/ · /auth/users/ · cvat_username"]
+            AccBase --> AccPM --> AccDAQ --> AccWIP
         end
 
         subgraph Domain["Domain Apps (Skeletons in [main])"]
-            Projects["[PM] projects: Project · Dataset · Batch · Delivery · Guideline · Announcement · ActivityLog\n[WIP] + UserNotification · annotator_wip_limit"]
-            Teams["[PM] teams: Team · TeamMember (capacity) · leader_views (grant QC1, Team Dashboard/Jobs)"]
-            Jobs["[PM] jobs: Job Workflow · JobQueueView · Assign/Deadline/Lock/Escalation\n[Dir/Ann/QC1] + AnnotatorJobViewSet (claim, start, submit)\n[WIP] + AnnotatorRequest (error_dispute, data_issue) · QuickSearch"]
-            Quality["[PM] quality: ErrorCategory · Audit · AuditSample · ReviewError · Random/Stratified Sampling\n[Dir/Ann/QC1] + Qc1JobViewSet (start, pass, reject)"]
-            Analytics["[PM] analytics: Overview · Team Ranking · Member Performance · QC2 Summary\n[Dir/Ann/QC1] + AnnotatorDashboard · Qc1Summary\n[WIP] + AnnotatorAnalytics"]
+            Projects["[PM] projects: Project · Dataset · Batch · Delivery · Guideline · Announcement · ActivityLog\n[IssueLogger] + UserNotification · Batch QC2 Confirm · annotator_wip_limit"]
+            Teams["[PM] teams: Team · TeamMember (capacity)"]
+            Jobs["[PM] jobs: Job Workflow · JobQueueView · Assign/Deadline/Lock/Escalation\n[Ann/QC1] + AnnotatorJobViewSet (claim, start, submit)\n[IssueLogger] + AnnotatorRequest (error_dispute, data_issue) · QuickSearch"]
+            Quality["[PM] quality: ErrorCategory · Audit · AuditSample · ReviewError · Random/Stratified Sampling\n[Ann/QC1] + Qc1JobViewSet (start, pass, reject)\n[IssueLogger] + Audit Decisions (accept, reject, partial_reject)"]
+            Analytics["[PM] analytics: Overview · Team Ranking · Member Performance · QC2 Summary\n[Ann/QC1] + AnnotatorDashboard · Qc1Summary\n[IssueLogger] + AnnotatorAnalytics"]
         end
 
         CvatSync["[PM] cvat_integration: CvatClient · sync.py (CVAT Task<->Batch, CVAT Job<->Job)"]

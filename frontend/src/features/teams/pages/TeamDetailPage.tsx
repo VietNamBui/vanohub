@@ -54,7 +54,6 @@ export default function TeamDetailPage() {
         <header className="flex flex-wrap items-start justify-between gap-4">
           <div>
             <h1 className="text-display-xs font-semibold text-primary">{team?.name ?? 'Đang tải…'}</h1>
-            <p className="mt-1 text-sm text-tertiary">Team Leader: {team ? team.leader_detail?.full_name ?? 'Chưa có' : '–'}</p>
           </div>
           {team && <Button color="secondary" size="sm" iconLeading={Edit01} onPress={() => setDialog({ type: 'edit-team', team })}>Sửa</Button>}
         </header>

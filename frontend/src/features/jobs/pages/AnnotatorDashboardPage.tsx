@@ -1,11 +1,10 @@
 import { AlertTriangle, ArrowRight, CheckCircle, Clock } from '@untitledui/icons'
 import dayjs from 'dayjs'
-import { useEffect, useState } from 'react'
+import { useState } from 'react'
 import { Link, useNavigate } from 'react-router'
 import { Badge, BadgeWithDot } from '@/components/base/badges/badges'
 import { Button } from '@/components/base/buttons/button'
 import { ProgressBarBase } from '@/components/base/progress-indicators/progress-indicators'
-import { useShell } from '../../../layouts/ShellContext'
 import { getErrorMessage } from '../../../shared/api/errors'
 import PageState from '../../../shared/components/ui/PageState'
 import { useRequest } from '../../../shared/hooks/useRequest'
@@ -47,7 +46,6 @@ const SEVERITY_BADGE: Record<string, 'gray' | 'warning' | 'error'> = {
 }
 
 const REQUEST_STATUS_COLOR: Record<AnnotatorRequestStatus, 'warning' | 'success' | 'error' | 'gray'> = {
-  pending_tl: 'warning',
   pending_pm: 'warning',
   resolved: 'success',
   rejected: 'error',
@@ -57,19 +55,12 @@ const REQUEST_STATUS_COLOR: Record<AnnotatorRequestStatus, 'warning' | 'success'
 export default function AnnotatorDashboardPage() {
   const { projectId, project } = useProject()
   const { user } = useAuth()
-  const { setTeamLeaderName } = useShell()
   const navigate = useNavigate()
   const [drawerJobId, setDrawerJobId] = useState<number | null>(null)
 
   const { data, error, isLoading, retry } = useRequest(`annotator-dashboard:${projectId}:week`, () =>
     getAnnotatorDashboard(projectId, 'week'),
   )
-
-  useEffect(() => {
-    if (data?.meta?.team_leader_name) {
-      setTeamLeaderName(data.meta.team_leader_name)
-    }
-  }, [data?.meta?.team_leader_name, setTeamLeaderName])
 
   const firstName = getShortName(user?.full_name, user?.first_name, user?.username)
   const syncText = data?.meta?.last_cvat_sync_at

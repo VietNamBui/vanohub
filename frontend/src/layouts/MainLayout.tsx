@@ -32,7 +32,6 @@ export default function MainLayout() {
   const [searchOpen, setSearchOpen] = useState(false)
   const [supportOpen, setSupportOpen] = useState(false)
   const [menuOpen, setMenuOpen] = useState(false)
-  const [teamLeaderName, setTeamLeaderName] = useState<string | null>(null)
   const menuRef = useRef<HTMLDivElement>(null)
 
   const displayName =
@@ -40,14 +39,12 @@ export default function MainLayout() {
   const initials = getInitials(displayName)
 
   const primaryRoleLabel = useMemo(() => {
-    const roles: Role[] = user?.is_director
-      ? ['director', ...scopedProjects.flatMap((p) => p.my_roles)]
-      : scopedProjects.flatMap((p) => p.my_roles)
+    const roles: Role[] = scopedProjects.flatMap((p) => p.my_roles)
     const unique = [...new Set(roles)]
     if (unique.length === 0) return 'Thành viên'
     if (unique.length === 1) return ROLE_LABELS[unique[0]]
     return unique.map((r) => ROLE_LABELS[r]).slice(0, 2).join(' · ')
-  }, [user, scopedProjects])
+  }, [scopedProjects])
 
   const settingsPath = projectId ? `/projects/${projectId}/account/settings` : '/account/settings'
 
@@ -87,12 +84,10 @@ export default function MainLayout() {
   const shellValue = useMemo(
     () => ({
       projectId,
-      teamLeaderName,
-      setTeamLeaderName,
       openSearch: () => setSearchOpen(true),
       openSupport: () => setSupportOpen(true),
     }),
-    [projectId, teamLeaderName],
+    [projectId],
   )
 
   return (
@@ -256,7 +251,6 @@ export default function MainLayout() {
         <SupportCenterDrawer
           open={supportOpen}
           projectId={projectId}
-          teamLeaderName={teamLeaderName}
           onClose={() => setSupportOpen(false)}
         />
       </div>

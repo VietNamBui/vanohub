@@ -61,6 +61,14 @@ class CvatClient:
     def about(self):
         return self._get("server/about")
 
+    def list_tasks(self, project_id=None, search=None):
+        params = {}
+        if project_id:
+            params["project_id"] = project_id
+        if search:
+            params["search"] = search
+        return self._get_all("tasks", params)
+
     def get_task(self, task_id):
         return self._get(f"tasks/{task_id}")
 

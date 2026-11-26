@@ -11,7 +11,7 @@ import { cx } from '@/utils/cx'
 import { changePassword, updateCurrentUser } from '../auth/api'
 import type { CurrentUser } from '../auth/types'
 import { useAuth } from '../auth/useAuth'
-import AnnotatorBreadcrumb from '../jobs/components/AnnotatorBreadcrumb'
+import ProjectBreadcrumb from '../../shared/components/ui/ProjectBreadcrumb'
 
 type SettingsTab = 'profile' | 'security' | 'notifications'
 
@@ -57,7 +57,7 @@ export default function AccountSettingsPage() {
     .filter((ra) => projectId === null || ra.project === projectId || ra.project === null)
     .map((ra) => ra.role)
   const uniqueRoles = [...new Set(scopedRoles)]
-  const primaryRole = uniqueRoles[0] ? ROLE_LABELS[uniqueRoles[0]] : 'Annotator'
+  const primaryRole = uniqueRoles[0] ? ROLE_LABELS[uniqueRoles[0]] : 'Thành viên'
   const scopedProjectName =
     user?.role_assignments.find((ra) => ra.project === projectId)?.project_name ||
     user?.role_assignments.find((ra) => ra.project_name)?.project_name ||
@@ -65,7 +65,7 @@ export default function AccountSettingsPage() {
 
   return (
     <div className="mx-auto flex max-w-[1160px] flex-col gap-6 px-6 py-7">
-      <AnnotatorBreadcrumb projectId={projectId} items={[{ label: 'Cài đặt tài khoản' }]} />
+      <ProjectBreadcrumb projectId={projectId} items={[{ label: 'Cài đặt tài khoản' }]} />
 
       <header>
         <h1 className="text-[30px] leading-tight font-bold text-[#101828]">Cài đặt tài khoản</h1>
