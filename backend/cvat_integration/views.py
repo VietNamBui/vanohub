@@ -10,7 +10,6 @@ from rest_framework.exceptions import PermissionDenied, ValidationError
 from rest_framework.request import Request
 from rest_framework.response import Response
 
-from accounts.datetime_utils import parse_int_param
 from accounts.models import User
 from projects.models import ActivityLog, Project
 
@@ -46,39 +45,6 @@ def status(request: Request) -> Response:
                 "detail": _sanitize_cvat_status_error(exc),
             }
         )
-
-
-@api_view(["GET"])
-def tasks(request: Request) -> Response:
-    """GET /api/cvat/tasks/?project_id=&search= — danh sách CVAT task (chỉ PM/superuser)."""
-    user = cast(User, request.user)
-    if not user.is_pm():
-        raise PermissionDenied("Chỉ Project Manager mới được xem danh sách CVAT task.")
-    raw_project_id = request.query_params.get("project_id")
-    project_id = (
-        parse_int_param(raw_project_id, "project_id")
-        if raw_project_id is not None and str(raw_project_id).strip() != ""
-        else None
-    )
-    search = (request.query_params.get("search") or "").strip() or None
-    try:
-        raw = CvatClient(timeout=10).list_tasks(project_id=project_id, search=search)
-    except CvatError as exc:
-        logger.warning("CVAT list_tasks failed: %s", exc)
-        return Response({"detail": _sanitize_cvat_status_error(exc)}, status=http_status.HTTP_502_BAD_GATEWAY)
-    return Response(
-        [
-            {
-                "id": t["id"],
-                "name": t.get("name") or f"Task #{t['id']}",
-                "project_id": t.get("project_id"),
-                "status": t.get("status", ""),
-                "size": t.get("size") or 0,
-                "subset": t.get("subset", ""),
-            }
-            for t in raw
-        ]
-    )
 
 
 def _link_state(user: User, sync: dict[str, Any] | None = None) -> dict[str, Any]:

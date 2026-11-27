@@ -80,3 +80,16 @@ Do not describe a code revert as a complete rollback when migrations, data trans
 - **Reversibility:** Documentation-only edits; revert cleanly via `git checkout -- docs/refactoring docs/operations/security-and-verification.md`.
 - **Commit:** None.
 - **Follow-up:** Day 1 Gate 0 — amend `PV04` in `docs/platform-spec.md`, sign off `D05`/`D06` MVP defaults, configure CVAT read-only service PAT + persistent Vector/ClickHouse volumes, then execute Days 2–3 VanoHub API export consumer + `D03`/`D05`/`D06` implementation.
+
+## 2026-11-27 — Remove superset-only `urls.py` routes to match `annotator-qclv1`
+
+- **Status:** Implemented and verified.
+- **Purpose and before → after:** Removed the three superset-only routes present on `feature/issue-logger` (`GET /api/cvat/tasks/`, `GET /api/auth/users/`, and duplicate `POST /api/auth/change-password/`) so all 8 backend `urls.py` route sets match `annotator-qclv1` (`backend/accounts/urls.py` retains CBV `.as_view()` bindings for `MeView` and `ChangePasswordView`) and eliminate the P0 `GET /api/cvat/tasks/` cross-org leak and orphan `GET /api/auth/users/` email exposure.
+- **Scope:** Branch `feature/issue-logger` @ `cbc05e5` (dirty workspace). Updated `backend/accounts/{urls,views,tests}.py`, `backend/cvat_integration/{urls,views,tests}.py`, `docs/api/contracts.md`, `docs/platform-spec.md`, and `docs/refactoring/changes.md`.
+- **Impacts:** Backend API surface and docs only; frontend had zero callers for all three removed routes (`AccountSettingsPage` uses `/api/auth/me/password/`).
+- **Compatibility:** Breaking only for any external caller of `/api/cvat/tasks/`, `/api/auth/users/`, or `/api/auth/change-password/` (now 404). Canonical `/api/auth/me/password/` is unchanged.
+- **Evidence:** `git diff annotator-qclv1 -- backend/*/urls.py` shows empty diff across `config`, `analytics`, `cvat_integration`, `jobs`, `projects`, `quality`, and `teams`, and only FBV→CBV style difference on `accounts/urls.py` (`me`→`MeView.as_view()`, `change_password`→`ChangePasswordView.as_view()`).
+- **Verification:** `cd backend`: `pipenv run ruff check .` (`All checks passed!`), `pipenv run pyright -p ../pyproject.toml` (`0 errors, 0 warnings, 0 informations`), `pipenv run python manage.py check` (`0 issues`), `pipenv run python manage.py makemigrations --check --dry-run` (`No changes detected`), `pipenv run python manage.py test --noinput` (`Ran 212 tests in 206.701s — OK`).
+- **Reversibility:** Pure code/doc diff; zero DB migrations or external CVAT side effects.
+- **Commit:** None.
+- **Follow-up:** None for `urls.py` parity.

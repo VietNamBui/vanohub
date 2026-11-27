@@ -28,15 +28,13 @@ All `/api/projects/{id}/...` views inherit `ProjectScopedViewMixin` + `HasProjec
 | --- | --- | --- |
 | `/api/auth/token/`, `/api/auth/token/refresh/` | `POST` | SimpleJWT login and refresh (`AllowAny` token endpoints). |
 | `/api/auth/me/` (`MeView`) | `GET`, `PATCH` | `IsAuthenticated`; current user profile, preferences, `cvat_account`, project roles. |
-| `/api/auth/me/password/`, `/api/auth/change-password/` (`ChangePasswordView`) | `POST` | `IsAuthenticated`; returns `204` and clears `initial_password_encrypted`. |
-| `/api/auth/users/` (`UserListView`) | `GET` | `user.is_pm()`; active users list with optional `?search=`. |
+| `/api/auth/me/password/` (`ChangePasswordView`) | `POST` | `IsAuthenticated`; returns `204` and clears `initial_password_encrypted`. |
 
 ### CVAT Integration (`/api/cvat/`)
 
 | Endpoint / View | Methods | Auth / Capability & Behavior |
 | --- | --- | --- |
 | `/api/cvat/status/` (`status`) | `GET` | `IsAuthenticated`; calls `CvatClient.about()` (timeout `5s`). Returns `200` with `{connected, url, version}` or `{connected: false, url, detail}` with sanitized error text. |
-| `/api/cvat/tasks/` (`tasks`) | `GET` | `user.is_pm()`; accepts `?project_id=` (CVAT project ID) and `?search=`; returns task summaries; maps `CvatError` to `502`. |
 | `/api/cvat/link/` (`link`) | `GET`, `POST`, `DELETE` | `IsAuthenticated`; `GET` returns `CvatAccount` state + `jobs_held`. `POST {"token"}` verifies PAT once via `/users/self` (never stores token), links `CvatAccount`, pushes held-job assignees, and quietly syncs orgs (`sync_organizations_quietly`). `DELETE` unlinks and clears CVAT assignees on held jobs. |
 | `/api/cvat/sync-organizations/` (`sync_organizations_view`) | `POST` | `user.is_pm()`; pulls CVAT orgs/memberships into VanoHub `Project` + `RoleAssignment` (`owner`/`maintainer` -> `project_manager`; other linked members default to `annotator`) and filters summary to caller's orgs unless superuser; maps `CvatError` to `502`. |
 

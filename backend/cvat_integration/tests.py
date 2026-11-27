@@ -208,14 +208,6 @@ class CvatClientSecurityAndApiTests(TestCase):
         self.assertNotIn("10.99.0.5", res.data["detail"])
         self.assertNotIn("secret-token-leak", res.data["detail"])
 
-    def test_cvat_tasks_endpoint_restricted_to_pm(self):
-        ann = self.f.client(self.f.ann1)
-        qc1 = self.f.client(self.f.qc1)
-        qc2 = self.f.client(self.f.qc2)
-        self.assertEqual(ann.get("/api/cvat/tasks/").status_code, 403)
-        self.assertEqual(qc1.get("/api/cvat/tasks/").status_code, 403)
-        self.assertEqual(qc2.get("/api/cvat/tasks/").status_code, 403)
-
     def test_client_rejects_invalid_and_unsafe_urls_before_creating_session(self):
         invalid_urls = [
             ("ftp://cvat.test", "http(s)://<host>"),

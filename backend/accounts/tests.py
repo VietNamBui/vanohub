@@ -81,17 +81,6 @@ class AuthApiTests(TestCase):
         self.assertTrue(res.data["cvat_linked"])
         self.assertEqual(res.data["cvat_username"], "bob_cvat")
 
-    def test_users_list_requires_pm(self):
-        self.client.force_authenticate(self.user)
-        self.assertEqual(self.client.get(reverse("users_list")).status_code, 200)
-        superuser = User.objects.create_superuser("super_bob", "super@example.com", "pw")
-        self.client.force_authenticate(superuser)
-        self.assertEqual(self.client.get(reverse("users_list")).status_code, 200)
-        ann = User.objects.create_user("ann", password="pw")
-        RoleAssignment.objects.create(user=ann, role=Role.ANNOTATOR, project=self.project)
-        self.client.force_authenticate(ann)
-        self.assertEqual(self.client.get(reverse("users_list")).status_code, 403)
-
     def test_wrong_password_is_rejected(self):
         response = self.client.post(
             reverse("token_obtain_pair"), {"username": "bob", "password": "wrong"}, format="json"
@@ -157,14 +146,6 @@ class AuthApiTests(TestCase):
         self.user.refresh_from_db()
         self.assertTrue(self.user.check_password("NewStrongPassword#2026"))
         self.assertEqual(self.user.initial_password_encrypted, "")
-
-        # Alias /api/auth/change-password/ hoạt động giống /api/auth/me/password/
-        alias_ok = self.client.post(
-            reverse("change_password"),
-            {"current_password": "NewStrongPassword#2026", "new_password": "AnotherStrongPassword#2027"},
-            format="json",
-        )
-        self.assertEqual(alias_ok.status_code, 204)
 
     def test_patch_me_rejects_xss_and_invalid_avatar_urls(self):
         self.client.force_authenticate(self.user)
