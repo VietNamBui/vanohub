@@ -15,10 +15,12 @@ Read relevant specs before changing workflows, permissions, or KPIs:
 - [.agents/skills/verify-vanohub/SKILL.md](./.agents/skills/verify-vanohub/SKILL.md) (`/verify-vanohub`) — full CI-parity verification & multi-role browser checklist.
 - [.agents/agents/spec-auditor.md](./.agents/agents/spec-auditor.md) — read-only subagent for auditing changes against `docs/platform-spec.md` and project invariants.
 
+For the current refactor, use [docs/refactoring/README.md](./docs/refactoring/README.md), [docs/refactoring/plan.md](./docs/refactoring/plan.md), [docs/refactoring/decisions.md](./docs/refactoring/decisions.md), and [docs/refactoring/baseline.md](./docs/refactoring/baseline.md). Follow [docs/refactoring/agent-workflow.md](./docs/refactoring/agent-workflow.md) for compact handoffs and branch-aware retrieval, and record meaningful changes in [docs/refactoring/changes.md](./docs/refactoring/changes.md). Preserve the existing product specification, scoped rules, and verification gates.
+
 ## Tech Stack
 
 - **Backend:** Python 3.14 (Pipenv), Django 6, Django REST Framework, SimpleJWT, Pydantic v2, PostgreSQL 17.
-- **Frontend:** React 19, TypeScript 6, Vite 8, React Router 8, Tailwind CSS 4, Untitled UI (React Aria), Ant Design 6, Axios.
+- **Frontend:** React 19, TypeScript 6, Vite 8, React Router 8, Tailwind CSS 4, Untitled UI (React Aria), Axios.
 - **External integration:** CVAT REST API (`backend/cvat_integration/`).
 
 ## Repository Map
@@ -28,9 +30,9 @@ Read relevant specs before changing workflows, permissions, or KPIs:
   - `projects/` — `Project`, `Dataset`, `Batch`, `Delivery`, `Guideline`, `Announcement`, `ActivityLog`, `UserNotification`, `seed_demo`.
   - `teams/` — `Team`, `TeamMember` (capacity, workload, transfers).
   - `jobs/` — `Job` lifecycle, queue, claim/start/submit, `AnnotatorRequest`, quick search.
-  - `quality/` — `ErrorCategory`, `Audit`, `AuditSample`, `ReviewError`, `sampling.py`, QC1/QC2 review views.
+  - `quality/` — `ErrorCategory`, `Audit`, `AuditSample`, `ReviewError`, frame-level QC2 sampling & historical four-eyes (`qc2.py`), QC1/QC2 review views.
   - `analytics/` — project overview, team ranking, member performance, QC1/QC2/annotator summaries.
-  - `cvat_integration/` — `CvatClient`, strict Pydantic v2 contracts (`schemas.py`), task/job import and sync (`sync.py`).
+  - `cvat_integration/` — `CvatClient`, `CvatAccount` (`/api/cvat/link/`), strict Pydantic v2 contracts (`schemas.py`), org/project/task/job sync (`sync.py`), outbound job assignee push & org invitations (`assignee.py`), and `sync_cvat` management command (`management/commands/sync_cvat.py`).
 - `frontend/src/` — React SPA:
   - `app/router.tsx` — capability-guarded route table.
   - `layouts/` — shell (`MainLayout`, notifications, quick search).
@@ -69,11 +71,11 @@ npm run dev
 Mirror [.github/workflows/ci.yml](./.github/workflows/ci.yml) before concluding any task (or invoke `/verify-vanohub`):
 
 - **Backend (PostgreSQL 17 running):**
-  - Repo root: `ruff check backend && pyright`
+  - `backend/`: `pipenv run ruff check . && pipenv run pyright -p ../pyproject.toml` (CI runs `ruff check backend && pyright` from repo root)
   - `backend/`: `pipenv run python manage.py check && pipenv run python manage.py makemigrations --check --dry-run && pipenv run python manage.py test`
 - **Frontend (`frontend/`):**
-  - `npx tsc -b --noEmit && npm run lint && npm run build`
-- **Live UI (`frontend/src` has 0 unit/E2E tests):** When modifying routes, `RequireCap` guards, forms, drawers, or workflow transitions, verify affected views live in a browser across relevant roles (`PM`, `QC2`, `QC1`, `Annotator`).
+  - `npm test && npx tsc -b --noEmit && npm run lint && npm run build`
+- **Live UI (Vitest `npm test` covers unit tests for shared helpers/types only — no component/E2E suite):** When modifying routes, `RequireCap` guards, forms, drawers, or workflow transitions, verify affected views live in a browser across relevant roles (`PM`, `QC2`, `QC1`, `Annotator`).
 
 ## Git & Safety Rules
 
