@@ -1,6 +1,5 @@
 from django.conf import settings
 from django.db import models
-
 from projects.models import SamplingMethod, StratifyBy
 
 
@@ -91,6 +90,13 @@ class Audit(models.Model):
 
     class Meta:
         ordering = ["-created_at"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["batch"],
+                condition=models.Q(status="in_progress"),
+                name="unique_in_progress_audit_per_batch",
+            ),
+        ]
 
     def __str__(self):
         return f"Audit #{self.pk} · {self.batch}"
@@ -123,6 +129,16 @@ class AuditSample(models.Model):
 
     class Meta:
         ordering = ["id"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["job"],
+                condition=models.Q(result="pending"),
+                name="unique_pending_sample_per_job",
+            ),
+        ]
+
+    def __str__(self):
+        return f"AuditSample #{self.pk} · {self.job}"
 
 
 class ReviewError(models.Model):
@@ -145,3 +161,6 @@ class ReviewError(models.Model):
 
     class Meta:
         ordering = ["-created_at"]
+
+    def __str__(self):
+        return f"{self.stage} · {self.category} · {self.job}"

@@ -13,7 +13,7 @@ import { useRequest } from '../../../shared/hooks/useRequest'
 import { formatDateTime } from '../../../shared/utils/format'
 import JobStatusBadge from '../../jobs/components/JobStatusBadge'
 import { ACTION_LABELS, JOB_STATUS_LABELS } from '../../jobs/constants'
-import type { JobDetail, JobStatus } from '../../jobs/types'
+import type { JobDetail, JobStatus, ReworkScope } from '../../jobs/types'
 import { getQc1Job, listErrorCategories, passQc1Job, rejectQc1Job, startQc1Job } from '../api'
 import { SEVERITY_LABELS } from '../constants'
 import type { Severity } from '../types'
@@ -139,6 +139,7 @@ function Qc1ReviewForm({ projectId, job, onDone }: { projectId: number; job: Job
   const { run, pending } = useAction()
   const { data: categories } = useRequest(`error-categories:${projectId}:qc1`, () => listErrorCategories(projectId, 'qc1'))
   const [rows, setRows] = useState<ErrorRow[]>([])
+  const [reworkScope, setReworkScope] = useState<ReworkScope>('partial')
   const [comment, setComment] = useState('')
   const [showErrors, setShowErrors] = useState(false)
   const nextKey = () => Math.max(0, ...rows.map((r) => r.key)) + 1
@@ -162,7 +163,12 @@ function Qc1ReviewForm({ projectId, job, onDone }: { projectId: number; job: Job
       location: r.location.trim(),
       description: r.description.trim(),
     }))
-    if (await run(() => rejectQc1Job(projectId, job.id, errors, comment.trim()), `Đã Reject ${job.name} — job chuyển về Rework`)) {
+    if (
+      await run(
+        () => rejectQc1Job(projectId, job.id, errors, comment.trim(), reworkScope),
+        `Đã Reject ${job.name} — job chuyển về Rework`,
+      )
+    ) {
       onDone()
     }
   }
@@ -240,6 +246,19 @@ function Qc1ReviewForm({ projectId, job, onDone }: { projectId: number; job: Job
         Thêm lỗi
       </Button>
       {showErrors && rows.length === 0 && <p className="text-sm text-error-primary">Thêm ít nhất 1 lỗi trước khi Reject.</p>}
+
+      <Select
+        label="Phạm vi rework (khi Reject)"
+        size="sm"
+        items={[
+          { id: 'partial', label: 'Sửa một phần', supportingText: 'Chỉ sửa các lỗi đã ghi' },
+          { id: 'full', label: 'Sửa toàn job', supportingText: 'Rà soát lại toàn bộ frame' },
+        ]}
+        selectedKey={reworkScope}
+        onSelectionChange={(k) => setReworkScope(k as ReworkScope)}
+      >
+        {(item) => <Select.Item id={item.id} label={item.label} supportingText={item.supportingText} />}
+      </Select>
 
       <TextArea label="Nhận xét (không bắt buộc)" rows={2} value={comment} onChange={setComment} />
 

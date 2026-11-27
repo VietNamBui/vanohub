@@ -1,10 +1,9 @@
 from collections import Counter, defaultdict
 
-from rest_framework import serializers
-
 from accounts.models import Role, expand_roles
 from accounts.permissions import get_project_capabilities
 from accounts.serializers import UserBriefSerializer
+from rest_framework import serializers
 
 from .models import ActivityLog, Announcement, Batch, Dataset, Delivery, Guideline, Project, UserNotification
 
@@ -133,12 +132,13 @@ class BatchSerializer(ProjectScopedSerializer):
 
 class DeliverySerializer(ProjectScopedSerializer):
     batch_name = serializers.CharField(source="batch.name", read_only=True)
+    dataset_name = serializers.CharField(source="batch.dataset.name", read_only=True)
     delivered_by = UserBriefSerializer(read_only=True)
     job_count = serializers.IntegerField(source="batch.jobs.count", read_only=True)
 
     class Meta:
         model = Delivery
-        fields = ["id", "batch", "batch_name", "note", "client_feedback",
+        fields = ["id", "batch", "batch_name", "dataset_name", "note", "client_feedback",
                   "delivered_by", "delivered_at", "job_count"]
 
     def validate_batch(self, batch):

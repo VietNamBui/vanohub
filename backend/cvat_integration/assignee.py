@@ -15,7 +15,7 @@ trực tiếp trên CVAT, lần đồng bộ sau sẽ ghi đè.
 import logging
 
 from django.db import transaction
-
+from django.db.models import Prefetch, Q
 from jobs.models import STAGE_STATUSES, Job, JobStatus
 
 from .client import CvatClient, CvatError
@@ -25,6 +25,19 @@ logger = logging.getLogger(__name__)
 _NOT_MANAGED = object()
 
 
+def pending_samples_prefetch():
+    """Prefetch lượt QC2 đang chờ (in_progress + pending) kèm tài khoản CVAT để tránh N+1."""
+    from quality.models import AuditSample
+
+    return Prefetch(
+        "audit_samples",
+        queryset=AuditSample.objects.filter(audit__status="in_progress", result="pending")
+        .select_related("auditor__cvat_account")
+        .order_by("-id"),
+        to_attr="_pending_samples",
+    )
+
+
 def current_holder(job):
     """User đang giữ job, None nếu chưa giao, _NOT_MANAGED nếu trạng thái này không đồng bộ."""
     if job.status in STAGE_STATUSES["annotation"]:
@@ -32,12 +45,16 @@ def current_holder(job):
     if job.status in STAGE_STATUSES["qc1"]:
         return job.qc1_reviewer
     if job.status == JobStatus.PENDING_QC2:
-        sample = (
-            job.audit_samples.filter(audit__status="in_progress", result="pending")
-            .select_related("auditor")
-            .order_by("-id")
-            .first()
-        )
+        prefetched = getattr(job, "_pending_samples", None)
+        if prefetched is not None:
+            sample = prefetched[0] if prefetched else None
+        else:
+            sample = (
+                job.audit_samples.filter(audit__status="in_progress", result="pending")
+                .select_related("auditor__cvat_account")
+                .order_by("-id")
+                .first()
+            )
         return sample.auditor if sample else _NOT_MANAGED
     return _NOT_MANAGED
 
@@ -121,8 +138,10 @@ def push_assignees(jobs, client=None):
 
 
 def _jobs(job_ids):
-    return Job.objects.filter(pk__in=job_ids, cvat_job_id__isnull=False).select_related(
-        "project", "annotator__cvat_account", "qc1_reviewer__cvat_account"
+    return (
+        Job.objects.filter(pk__in=job_ids, cvat_job_id__isnull=False)
+        .select_related("project", "annotator__cvat_account", "qc1_reviewer__cvat_account")
+        .prefetch_related(pending_samples_prefetch())
     )
 
 
@@ -146,13 +165,15 @@ def schedule_assignee_push(job_ids):
 
 def jobs_held_by(user):
     """Các job có CVAT mà user đang (hoặc có thể đang) giữ — dùng khi user liên kết / huỷ liên kết."""
-    from django.db.models import Q
-
     return _jobs(
         Job.objects.filter(
             Q(annotator=user, status__in=STAGE_STATUSES["annotation"])
             | Q(qc1_reviewer=user, status__in=STAGE_STATUSES["qc1"])
-            | Q(status=JobStatus.PENDING_QC2, audit_samples__auditor=user,
-                audit_samples__audit__status="in_progress")
+            | Q(
+                status=JobStatus.PENDING_QC2,
+                audit_samples__auditor=user,
+                audit_samples__audit__status="in_progress",
+                audit_samples__result="pending",
+            )
         ).values("pk")
     ).distinct()

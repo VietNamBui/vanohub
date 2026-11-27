@@ -11,6 +11,8 @@ export interface CvatLinkState {
   jobs_held: number
   /** Chỉ có sau khi liên kết / huỷ liên kết: kết quả đẩy assignee sang CVAT. */
   sync?: { pushed: number; error: string | null }
+  /** Chỉ có sau khi liên kết: kết quả đồng bộ organization từ CVAT. */
+  organizations?: unknown
 }
 
 export const getCvatLink = async () => (await apiClient.get<CvatLinkState>('/cvat/link/')).data

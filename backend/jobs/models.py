@@ -61,6 +61,9 @@ class Job(models.Model):
     )
     deadline = models.DateTimeField(null=True, blank=True)
     rework_round = models.PositiveSmallIntegerField(default=0)
+    total_rework_rounds = models.PositiveSmallIntegerField(
+        default=0, help_text="Tổng số vòng rework bất biến (không đặt lại khi gỡ escalation)"
+    )
     rework_scope = models.CharField(max_length=16, choices=ReworkScope.choices, default=ReworkScope.PARTIAL)
     is_escalated = models.BooleanField(default=False)
     is_locked = models.BooleanField(default=False)
@@ -89,7 +92,21 @@ class Job(models.Model):
 
     class Meta:
         ordering = ["deadline", "id"]
-        indexes = [models.Index(fields=["project", "status"])]
+        indexes = [
+            models.Index(fields=["project", "status"]),
+            models.Index(fields=["project", "annotator", "status"]),
+            models.Index(fields=["project", "qc1_reviewer", "status"]),
+        ]
+        constraints = [
+            models.CheckConstraint(
+                condition=(
+                    models.Q(annotator__isnull=True)
+                    | models.Q(qc1_reviewer__isnull=True)
+                    | ~models.Q(annotator=models.F("qc1_reviewer"))
+                ),
+                name="job_four_eyes_annotator_neq_qc1",
+            ),
+        ]
 
     def __str__(self):
         return self.name

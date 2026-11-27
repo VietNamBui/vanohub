@@ -1,7 +1,10 @@
-from django.test import TestCase
+from datetime import timedelta
 
-from accounts.models import Role
+from accounts.models import Role, User
 from accounts.testing import ProjectFixture, make_user
+from django.test import TestCase
+from django.utils import timezone
+from jobs.models import JobStatus
 
 from .models import Team, TeamMember
 
@@ -33,6 +36,71 @@ class TeamTests(TestCase):
 
     def test_qc2_only_cannot_manage_teams(self):
         self.assertEqual(self.f.client(self.f.qc2).get(self.f.url("teams/")).status_code, 403)
+
+    def test_add_member_blocks_cross_org_user_and_superuser(self):
+        other = ProjectFixture("OtherOrg")
+        superuser = User.objects.create_superuser("platform_admin", "admin@example.com", "pw")
+        url = self.f.url(f"teams/{self.team_a.id}/add-member/")
+
+        missing = self.pm.post(url, {"user": 999999}, format="json")
+        self.assertEqual(missing.status_code, 400)
+
+        for forbidden_user in (other.ann1, other.pm, superuser):
+            res = self.pm.post(url, {"user": forbidden_user.id}, format="json")
+            self.assertEqual(res.status_code, 400, res.data)
+            self.assertEqual(res.data["user"], missing.data["user"])
+            self.assertEqual(forbidden_user.get_project_roles(self.f.project), set())
+            self.assertFalse(TeamMember.objects.filter(team=self.team_a, user=forbidden_user).exists())
+
+    def test_remove_member_and_workload_reject_bad_int_with_400(self):
+        TeamMember.objects.create(team=self.team_a, user=self.f.ann1)
+        remove_url = self.f.url(f"teams/{self.team_a.id}/remove-member/")
+        for bad in ("abc", None, True, 0, -1, 9_999_999_999_999):
+            res = self.pm.post(remove_url, {"user": bad}, format="json")
+            self.assertEqual(res.status_code, 400, f"remove_member expected 400 for {bad!r}")
+
+        ok = self.pm.post(remove_url, {"user": self.f.ann1.id}, format="json")
+        self.assertEqual(ok.status_code, 200, ok.data)
+        self.assertFalse(TeamMember.objects.filter(team=self.team_a, user=self.f.ann1).exists())
+
+        for bad_team in ("abc", "0", "-5", "999999999999999"):
+            res = self.pm.get(self.f.url(f"teams/workload/?team={bad_team}"))
+            self.assertEqual(res.status_code, 400, f"workload expected 400 for team={bad_team!r}")
+
+    def test_workload_counts_only_active_annotator_statuses_and_overdue(self):
+        now = timezone.now()
+        TeamMember.objects.create(team=self.team_a, user=self.f.ann1, capacity=5)
+        TeamMember.objects.create(team=self.team_a, user=self.f.qc1, capacity=4)
+        # Active annotator jobs
+        self.f.job(status=JobStatus.ANNOTATING, annotator=self.f.ann1, deadline=now - timedelta(hours=2))
+        self.f.job(
+            status=JobStatus.REWORK,
+            annotator=self.f.ann1,
+            deadline=now + timedelta(hours=6),
+            is_escalated=True,
+        )
+        # Jobs waiting in QC1 / QC2 must NOT count against annotator active workload
+        self.f.job(
+            status=JobStatus.PENDING_QC1,
+            annotator=self.f.ann1,
+            deadline=now - timedelta(hours=1),
+        )
+        self.f.job(
+            status=JobStatus.PENDING_QC2,
+            annotator=self.f.ann1,
+            deadline=now - timedelta(hours=3),
+        )
+
+        res = self.pm.get(self.f.url(f"teams/workload/?team={self.team_a.id}"))
+        self.assertEqual(res.status_code, 200, res.data)
+        by_user = {row["user"]["id"]: row for row in res.data}
+        self.assertEqual(by_user[self.f.ann1.id]["holding"], 2)
+        self.assertEqual(by_user[self.f.ann1.id]["overdue"], 1)
+        self.assertEqual(by_user[self.f.ann1.id]["due_soon"], 1)
+        self.assertEqual(by_user[self.f.ann1.id]["escalated"], 1)
+        self.assertEqual(by_user[self.f.qc1.id]["holding"], 0)
+        self.assertEqual(by_user[self.f.qc1.id]["qc1_holding"], 1)
+        self.assertEqual(by_user[self.f.qc1.id]["overdue"], 0)
 
 
 class TeamDeleteTests(TestCase):

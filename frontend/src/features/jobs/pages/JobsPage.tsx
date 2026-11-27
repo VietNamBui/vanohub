@@ -1,6 +1,6 @@
 import { ExportOutlined, ReloadOutlined } from '@ant-design/icons'
-import { App, Button, Card, Checkbox, Input, Select, Space, Table, Tabs, Tooltip, Typography, type TableProps } from 'antd'
-import { useState } from 'react'
+import { App, Button, Card, Checkbox, Input, Select, Space, Table, Tabs, Tag, Tooltip, Typography, type TableProps } from 'antd'
+import { useMemo, useState } from 'react'
 import { useSearchParams } from 'react-router'
 import { getErrorMessage } from '../../../shared/api/errors'
 import StateView from '../../../shared/components/StateView'
@@ -27,21 +27,59 @@ const TABS: { key: Stage | ''; label: string }[] = [
   { key: 'done', label: 'Hoàn tất' },
 ]
 
+const VALID_STAGES = new Set<Stage>(['annotation', 'qc1', 'qc2', 'done'])
+
+function parsePositiveInt(raw: string | null): number | undefined {
+  if (!raw) return undefined
+  const num = Number(raw)
+  return Number.isInteger(num) && num > 0 ? num : undefined
+}
+
+function parseUrlFilters(sp: URLSearchParams): Omit<JobFilters, 'page' | 'page_size' | 'ordering'> {
+  const rawStage = sp.get('stage') ?? ''
+  const stage: Stage | '' = VALID_STAGES.has(rawStage as Stage) ? (rawStage as Stage) : ''
+  return {
+    stage,
+    status: sp.get('status') || undefined,
+    dataset: parsePositiveInt(sp.get('dataset')),
+    batch: parsePositiveInt(sp.get('batch')),
+    assignee: parsePositiveInt(sp.get('assignee')),
+    search: sp.get('search') || undefined,
+    escalated: sp.get('escalated') === '1',
+    overdue: sp.get('overdue') === '1',
+    due_soon: sp.get('due_soon') === '1',
+    unassigned: sp.get('unassigned') === '1',
+  }
+}
+
 /** PM-05 Jobs — danh sách job dùng chung, lọc theo stage / dataset / batch / cờ. */
 export default function JobsPage() {
   const { projectId, can } = useProject()
-  const [searchParams] = useSearchParams()
-  const [filters, setFilters] = useState<JobFilters>(() => ({
+  const [searchParams, setSearchParams] = useSearchParams()
+  const spKey = searchParams.toString()
+  const urlFilters = useMemo(() => parseUrlFilters(searchParams), [searchParams])
+  const [pager, setPager] = useState<{ spKey: string; page: number; page_size: number; ordering?: string }>({
+    spKey,
     page: 1,
     page_size: 50,
-    stage: '',
-    batch: searchParams.get('batch') ? Number(searchParams.get('batch')) : undefined,
-    dataset: searchParams.get('dataset') ? Number(searchParams.get('dataset')) : undefined,
-    escalated: searchParams.get('escalated') === '1',
-    assignee: searchParams.get('assignee') ? Number(searchParams.get('assignee')) : undefined,
-    overdue: searchParams.get('overdue') === '1',
-    search: searchParams.get('search') || undefined,
-  }))
+    ordering: undefined,
+  })
+  const filters: JobFilters = useMemo(
+    () => ({
+      ...urlFilters,
+      page: pager.spKey === spKey ? pager.page : 1,
+      page_size: pager.page_size,
+      ordering: pager.ordering,
+    }),
+    [urlFilters, pager, spKey],
+  )
+  const [searchDraft, setSearchDraft] = useState(urlFilters.search ?? '')
+  const [syncedSearch, setSyncedSearch] = useState(urlFilters.search ?? '')
+  if (syncedSearch !== (urlFilters.search ?? '')) {
+    setSyncedSearch(urlFilters.search ?? '')
+    setSearchDraft(urlFilters.search ?? '')
+  }
+
   const [version, setVersion] = useState(0)
   const [selected, setSelected] = useState<number[]>([])
   const [openJob, setOpenJob] = useState<number | null>(null)
@@ -116,10 +154,24 @@ export default function JobsPage() {
   }
 
   const update = (patch: Partial<JobFilters>) => {
-    setFilters((f) => ({ ...f, page: 1, ...patch }))
+    const next = { ...urlFilters, ...patch }
+    const params = new URLSearchParams()
+    if (next.stage) params.set('stage', next.stage)
+    if (next.status) params.set('status', next.status)
+    if (next.dataset) params.set('dataset', String(next.dataset))
+    if (next.batch) params.set('batch', String(next.batch))
+    if (next.assignee) params.set('assignee', String(next.assignee))
+    if (next.search?.trim()) params.set('search', next.search.trim())
+    if (next.escalated) params.set('escalated', '1')
+    if (next.overdue) params.set('overdue', '1')
+    if (next.due_soon) params.set('due_soon', '1')
+    if (next.unassigned) params.set('unassigned', '1')
+    setSearchParams(params, { replace: true })
+    setPager((p) => ({ ...p, spKey: params.toString(), page: 1 }))
     setSelected([])
   }
   const reload = () => setVersion((v) => v + 1)
+  const assigneeMember = filters.assignee != null ? members?.find((m) => m.user.id === filters.assignee) : undefined
 
   async function doBulk(action: () => Promise<{ updated: number }>) {
     const result = await run(action)
@@ -191,7 +243,20 @@ export default function JobsPage() {
       <Card>
         <Tabs activeKey={filters.stage ?? ''} onChange={(k) => update({ stage: k as Stage | '' })} items={TABS} />
         <Space wrap style={{ marginBottom: 16 }}>
-          <Input.Search allowClear placeholder="Tên job / ID / CVAT job ID" style={{ width: 240 }} onSearch={(v) => update({ search: v })} />
+          <Input.Search
+            allowClear
+            placeholder="Tên job / ID / CVAT job ID"
+            style={{ width: 240 }}
+            value={searchDraft}
+            onChange={(e) => {
+              const val = e.target.value
+              setSearchDraft(val)
+              if (val === '' && filters.search) {
+                update({ search: undefined })
+              }
+            }}
+            onSearch={(v) => update({ search: v.trim() || undefined })}
+          />
           <Select
             allowClear placeholder="Project" style={{ width: 200 }} value={filters.dataset}
             options={datasets?.map((d) => ({ value: d.id, label: d.name }))}
@@ -209,7 +274,20 @@ export default function JobsPage() {
           />
           <Checkbox checked={filters.escalated} onChange={(e) => update({ escalated: e.target.checked })}>Escalated</Checkbox>
           <Checkbox checked={filters.overdue} onChange={(e) => update({ overdue: e.target.checked })}>Quá hạn</Checkbox>
+          <Checkbox checked={filters.due_soon} onChange={(e) => update({ due_soon: e.target.checked })}>Sắp hạn</Checkbox>
           <Checkbox checked={filters.unassigned} onChange={(e) => update({ unassigned: e.target.checked })}>Chưa giao</Checkbox>
+          {filters.assignee != null && (
+            <Tag
+              closable
+              color="blue"
+              onClose={(e) => {
+                e.preventDefault()
+                update({ assignee: undefined })
+              }}
+            >
+              Người phụ trách: {assigneeMember?.user.full_name ?? `#${filters.assignee}`}
+            </Tag>
+          )}
         </Space>
 
         {can('manage_jobs') && selected.length > 0 && (
@@ -239,12 +317,12 @@ export default function JobsPage() {
             onChange={(pagination, _f, sorter) => {
               const s = Array.isArray(sorter) ? sorter[0] : sorter
               const field = s?.field as string | undefined
-              setFilters((f) => ({
-                ...f,
+              setPager({
+                spKey,
                 page: pagination.current ?? 1,
                 page_size: pagination.pageSize ?? 50,
                 ordering: s?.order && field ? `${s.order === 'descend' ? '-' : ''}${field}` : undefined,
-              }))
+              })
             }}
           />
         )}

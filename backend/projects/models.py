@@ -146,6 +146,12 @@ class Delivery(models.Model):
 
     class Meta:
         ordering = ["-delivered_at"]
+        constraints = [
+            models.UniqueConstraint(fields=["batch"], name="unique_delivery_per_batch"),
+        ]
+
+    def __str__(self):
+        return f"Delivery #{self.pk} · {self.batch}"
 
 
 class ActivityLog(models.Model):
@@ -165,7 +171,13 @@ class ActivityLog(models.Model):
 
     class Meta:
         ordering = ["-created_at", "-id"]
-        indexes = [models.Index(fields=["project", "-created_at"])]
+        indexes = [
+            models.Index(fields=["project", "-created_at"]),
+            models.Index(fields=["project", "action", "created_at"]),
+        ]
+
+    def __str__(self):
+        return f"{self.action} · {self.target_label}"
 
     @classmethod
     def record(cls, *, project, actor, action, target, before=None, after=None, note="", job=None):
@@ -196,6 +208,25 @@ class Announcement(models.Model):
     class Meta:
         ordering = ["-created_at"]
 
+    def __str__(self):
+        return f"Announcement #{self.pk} · {self.project}"
+
+
+class AnnouncementRead(models.Model):
+    """Đánh dấu đã đọc thông báo chung (Announcement) theo từng người dùng."""
+
+    announcement = models.ForeignKey(Announcement, on_delete=models.CASCADE, related_name="reads")
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="announcement_reads")
+    read_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(fields=["announcement", "user"], name="unique_announcement_read"),
+        ]
+
+    def __str__(self):
+        return f"{self.user} read Announcement #{self.announcement_id}"
+
 
 class Guideline(models.Model):
     """Hướng dẫn gán nhãn có phiên bản (PM-18). Mỗi lần lưu tạo một phiên bản mới."""
@@ -210,6 +241,9 @@ class Guideline(models.Model):
     class Meta:
         ordering = ["-version"]
         constraints = [models.UniqueConstraint(fields=["project", "version"], name="unique_guideline_version")]
+
+    def __str__(self):
+        return f"v{self.version} · {self.title}"
 
 
 class UserNotification(models.Model):

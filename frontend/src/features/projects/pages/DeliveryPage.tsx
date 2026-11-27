@@ -38,7 +38,7 @@ export default function DeliveryPage() {
           pagination={false}
           locale={{ emptyText: 'Không có batch nào đang chờ' }}
           columns={[
-            { title: 'Batch', render: (_, c) => `${c.dataset_name} / ${c.batch_name}` },
+            { title: 'Batch', render: (_, c) => (c.dataset_name ? `${c.dataset_name} / ${c.batch_name}` : c.batch_name) },
             { title: 'Đã duyệt', width: 220, render: (_, c) => <Progress size="small" percent={c.job_count ? Math.round((c.approved_count * 100) / c.job_count) : 0} format={() => `${c.approved_count}/${c.job_count}`} /> },
             { title: 'Audit đang mở', dataIndex: 'open_audits', align: 'right' },
             { title: 'Điều kiện', render: (_, c) => (c.ready ? <Tag color="success">Đủ điều kiện</Tag> : <Tag>Chưa đủ</Tag>) },
@@ -53,7 +53,7 @@ export default function DeliveryPage() {
           dataSource={history.data ?? []}
           locale={{ emptyText: 'Chưa bàn giao lần nào' }}
           columns={[
-            { title: 'Batch', render: (_, d) => `${d.dataset_name} / ${d.batch_name}` },
+            { title: 'Batch', render: (_, d) => (d.dataset_name ? `${d.dataset_name} / ${d.batch_name}` : d.batch_name) },
             { title: 'Số job', dataIndex: 'job_count', align: 'right' },
             { title: 'Người bàn giao', render: (_, d) => <UserName user={d.delivered_by} /> },
             { title: 'Thời gian', dataIndex: 'delivered_at', render: formatDateTime },

@@ -1,6 +1,14 @@
+import re
+from urllib.parse import urlparse
+
 from rest_framework import serializers
 
 from .models import RoleAssignment, User
+
+AVATAR_DATA_URI_RE = re.compile(
+    r"^data:image/(?:png|jpeg|jpg|webp|gif);base64,[A-Za-z0-9+/]+={0,2}$",
+    re.IGNORECASE,
+)
 
 
 class UserBriefSerializer(serializers.ModelSerializer):
@@ -83,9 +91,23 @@ class ProfileUpdateSerializer(serializers.ModelSerializer):
         ]
 
     def validate_avatar_url(self, value):
+        value = (value or "").strip()
+        if not value:
+            return ""
         if len(value) > 500_000:
             raise serializers.ValidationError("Ảnh đại diện vượt quá kích thước cho phép.")
-        return value
+        if AVATAR_DATA_URI_RE.fullmatch(value):
+            return value
+        parsed = urlparse(value)
+        if (
+            parsed.scheme.lower() in ("http", "https")
+            and parsed.netloc
+            and not any(ch.isspace() or ord(ch) < 32 for ch in value)
+        ):
+            return value
+        raise serializers.ValidationError(
+            "URL ảnh đại diện chỉ chấp nhận http(s):// hoặc ảnh base64 (PNG, JPEG, WebP, GIF)."
+        )
 
     def update(self, instance, validated_data):
         full_name = validated_data.pop("full_name", None)

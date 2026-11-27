@@ -23,6 +23,7 @@ export const listJobs = async (projectId: number, filters: JobFilters) =>
         ...filters,
         escalated: filters.escalated ? 1 : undefined,
         overdue: filters.overdue ? 1 : undefined,
+        due_soon: filters.due_soon ? 1 : undefined,
         unassigned: filters.unassigned ? 1 : undefined,
         locked: filters.locked ? 1 : undefined,
       }),
@@ -66,7 +67,7 @@ export const getJobQueue = async (projectId: number, batch?: number) =>
 // --- Không gian làm việc Annotator ---
 export const listAnnotatorJobs = async (
   projectId: number,
-  params: { tab?: AnnotatorJobTab; search?: string; page?: number; overdue?: boolean } = {},
+  params: { tab?: AnnotatorJobTab; search?: string; page?: number; page_size?: number; overdue?: boolean; due_soon?: boolean } = {},
 ) =>
   (
     await apiClient.get<Paginated<Job>>(p(projectId, 'annotator/jobs/'), {
@@ -74,7 +75,9 @@ export const listAnnotatorJobs = async (
         tab: params.tab === 'all' ? undefined : params.tab,
         search: params.search,
         page: params.page,
+        page_size: params.page_size,
         overdue: params.overdue ? 1 : undefined,
+        due_soon: params.due_soon ? 1 : undefined,
       }),
     })
   ).data
@@ -116,6 +119,12 @@ export const createAnnotatorRequest = async (
     reason: string
   },
 ) => (await apiClient.post<AnnotatorRequest>(p(projectId, 'annotator/requests/'), payload)).data
+
+export const resolveAnnotatorRequest = async (
+  projectId: number,
+  requestId: number,
+  payload: { status: 'resolved' | 'rejected'; resolution_note: string },
+) => (await apiClient.post<AnnotatorRequest>(p(projectId, `annotator/requests/${requestId}/resolve/`), payload)).data
 
 export const quickSearchAnnotator = async (projectId: number, q: string) =>
   (await apiClient.get<AnnotatorQuickSearchResult>(p(projectId, 'annotator/search/'), { params: cleanParams({ q }) })).data

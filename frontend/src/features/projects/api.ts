@@ -86,7 +86,7 @@ export const sendAnnouncement = async (
 ) => (await apiClient.post<Announcement>(p(id, 'announcements/'), data)).data
 export const listProjectNotifications = async (id: number) =>
   (await apiClient.get<NotificationFeed>(p(id, 'notifications/'))).data
-export const markProjectNotificationsRead = async (id: number, notification_id?: number) =>
+export const markProjectNotificationsRead = async (id: number, notification_id?: number | string) =>
   (
     await apiClient.post<{ updated: number }>(
       p(id, 'notifications/mark-read/'),

@@ -38,7 +38,7 @@ export default function AuditWorkPage() {
   const [search, setSearch] = useState('')
   const [version, setVersion] = useState(0)
   const [selectedId, setSelectedId] = useState<number | null>(null)
-  const { run } = useAction()
+  const { run, pending } = useAction()
   const { data, error, isLoading, retry } = useRequest(`qc2-work:${projectId}:${result}:${mine}:${version}`, () =>
     listAuditSamples(projectId, {
       result: result === 'all' ? undefined : result,
@@ -129,7 +129,7 @@ export default function AuditWorkPage() {
                     <Table.Cell>
                       {s.result === 'pending' && s.audit_status === 'in_progress' && !conflict(s) ? (
                         <div className="flex gap-1.5">
-                          <Button size="xs" color="secondary" onPress={() => quickPass(s)}>Pass</Button>
+                          <Button size="xs" color="secondary" isDisabled={pending} onPress={() => quickPass(s)}>Pass</Button>
                           <Button size="xs" color="secondary-destructive" onPress={() => setSelectedId(s.id)}>Reject</Button>
                         </div>
                       ) : conflict(s) && s.result === 'pending' ? (

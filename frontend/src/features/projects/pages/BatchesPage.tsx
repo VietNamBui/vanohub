@@ -31,8 +31,8 @@ const ALL = 0
  */
 export default function BatchesPage() {
   const { project: org, projectId, can } = useProject()
-  const [searchParams] = useSearchParams()
-  const [dataset, setDataset] = useState<number>(Number(searchParams.get('dataset')) || ALL)
+  const [searchParams, setSearchParams] = useSearchParams()
+  const dataset = Number(searchParams.get('dataset')) || ALL
   const [search, setSearch] = useState('')
   const [version, setVersion] = useState(0)
   const [editing, setEditing] = useState<Batch | null>(null)
@@ -66,7 +66,14 @@ export default function BatchesPage() {
         <div className="flex flex-wrap items-center gap-3 border-b border-secondary p-4">
           <Select className="w-64" size="sm" aria-label="Lọc theo project"
             items={[{ id: ALL, label: 'Tất cả project' }, ...(datasets ?? []).map((d) => ({ id: d.id, label: d.name }))]}
-            selectedKey={dataset} onSelectionChange={(k) => setDataset(Number(k))}>
+            selectedKey={dataset}
+            onSelectionChange={(k) => {
+              const next = Number(k)
+              const params = new URLSearchParams(searchParams)
+              if (next === ALL) params.delete('dataset')
+              else params.set('dataset', String(next))
+              setSearchParams(params, { replace: true })
+            }}>
             {(item) => <Select.Item id={item.id} label={item.label} />}
           </Select>
           <Input className="min-w-48 flex-1" size="sm" icon={SearchLg} aria-label="Tìm task" placeholder="Tìm task, project hoặc team" value={search} onChange={setSearch} />

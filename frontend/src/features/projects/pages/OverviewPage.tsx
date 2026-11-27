@@ -104,11 +104,19 @@ export default function OverviewPage() {
             <List
               dataSource={data.alerts}
               locale={{ emptyText: 'Không có cảnh báo' }}
-              renderItem={(alert) => (
-                <List.Item actions={[<Link key="open" to={`../jobs?${alert.type === 'escalated' ? 'escalated=1' : 'overdue=1'}`} relative="path">Xem</Link>]}>
-                  <Space>{ALERT_ICONS[alert.level]}{alert.message}</Space>
-                </List.Item>
-              )}
+              renderItem={(alert) => {
+                const query =
+                  alert.type === 'escalated'
+                    ? 'escalated=1'
+                    : alert.type === 'due_soon'
+                      ? 'due_soon=1'
+                      : 'overdue=1'
+                return (
+                  <List.Item actions={[<Link key="open" to={`../jobs?${query}`} relative="path">Xem</Link>]}>
+                    <Space>{ALERT_ICONS[alert.level]}{alert.message}</Space>
+                  </List.Item>
+                )
+              }}
             />
           </Card>
         </Space>

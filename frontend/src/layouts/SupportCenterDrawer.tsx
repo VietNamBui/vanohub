@@ -18,12 +18,12 @@ const FAQS: FaqItem[] = [
   {
     id: 'withdraw',
     q: 'Nộp job lên QC1 rồi có rút lại được không?',
-    a: 'Sau khi nộp sang Chờ QC1, job sẽ chuyển cho QC1 kiểm tra và không tự rút lại được. Nếu cần mở lại gấp, hãy liên hệ Team Leader.',
+    a: 'Sau khi nộp sang Chờ QC1, job sẽ chuyển cho QC1 kiểm tra và không tự rút lại được. Nếu cần mở lại gấp, hãy liên hệ Project Manager.',
   },
   {
     id: 'dispute',
     q: 'Không đồng ý lỗi QC ghi thì làm gì?',
-    a: 'Mở trang Cần sửa hoặc Chi tiết Job, nhấn "Phản hồi lỗi" tại dòng lỗi tương ứng và nhập lý do. Yêu cầu sẽ được gửi đến Team Leader (chuyển PM nếu cần phân xử).',
+    a: 'Mở trang Cần sửa hoặc Chi tiết Job, nhấn "Phản hồi lỗi" tại dòng lỗi tương ứng và nhập lý do. Yêu cầu sẽ được gửi đến Project Manager xem xét và phân xử.',
   },
   {
     id: 'data-issue',
@@ -44,8 +44,8 @@ interface Props {
   onClose: () => void
 }
 
-/** Trung tâm hỗ trợ — Drawer trượt phải 440px với FAQ tìm kiếm được và liên hệ TL. */
-export default function SupportCenterDrawer({ open, projectId, teamLeaderName, onClose }: Props) {
+/** Trung tâm hỗ trợ — Drawer trượt phải 440px với FAQ tìm kiếm được và liên hệ PM. */
+export default function SupportCenterDrawer({ open, projectId, onClose }: Props) {
   const navigate = useNavigate()
   const [search, setSearch] = useState('')
   const [expanded, setExpanded] = useState<string | null>(null)
@@ -143,8 +143,7 @@ export default function SupportCenterDrawer({ open, projectId, teamLeaderName, o
             )}
 
             <p className="text-sm text-[#475467]">
-              Vẫn cần hỗ trợ? Liên hệ Team Leader{' '}
-              <span className="font-semibold text-[#101828]">{teamLeaderName || 'của team bạn'}</span>.
+              Vẫn cần hỗ trợ? Liên hệ <span className="font-semibold text-[#101828]">Project Manager</span> phụ trách dự án.
             </p>
 
             <Button color="primary" size="md" className="w-full justify-center" onPress={onClose}>

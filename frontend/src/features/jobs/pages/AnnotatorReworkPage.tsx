@@ -1,5 +1,4 @@
 import { ArrowRight } from '@untitledui/icons'
-import dayjs from 'dayjs'
 import { useState } from 'react'
 import { useNavigate } from 'react-router'
 import { Badge, BadgeWithDot } from '@/components/base/badges/badges'
@@ -8,6 +7,7 @@ import { useShell } from '../../../layouts/ShellContext'
 import { getErrorMessage } from '../../../shared/api/errors'
 import PageState from '../../../shared/components/ui/PageState'
 import { useRequest } from '../../../shared/hooks/useRequest'
+import { formatShortDateTime } from '../../../shared/utils/format'
 import { useProject } from '../../projects/projectContext'
 import { SEVERITY_LABELS } from '../../quality/constants'
 import type { Severity } from '../../quality/types'
@@ -15,7 +15,27 @@ import { getAnnotatorJob, listAnnotatorJobs } from '../api'
 import AnnotatorBreadcrumb from '../components/AnnotatorBreadcrumb'
 import DisputeErrorModal from '../components/DisputeErrorModal'
 import { formatDeadlineCountdown } from '../constants'
-import type { JobDetail } from '../types'
+import type { Job, JobDetail } from '../types'
+
+const REWORK_PAGE_SIZE = 100
+const MAX_REWORK_PAGES = 10
+const DETAIL_BATCH_SIZE = 6
+
+async function fetchAllReworkJobs(projectId: number): Promise<JobDetail[]> {
+  const allJobs: Job[] = []
+  for (let page = 1; page <= MAX_REWORK_PAGES; page += 1) {
+    const listed = await listAnnotatorJobs(projectId, { tab: 'rework', page, page_size: REWORK_PAGE_SIZE })
+    allJobs.push(...listed.results)
+    if (!listed.next || listed.results.length === 0) break
+  }
+  const details: JobDetail[] = []
+  for (let i = 0; i < allJobs.length; i += DETAIL_BATCH_SIZE) {
+    const chunk = allJobs.slice(i, i + DETAIL_BATCH_SIZE)
+    const batchDetails = await Promise.all(chunk.map((j) => getAnnotatorJob(projectId, j.id)))
+    details.push(...batchDetails)
+  }
+  return details
+}
 
 const SEVERITY_BADGE: Record<string, 'gray' | 'warning' | 'error'> = {
   minor: 'gray',
@@ -31,11 +51,7 @@ export default function AnnotatorReworkPage() {
   const [version, setVersion] = useState(0)
   const [disputeTarget, setDisputeTarget] = useState<{ job: JobDetail; errorId: number } | null>(null)
 
-  const req = useRequest(`annotator-rework-full:${projectId}:${version}`, async () => {
-    const listed = await listAnnotatorJobs(projectId, { tab: 'rework' })
-    const details = await Promise.all(listed.results.map((j) => getAnnotatorJob(projectId, j.id)))
-    return details
-  })
+  const req = useRequest(`annotator-rework-full:${projectId}:${version}`, () => fetchAllReworkJobs(projectId))
 
   const reworkJobs = req.data ?? []
   const totalErrors = reworkJobs.reduce((sum, j) => sum + j.errors.length, 0)
@@ -87,7 +103,7 @@ export default function AnnotatorReworkPage() {
                       <h2 className="text-lg font-bold text-[#101828]">{job.name}</h2>
                       <p className="mt-1 text-sm text-[#475467]">
                         {job.batch_name}
-                        {job.deadline ? ` · Hạn sửa ${dayjs(job.deadline).format('DD/MM HH:mm')}` : ''}
+                        {job.deadline ? ` · Hạn sửa ${formatShortDateTime(job.deadline)}` : ''}
                         {countdown ? ` · ${countdown.text}` : ''}
                       </p>
                     </div>
@@ -159,7 +175,7 @@ export default function AnnotatorReworkPage() {
                 )}
 
                 <footer className="border-t border-[#EAECF0] px-6 py-3.5 text-xs text-[#475467]">
-                  Từ vòng 3, hệ thống cảnh báo và bạn vẫn có thể tiếp tục sửa · RW07
+                  Khi vượt số vòng sửa tối đa ({job.max_rework_rounds}), job sẽ bị tạm khoá và chuyển Project Manager xem xét · RW07
                 </footer>
               </section>
             )

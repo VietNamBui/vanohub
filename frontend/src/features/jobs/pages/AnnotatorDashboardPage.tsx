@@ -1,5 +1,4 @@
 import { AlertTriangle, ArrowRight, CheckCircle, Clock } from '@untitledui/icons'
-import dayjs from 'dayjs'
 import { useEffect, useState } from 'react'
 import { Link, useNavigate } from 'react-router'
 import { Badge, BadgeWithDot } from '@/components/base/badges/badges'
@@ -9,7 +8,7 @@ import { useShell } from '../../../layouts/ShellContext'
 import { getErrorMessage } from '../../../shared/api/errors'
 import PageState from '../../../shared/components/ui/PageState'
 import { useRequest } from '../../../shared/hooks/useRequest'
-import { formatNumber } from '../../../shared/utils/format'
+import { formatDateTime, formatNumber, formatShortDateTime, VN_TIME_ZONE } from '../../../shared/utils/format'
 import { useAuth } from '../../auth/useAuth'
 import { useProject } from '../../projects/projectContext'
 import { SEVERITY_LABELS } from '../../quality/constants'
@@ -21,7 +20,12 @@ import { formatDeadlineCountdown, JOB_STATUS_LABELS } from '../constants'
 import type { AnnotatorDailyResult, AnnotatorRequestStatus } from '../types'
 
 function getGreeting() {
-  const hour = new Date().getHours()
+  const hourStr = new Intl.DateTimeFormat('en-GB', {
+    timeZone: VN_TIME_ZONE,
+    hour: '2-digit',
+    hourCycle: 'h23',
+  }).format(new Date())
+  const hour = Number(hourStr)
   if (hour < 12) return 'Chào buổi sáng'
   if (hour < 18) return 'Chào buổi chiều'
   return 'Chào buổi tối'
@@ -47,7 +51,6 @@ const SEVERITY_BADGE: Record<string, 'gray' | 'warning' | 'error'> = {
 }
 
 const REQUEST_STATUS_COLOR: Record<AnnotatorRequestStatus, 'warning' | 'success' | 'error' | 'gray'> = {
-  pending_tl: 'warning',
   pending_pm: 'warning',
   resolved: 'success',
   rejected: 'error',
@@ -73,7 +76,7 @@ export default function AnnotatorDashboardPage() {
 
   const firstName = getShortName(user?.full_name, user?.first_name, user?.username)
   const syncText = data?.meta?.last_cvat_sync_at
-    ? `đồng bộ CVAT lần cuối ${dayjs(data.meta.last_cvat_sync_at).format('HH:mm · DD/MM/YYYY')}`
+    ? `đồng bộ CVAT lần cuối ${formatDateTime(data.meta.last_cvat_sync_at)}`
     : 'giờ Việt Nam'
 
   return (
@@ -169,7 +172,7 @@ export default function AnnotatorDashboardPage() {
               subtitle={`${data.kpi_summary.due_soon_count} sắp hạn · ${data.kpi_summary.overdue_count} quá hạn`}
               tone={data.kpi_summary.due_soon_count + data.kpi_summary.overdue_count > 0 ? 'warning' : 'brand'}
               icon={<Clock className="size-5" />}
-              onClick={() => navigate(`/projects/${projectId}/annotator/jobs`)}
+              onClick={() => navigate(`/projects/${projectId}/annotator/jobs?due_soon=1`)}
             />
 
             <KpiCard
@@ -251,7 +254,7 @@ export default function AnnotatorDashboardPage() {
                           </td>
                           <td className="px-4 py-4">
                             <div className="text-xs font-medium text-[#344054]">
-                              {job.deadline ? dayjs(job.deadline).format('DD/MM HH:mm') : 'Chưa đặt'}
+                              {job.deadline ? formatShortDateTime(job.deadline) : 'Chưa đặt'}
                             </div>
                             {countdown && (
                               <div className="mt-1">
@@ -304,7 +307,7 @@ export default function AnnotatorDashboardPage() {
                   <>
                     <p className="mt-1 text-sm text-[#475467]">
                       {data.rework_focus.job_name}
-                      {data.rework_focus.deadline ? ` · hạn ${dayjs(data.rework_focus.deadline).format('DD/MM HH:mm')}` : ''} · lỗi theo object-frame (CL04 · RW01 · RW04)
+                      {data.rework_focus.deadline ? ` · hạn ${formatShortDateTime(data.rework_focus.deadline)}` : ''} · lỗi theo object-frame (CL04 · RW01 · RW04)
                     </p>
 
                     <div className="mt-4 grid grid-cols-3 gap-3">
@@ -361,7 +364,7 @@ export default function AnnotatorDashboardPage() {
               </div>
 
               <div className="mt-4 flex flex-wrap items-center justify-between gap-2 border-t border-[#F2F4F7] pt-4">
-                <span className="text-xs text-[#667085]">Sửa theo note từng lỗi (L8) · vòng 3 chỉ cảnh báo (L2)</span>
+                <span className="text-xs text-[#667085]">Sửa theo note từng lỗi (L8) · vượt quá số vòng tối đa sẽ tạm khoá và chuyển PM xem xét</span>
                 <Link
                   to={`/projects/${projectId}/annotator/rework`}
                   className="inline-flex items-center gap-1.5 text-sm font-semibold text-[#6941C6] hover:text-[#53389E]"
@@ -404,13 +407,15 @@ export default function AnnotatorDashboardPage() {
                     <span className="size-3 rounded-[3px] bg-[#D6BBFB]" />
                     Rework
                   </span>
-                  <span className="inline-flex items-center gap-1.5">
-                    <span className="h-0.5 w-4 border-t-2 border-dashed border-[#D92D20]" />
-                    Chỉ tiêu
-                  </span>
+                  {data.kpi_target != null && data.kpi_target > 0 && (
+                    <span className="inline-flex items-center gap-1.5">
+                      <span className="h-0.5 w-4 border-t-2 border-dashed border-[#D92D20]" />
+                      Chỉ tiêu
+                    </span>
+                  )}
                 </div>
 
-                <DailyStackedChart data={data.daily_results} target={data.kpi_target || 1200} />
+                <DailyStackedChart data={data.daily_results} target={data.kpi_target ?? undefined} />
               </div>
 
               <div className="mt-4 flex flex-wrap items-center justify-between gap-2 border-t border-[#F2F4F7] pt-4">
@@ -579,11 +584,12 @@ function MiniStat({ label, code, value }: { label: string; code: string; value: 
   )
 }
 
-function DailyStackedChart({ data, target }: { data: AnnotatorDailyResult[]; target: number }) {
+function DailyStackedChart({ data, target }: { data: AnnotatorDailyResult[]; target?: number }) {
   const [hoverIdx, setHoverIdx] = useState<number | null>(null)
-  const rawMax = Math.max(target, ...data.map((d) => d.total_objects), 100)
+  const targetVal = target ?? 0
+  const rawMax = Math.max(targetVal, ...data.map((d) => d.total_objects), 100)
   const maxY = Math.ceil((rawMax * 1.15) / 200) * 200
-  const targetPct = target > 0 ? Math.min(100, (target / maxY) * 100) : 0
+  const targetPct = targetVal > 0 ? Math.min(100, (targetVal / maxY) * 100) : 0
 
   return (
     <div className="relative mt-4">
@@ -601,7 +607,7 @@ function DailyStackedChart({ data, target }: { data: AnnotatorDailyResult[]; tar
             <div className="h-px bg-[#EAECF0]" />
           </div>
 
-          {target > 0 && (
+          {targetVal > 0 && (
             <div
               className="pointer-events-none absolute inset-x-0 border-t border-dashed border-[#D92D20]"
               style={{ bottom: `${targetPct}%`, height: 0 }}

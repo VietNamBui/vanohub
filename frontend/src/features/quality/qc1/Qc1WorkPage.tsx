@@ -41,7 +41,7 @@ export default function Qc1WorkPage() {
   const [page, setPage] = useState(1)
   const [version, setVersion] = useState(0)
   const [selectedId, setSelectedId] = useState<number | null>(null)
-  const { run } = useAction()
+  const { run, pending } = useAction()
 
   const jobs = useRequest(`qc1-jobs:${projectId}:${scope}:${tab}:${query}:${page}:${version}`, () =>
     listQc1Jobs(projectId, { scope, tab, search: query || undefined, page }),
@@ -136,9 +136,9 @@ export default function Qc1WorkPage() {
                         {reviewable ? (
                           <div className="flex gap-1.5">
                             {job.status === 'pending_qc1' && (
-                              <Button size="xs" color="secondary" onPress={() => quickStart(job)}>Nhận</Button>
+                              <Button size="xs" color="secondary" isDisabled={pending} onPress={() => quickStart(job)}>Nhận</Button>
                             )}
-                            <Button size="xs" color="secondary" onPress={() => quickPass(job)}>Pass</Button>
+                            <Button size="xs" color="secondary" isDisabled={pending} onPress={() => quickPass(job)}>Pass</Button>
                             <Button size="xs" color="secondary-destructive" onPress={() => setSelectedId(job.id)}>Reject</Button>
                           </div>
                         ) : (

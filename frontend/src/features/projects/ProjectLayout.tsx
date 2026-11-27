@@ -104,7 +104,11 @@ function buildMenu(can: (cap: Capability) => boolean): NavGroup[] {
     [
       { key: 'annotator/jobs', label: 'Job của tôi', cap: 'annotate_jobs', matchPrefix: 'annotator/jobs' },
       { key: 'annotator/rework', label: 'Cần sửa', cap: 'annotate_jobs' },
-      { key: 'annotator/requests', label: 'Yêu cầu của tôi', cap: ['annotate_jobs', 'manage_jobs'] },
+      {
+        key: 'annotator/requests',
+        label: can('manage_jobs') && !isAnnotator ? 'Yêu cầu từ Annotator' : 'Yêu cầu của tôi',
+        cap: ['annotate_jobs', 'manage_jobs'],
+      },
       { key: 'datasets', label: 'Projects', cap: 'view_jobs' },
       { key: 'batches', label: 'Tasks', cap: 'view_jobs' },
       { key: 'jobs', label: 'Jobs', cap: 'view_jobs' },
@@ -178,7 +182,7 @@ export default function ProjectLayout() {
   const projectId = Number(useParams().projectId)
   const navigate = useNavigate()
   const { pathname } = useLocation()
-  const { openSupport } = useShell()
+  const { openSupport, setProjectCapabilities } = useShell()
   const { data: project, error, isLoading, retry } = useRequest(`project:${projectId}`, () => getProject(projectId))
   const [openGroups, setOpenGroups] = useState<Record<string, boolean>>({
     'g-dashboard': true,
@@ -196,8 +200,14 @@ export default function ProjectLayout() {
   }, [project, projectId, retry])
 
   useEffect(() => {
-    if (project) setLastProjectId(project.id)
-  }, [project])
+    if (project) {
+      setLastProjectId(project.id)
+      setProjectCapabilities({ projectId: project.id, capabilities: project.my_capabilities })
+    }
+    return () => {
+      setProjectCapabilities(null)
+    }
+  }, [project, setProjectCapabilities])
 
   if (isLoading) return <StateView kind="loading" />
   if (error != null || !context) {

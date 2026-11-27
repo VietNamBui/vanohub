@@ -1,66 +1,61 @@
 import { AlertTriangle, Bell01, Check, CheckCircle, Clock, InfoCircle, XClose } from '@untitledui/icons'
-import { useEffect, useState } from 'react'
+import { useEffect, useEffectEvent, useState } from 'react'
 import { useNavigate } from 'react-router'
 import { Badge } from '@/components/base/badges/badges'
 import { useAuth } from '../features/auth/useAuth'
-import { listAnnouncements, listProjectNotifications, markProjectNotificationsRead } from '../features/projects/api'
+import { listProjectNotifications, markProjectNotificationsRead } from '../features/projects/api'
 import type { NotificationCategory, ProjectSummary, UnifiedNotification } from '../features/projects/types'
-import { useRequest } from '../shared/hooks/useRequest'
 import { formatDateTime, formatRelative } from '../shared/utils/format'
 import { cx } from '@/utils/cx'
 
 const POLL_MS = 60_000
 
-const seenKey = (userId: number, projectId: number) => `vanohub:notifSeen:${userId}:${projectId}`
-function readSeen(key: string): number {
-  try {
-    return Number(localStorage.getItem(key)) || 0
-  } catch {
-    return 0
-  }
-}
-function writeSeen(key: string, value: number) {
-  try {
-    localStorage.setItem(key, String(value))
-  } catch {
-    // ignore storage restriction
-  }
+interface ScopedNotification extends UnifiedNotification {
+  projectId: number
+  projectName: string
+  scopedKey: string
 }
 
-async function fetchNotifications(projects: ProjectSummary[], userId: number): Promise<UnifiedNotification[]> {
+interface FeedState {
+  scope: string
+  items: ScopedNotification[]
+  error: unknown
+}
+
+async function fetchNotifications(projects: ProjectSummary[], userId: number): Promise<ScopedNotification[]> {
   if (!projects.length || !userId) return []
   if (projects.length === 1) {
-    const feed = await listProjectNotifications(projects[0].id)
-    const seenAt = readSeen(seenKey(userId, projects[0].id))
-    return feed.items.map((item) => {
-      if (item.source === 'announcement' && !item.is_pinned_pending && new Date(item.created_at).getTime() <= seenAt) {
-        return { ...item, is_read: true }
-      }
-      return item
-    })
+    const project = projects[0]
+    const feed = await listProjectNotifications(project.id)
+    return feed.items.map((item) => ({
+      ...item,
+      projectId: project.id,
+      projectName: project.name,
+      scopedKey: `${project.id}:${item.id}`,
+    }))
   }
   const results = await Promise.allSettled(
-    projects.map(async (p) => {
-      const seenAt = readSeen(seenKey(userId, p.id))
-      const list = await listAnnouncements(p.id)
-      return list.map<UnifiedNotification>((a) => ({
-        id: `ann-${p.id}-${a.id}`,
-        notification_id: null,
-        source: 'announcement',
-        category: 'announcement',
-        title: `${p.name} · ${a.sender?.full_name ?? 'Hệ thống'}`,
-        body: a.content,
-        job_id: null,
-        action_url: `/projects/${p.id}/announcements`,
-        is_read: a.sender?.id === userId || new Date(a.created_at).getTime() <= seenAt,
-        is_pinned_pending: false,
-        created_at: a.created_at,
+    projects.map(async (project) => {
+      const feed = await listProjectNotifications(project.id)
+      return feed.items.map<ScopedNotification>((item) => ({
+        ...item,
+        projectId: project.id,
+        projectName: project.name,
+        scopedKey: `${project.id}:${item.id}`,
       }))
     }),
   )
-  return results
-    .flatMap((r) => (r.status === 'fulfilled' ? r.value : []))
-    .sort((a, b) => b.created_at.localeCompare(a.created_at))
+  const fulfilled = results.filter((r): r is PromiseFulfilledResult<ScopedNotification[]> => r.status === 'fulfilled')
+  if (fulfilled.length === 0 && results.length > 0) {
+    const firstRejected = results.find((r): r is PromiseRejectedResult => r.status === 'rejected')
+    throw firstRejected?.reason ?? new Error('Không tải được thông báo.')
+  }
+  return fulfilled
+    .flatMap((r) => r.value)
+    .sort((a, b) => {
+      if (a.is_pinned_pending !== b.is_pinned_pending) return a.is_pinned_pending ? -1 : 1
+      return b.created_at.localeCompare(a.created_at)
+    })
 }
 
 function CategoryIcon({ category }: { category: NotificationCategory }) {
@@ -118,17 +113,35 @@ export default function NotificationBell({ projects }: { projects: ProjectSummar
   const userId = user?.id ?? 0
   const [open, setOpen] = useState(false)
   const [tab, setTab] = useState<'all' | 'unread'>('all')
-  const [tick, setTick] = useState(0)
-  const [readIds, setReadIds] = useState<Record<string, boolean>>({})
+  const [refreshTick, setRefreshTick] = useState(0)
+  const [feed, setFeed] = useState<FeedState>({ scope: '', items: [], error: null })
   const scopeKey = projects.map((p) => p.id).join(',')
+  const fullScope = `${scopeKey}:${userId}`
+  const multiProject = projects.length > 1
 
-  const { data, error, isLoading } = useRequest(
-    `notif-drawer:${scopeKey}:${userId}:${tick}`,
-    () => fetchNotifications(projects, userId),
-  )
+  const loadFeed = useEffectEvent(() => fetchNotifications(projects, userId))
 
   useEffect(() => {
-    const timer = setInterval(() => setTick((t) => t + 1), POLL_MS)
+    let ignore = false
+    loadFeed().then(
+      (items) => {
+        if (!ignore) setFeed({ scope: fullScope, items, error: null })
+      },
+      (error: unknown) => {
+        if (!ignore) {
+          setFeed((prev) =>
+            prev.scope === fullScope ? { ...prev, error } : { scope: fullScope, items: [], error },
+          )
+        }
+      },
+    )
+    return () => {
+      ignore = true
+    }
+  }, [fullScope, refreshTick])
+
+  useEffect(() => {
+    const timer = setInterval(() => setRefreshTick((t) => t + 1), POLL_MS)
     return () => clearInterval(timer)
   }, [])
 
@@ -141,44 +154,35 @@ export default function NotificationBell({ projects }: { projects: ProjectSummar
     return () => window.removeEventListener('keydown', onKey)
   }, [open])
 
-  const items = (data ?? []).map((item) =>
-    !item.is_pinned_pending && readIds[item.id] ? { ...item, is_read: true } : item,
-  )
+  const isLoading = feed.scope !== fullScope
+  const error = feed.scope === fullScope ? feed.error : null
+  const items = feed.scope === fullScope ? feed.items : []
   const unreadCount = items.filter((i) => !i.is_read).length
   const visible = tab === 'unread' ? items.filter((i) => !i.is_read) : items
 
   async function markAllRead() {
-    const nowMs = new Date().getTime()
-    for (const p of projects) {
-      writeSeen(seenKey(userId, p.id), nowMs)
-    }
-    const nextRead: Record<string, boolean> = {}
-    for (const item of items) {
-      if (!item.is_pinned_pending) nextRead[item.id] = true
-    }
-    setReadIds((prev) => ({ ...prev, ...nextRead }))
-    if (projects.length === 1) {
-      try {
-        await markProjectNotificationsRead(projects[0].id)
-      } catch {
-        // ignore optimistic failure
-      }
+    setFeed((prev) => ({
+      ...prev,
+      items: prev.items.map((item) => (item.is_pinned_pending ? item : { ...item, is_read: true })),
+    }))
+    try {
+      await Promise.allSettled(projects.map((p) => markProjectNotificationsRead(p.id)))
+    } catch {
+      // ignore optimistic failure
     }
   }
 
-  async function handleItemClick(item: UnifiedNotification) {
-    if (!item.is_pinned_pending) {
-      setReadIds((prev) => ({ ...prev, [item.id]: true }))
-    }
-    if (!item.is_read && item.notification_id && projects.length === 1) {
+  async function handleItemClick(item: ScopedNotification) {
+    if (!item.is_pinned_pending && !item.is_read) {
+      setFeed((prev) => ({
+        ...prev,
+        items: prev.items.map((it) => (it.scopedKey === item.scopedKey ? { ...it, is_read: true } : it)),
+      }))
       try {
-        await markProjectNotificationsRead(projects[0].id, item.notification_id)
+        await markProjectNotificationsRead(item.projectId, item.id)
       } catch {
-        // ignore
+        // ignore optimistic failure
       }
-    }
-    if (item.source === 'announcement' && projects.length === 1) {
-      writeSeen(seenKey(userId, projects[0].id), new Date().getTime())
     }
     setOpen(false)
     if (item.action_url) {
@@ -192,7 +196,7 @@ export default function NotificationBell({ projects }: { projects: ProjectSummar
         type="button"
         onClick={() => {
           setOpen(true)
-          setTick((t) => t + 1)
+          setRefreshTick((t) => t + 1)
         }}
         aria-label={unreadCount ? `Thông báo, ${unreadCount} chưa đọc` : 'Thông báo'}
         className="relative flex size-10 cursor-pointer items-center justify-center rounded-lg text-tertiary transition hover:bg-primary_hover hover:text-secondary"
@@ -213,7 +217,7 @@ export default function NotificationBell({ projects }: { projects: ProjectSummar
               <div className="flex items-center gap-3">
                 <button
                   type="button"
-                  onClick={markAllRead}
+                  onClick={() => void markAllRead()}
                   className="inline-flex cursor-pointer items-center gap-1.5 text-sm font-semibold text-brand-secondary hover:text-brand-secondary_hover"
                 >
                   <Check className="size-4" />
@@ -279,7 +283,7 @@ export default function NotificationBell({ projects }: { projects: ProjectSummar
               ) : (
                 <ul className="divide-y divide-secondary">
                   {visible.map((item) => (
-                    <li key={item.id}>
+                    <li key={item.scopedKey}>
                       <button
                         type="button"
                         onClick={() => void handleItemClick(item)}
@@ -294,7 +298,9 @@ export default function NotificationBell({ projects }: { projects: ProjectSummar
                         <CategoryIcon category={item.category} />
                         <div className="min-w-0 flex-1">
                           <div className="flex items-center gap-2">
-                            <p className="text-sm font-semibold text-primary">{item.title}</p>
+                            <p className="text-sm font-semibold text-primary">
+                              {multiProject ? `${item.projectName} · ${item.title}` : item.title}
+                            </p>
                             {item.is_pinned_pending && (
                               <Badge size="sm" type="pill-color" color="warning">
                                 Cần xử lý

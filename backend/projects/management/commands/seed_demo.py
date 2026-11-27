@@ -9,16 +9,16 @@ Mọi tài khoản demo dùng mật khẩu: Demo@12345
 
 from datetime import timedelta
 
+from accounts.models import Role, RoleAssignment, User
 from django.conf import settings
 from django.core.management.base import BaseCommand, CommandError
 from django.db import transaction
 from django.utils import timezone
-
-from accounts.models import Role, RoleAssignment, User
 from jobs.models import AnnotatorRequest, Job, JobStatus, ReworkScope
-from projects.models import ActivityLog, Batch, Dataset, Guideline, Project, UserNotification
 from quality.models import ErrorCategory, ReviewError, ReviewStage, Severity
 from teams.models import Team, TeamMember
+
+from projects.models import ActivityLog, Batch, Dataset, Guideline, Project, UserNotification
 
 PROJECT_NAME = "[DEMO] Robotaxi 3D Cuboid"
 PASSWORD = "Demo@12345"
@@ -63,7 +63,7 @@ class Command(BaseCommand):
     def _create(self):
         now = timezone.now()
         users = {}
-        for username, roles in USERS.items():
+        for username in USERS:
             user, _ = User.objects.get_or_create(username=username, defaults={"first_name": username.split("_")[0].upper()})
             user.set_password(PASSWORD)
             user.save()
@@ -107,7 +107,8 @@ class Command(BaseCommand):
         qc1 = [users["qc1_demo"]]
 
         def make(batch, index, status, **extra):
-            annotator = annotators[index % len(annotators)]
+            annotator = extra.pop("annotator", annotators[index % len(annotators)])
+            extra.setdefault("total_rework_rounds", extra.get("rework_round", 0))
             return Job.objects.create(
                 project=project, dataset=dataset_of[batch], batch=batch, name=f"{batch.name}-{index:03d}", status=status,
                 annotator=annotator, qc1_reviewer=qc1[index % len(qc1)] if status not in (
@@ -123,7 +124,8 @@ class Command(BaseCommand):
                JobStatus.REWORK, JobStatus.PENDING_QC2, JobStatus.APPROVED, JobStatus.PENDING_ANNOTATION]
         for i, status in enumerate(mix, 1):
             make(b02, i, status, rework_round=1 if status == JobStatus.REWORK else 0)
-        make(b02, 20, JobStatus.REWORK, rework_round=3, is_escalated=True)
+        make(b02, 19, JobStatus.REWORK, annotator=users["ann1_demo"], rework_round=1)
+        make(b02, 20, JobStatus.REWORK, annotator=users["ann3_demo"], rework_round=3, is_escalated=True)
         overdue = make(b02, 21, JobStatus.ANNOTATING)
         overdue.deadline = now - timedelta(hours=6)
         overdue.save()
@@ -140,7 +142,12 @@ class Command(BaseCommand):
             ensure_qc2_sample(qc2_job)
 
         # Dữ liệu mẫu cho ann1_demo: lỗi rework, yêu cầu phản hồi lỗi / dữ liệu bị chặn & thông báo
-        ann1_rework = Job.objects.filter(project=project, annotator=users["ann1_demo"], status=JobStatus.REWORK).first()
+        ann1_rework = Job.objects.filter(
+            project=project,
+            annotator=users["ann1_demo"],
+            status=JobStatus.REWORK,
+            is_escalated=False,
+        ).first()
         if ann1_rework:
             ann1_rework.target_object_count = 1210
             ann1_rework.object_count = 1065
@@ -149,14 +156,15 @@ class Command(BaseCommand):
             ann1_rework.save(update_fields=["target_object_count", "object_count", "rework_scope", "deadline"])
             cats = list(ErrorCategory.objects.filter(project=project))
             if cats:
+                err_round = max(0, ann1_rework.rework_round - 1)
                 e1 = ReviewError.objects.create(
-                    job=ann1_rework, stage=ReviewStage.QC1, rework_round=0,
+                    job=ann1_rework, stage=ReviewStage.QC1, rework_round=err_round,
                     category=cats[0], severity=Severity.MAJOR,
                     location="Frame 214 · Object 38", description="Cuboid xe tải lệch đuôi ~0,4m",
                     reported_by=users["qc1_demo"],
                 )
                 ReviewError.objects.create(
-                    job=ann1_rework, stage=ReviewStage.QC1, rework_round=0,
+                    job=ann1_rework, stage=ReviewStage.QC1, rework_round=err_round,
                     category=cats[min(1, len(cats) - 1)], severity=Severity.CRITICAL,
                     location="Frame 220 · Chưa có ID object", description="Thiếu người đi bộ sau cột đèn",
                     reported_by=users["qc1_demo"],
@@ -173,7 +181,7 @@ class Command(BaseCommand):
                 UserNotification.objects.create(
                     recipient=users["ann1_demo"], project=project, job=ann1_rework,
                     category=UserNotification.Category.REWORK,
-                    title=f"{ann1_rework.name} bị trả sửa (vòng 1)",
+                    title=f"{ann1_rework.name} bị trả sửa (vòng {ann1_rework.rework_round})",
                     body="QC1 ghi 2 lỗi theo object-frame. Ưu tiên xử lý trước hạn.",
                     action_url=f"/projects/{project.id}/annotator/jobs/{ann1_rework.id}",
                     is_pinned_pending=True,

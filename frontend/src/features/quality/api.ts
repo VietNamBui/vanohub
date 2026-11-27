@@ -58,7 +58,7 @@ export const getAuditStrategy = async (projectId: number) =>
 // --- Level 1 QC (QC1) ---
 export const listQc1Jobs = async (
   projectId: number,
-  params: { scope?: Qc1Scope; tab?: Qc1JobTab; search?: string; page?: number; overdue?: boolean } = {},
+  params: { scope?: Qc1Scope; tab?: Qc1JobTab; search?: string; page?: number; page_size?: number; overdue?: boolean } = {},
 ) =>
   (
     await apiClient.get<Paginated<Job>>(p(projectId, 'qc1/jobs/'), {
@@ -67,6 +67,7 @@ export const listQc1Jobs = async (
         tab: params.tab === 'all' ? undefined : params.tab,
         search: params.search,
         page: params.page,
+        page_size: params.page_size,
         overdue: params.overdue ? 1 : undefined,
       }),
     })
@@ -81,8 +82,20 @@ export const startQc1Job = async (projectId: number, jobId: number, note = '') =
 export const passQc1Job = async (projectId: number, jobId: number, comment = '') =>
   (await apiClient.post<JobDetail>(p(projectId, `qc1/jobs/${jobId}/pass/`), { comment })).data
 
-export const rejectQc1Job = async (projectId: number, jobId: number, errors: ErrorInput[], comment = '') =>
-  (await apiClient.post<JobDetail>(p(projectId, `qc1/jobs/${jobId}/reject/`), { errors, comment })).data
+export const rejectQc1Job = async (
+  projectId: number,
+  jobId: number,
+  errors: ErrorInput[],
+  comment = '',
+  rework_scope: 'partial' | 'full' = 'partial',
+) =>
+  (
+    await apiClient.post<JobDetail>(p(projectId, `qc1/jobs/${jobId}/reject/`), {
+      errors,
+      comment,
+      rework_scope,
+    })
+  ).data
 
 export const getQc1Summary = async (projectId: number, period: string, scope?: 'mine') =>
   (await apiClient.get<Qc1Summary>(p(projectId, 'qc1-summary/'), { params: cleanParams({ period, scope }) })).data

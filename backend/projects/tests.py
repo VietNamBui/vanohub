@@ -1,11 +1,10 @@
-from django.test import TestCase
-from django.urls import reverse
-from rest_framework.test import APIClient
-
 from accounts.models import Role, RoleAssignment, User
 from accounts.testing import ProjectFixture
 from cvat_integration import sync
+from django.test import TestCase
+from django.urls import reverse
 from jobs.models import Job, JobStatus
+from rest_framework.test import APIClient
 
 from .models import ActivityLog, Dataset, Project
 
@@ -403,3 +402,148 @@ class MemberRoleRemovalTests(TestCase):
 
     def test_only_manage_team_can_remove(self):
         self.assertEqual(self._remove(self.f.ann1, "qc1", client=self.f.client(self.f.qc2)).status_code, 403)
+
+
+class DeliveryNotificationsAndHardeningTests(TestCase):
+    def setUp(self):
+        self.f = ProjectFixture()
+        self.pm = self.f.client(self.f.pm)
+        self.ann1 = self.f.client(self.f.ann1)
+
+    def test_delivery_candidates_and_deliveries_include_dataset_name_and_block_locked_jobs(self):
+        job = self.f.job(status=JobStatus.APPROVED, is_locked=True)
+
+        candidates = self.pm.get(self.f.url("deliveries/candidates/"))
+        self.assertEqual(candidates.status_code, 200, candidates.data)
+        self.assertEqual(candidates.data[0]["dataset_name"], "D1")
+        self.assertFalse(candidates.data[0]["ready"])
+
+        blocked = self.pm.post(self.f.url("deliveries/"), {"batch": self.f.batch.id}, format="json")
+        self.assertEqual(blocked.status_code, 400)
+
+        Job.objects.filter(pk=job.pk).update(is_locked=False)
+        candidates = self.pm.get(self.f.url("deliveries/candidates/")).data
+        self.assertTrue(candidates[0]["ready"])
+
+        created = self.pm.post(self.f.url("deliveries/"), {"batch": self.f.batch.id}, format="json")
+        self.assertEqual(created.status_code, 201, created.data)
+        self.assertEqual(created.data["dataset_name"], "D1")
+
+        listed = self.pm.get(self.f.url("deliveries/")).data
+        self.assertEqual(listed[0]["dataset_name"], "D1")
+
+        duplicate = self.pm.post(self.f.url("deliveries/"), {"batch": self.f.batch.id}, format="json")
+        self.assertEqual(duplicate.status_code, 400)
+
+    def test_notifications_announcement_read_clears_unread_count_and_preserves_pinned(self):
+        from datetime import timedelta
+
+        from django.utils import timezone
+
+        from .models import Announcement, AnnouncementRead, UserNotification
+
+        # Tạo 25 thông báo chỉ dành cho QC1, rồi 1 thông báo cũ hơn cho Annotator để kiểm tra lọc trước khi cắt 20.
+        ann_target = Announcement.objects.create(
+            project=self.f.project, sender=self.f.pm, target_roles=[Role.ANNOTATOR], content="Cho annotator"
+        )
+        for idx in range(25):
+            Announcement.objects.create(
+                project=self.f.project, sender=self.f.pm, target_roles=[Role.QC1], content=f"QC1 #{idx}"
+            )
+
+        feed = self.ann1.get(self.f.url("notifications/"))
+        self.assertEqual(feed.status_code, 200, feed.data)
+        ann_items = [item for item in feed.data["items"] if item["source"] == "announcement"]
+        self.assertEqual([item["id"] for item in ann_items], [f"ann-{ann_target.id}"])
+        self.assertEqual(feed.data["unread_count"], 1)
+
+        # Đánh dấu đọc riêng ann-<id> → unread_count về 0
+        mark_one = self.ann1.post(
+            self.f.url("notifications/mark-read/"), {"notification_id": f"ann-{ann_target.id}"}, format="json"
+        )
+        self.assertEqual(mark_one.status_code, 200, mark_one.data)
+        self.assertEqual(mark_one.data["updated"], 1)
+        self.assertTrue(AnnouncementRead.objects.filter(announcement=ann_target, user=self.f.ann1).exists())
+        self.assertEqual(self.ann1.get(self.f.url("notifications/")).data["unread_count"], 0)
+
+        # Tạo thêm 1 thông báo mới, 1 thông báo thường, 1 thông báo ghim pending
+        ann2 = Announcement.objects.create(
+            project=self.f.project, sender=self.f.pm, target_roles=[], content="Chung"
+        )
+        normal = UserNotification.objects.create(
+            recipient=self.f.ann1, project=self.f.project, title="Thường", is_pinned_pending=False
+        )
+        pinned = UserNotification.objects.create(
+            recipient=self.f.ann1, project=self.f.project, title="Đang treo", is_pinned_pending=True
+        )
+        self.assertEqual(self.ann1.get(self.f.url("notifications/")).data["unread_count"], 3)
+
+        # Đánh dấu đọc tất cả → đánh dấu ann2 & normal, giữ pinned chưa đọc
+        mark_all = self.ann1.post(self.f.url("notifications/mark-read/"), {}, format="json")
+        self.assertEqual(mark_all.status_code, 200, mark_all.data)
+        normal.refresh_from_db()
+        pinned.refresh_from_db()
+        self.assertTrue(normal.is_read)
+        self.assertFalse(pinned.is_read)
+        self.assertTrue(AnnouncementRead.objects.filter(announcement=ann2, user=self.f.ann1).exists())
+        self.assertEqual(self.ann1.get(self.f.url("notifications/")).data["unread_count"], 1)
+
+        # Cảnh báo deadline không chứa "(DB06)"
+        self.f.job(
+            status=JobStatus.ANNOTATING,
+            annotator=self.f.ann1,
+            deadline=timezone.now() + timedelta(hours=3),
+        )
+        deadline_items = [
+            i for i in self.ann1.get(self.f.url("notifications/")).data["items"] if i["source"] == "deadline"
+        ]
+        self.assertTrue(deadline_items)
+        self.assertNotIn("DB06", deadline_items[0]["body"])
+
+        # Fallback action_url cho người không có quyền ANNOTATE_JOBS (PM)
+        job = self.f.job(status=JobStatus.ANNOTATING, annotator=self.f.ann1)
+        n_with_job = UserNotification.objects.create(
+            recipient=self.f.pm, project=self.f.project, job=job, title="PM job"
+        )
+        n_no_job = UserNotification.objects.create(
+            recipient=self.f.pm, project=self.f.project, title="PM general"
+        )
+        pm_items = {i["id"]: i for i in self.pm.get(self.f.url("notifications/")).data["items"]}
+        self.assertEqual(pm_items[f"sys-{n_with_job.id}"]["action_url"], f"/projects/{self.f.project.id}/jobs")
+        self.assertEqual(pm_items[f"sys-{n_no_job.id}"]["action_url"], f"/projects/{self.f.project.id}")
+
+    def test_mark_notifications_read_invalid_id_returns_400(self):
+        for bad in ["abc", "sys-abc", "ann-abc", "due-1", "", True, -1, 9_999_999_999]:
+            res = self.ann1.post(
+                self.f.url("notifications/mark-read/"), {"notification_id": bad}, format="json"
+            )
+            self.assertEqual(res.status_code, 400, f"Expected 400 for {bad!r}, got {res.status_code}")
+
+    def test_bad_int_query_params_batch_list_member_password_and_filtered_lock(self):
+        # Bad integer query params trả 400
+        self.assertEqual(self.pm.get(self.f.url("batches/?dataset=abc")).status_code, 400)
+        self.assertEqual(self.pm.get(self.f.url("batches/?dataset=999999999999")).status_code, 400)
+        self.assertEqual(self.pm.get(self.f.url("activity/?actor=abc")).status_code, 400)
+
+        # Annotator xem danh sách batches được (Cap.VIEW_PROJECT), nhưng không sửa được
+        self.assertEqual(self.ann1.get(self.f.url("batches/")).status_code, 200)
+        self.assertEqual(
+            self.ann1.patch(self.f.url(f"batches/{self.f.batch.id}/"), {"deadline": None}, format="json").status_code,
+            403,
+        )
+
+        # Non-PM không thấy cờ has_initial_password=True của thành viên
+        created = self.pm.post(
+            self.f.url("members/"), {"full_name": "Tran Test", "roles": ["annotator"]}, format="json"
+        ).data
+        ann_members = {m["user"]["id"]: m for m in self.ann1.get(self.f.url("members/")).data}
+        self.assertFalse(ann_members[created["user"]["id"]]["has_initial_password"])
+
+        # POST lock kèm query param ?status=active không gây lỗi DoesNotExist 500
+        ds_lock = self.pm.post(self.f.url(f"datasets/{self.f.dataset.id}/lock/?status=active"))
+        self.assertEqual(ds_lock.status_code, 200, ds_lock.data)
+        self.assertEqual(ds_lock.data["status"], "locked")
+
+        batch_lock = self.pm.post(self.f.url(f"batches/{self.f.batch.id}/lock/?status=active"))
+        self.assertEqual(batch_lock.status_code, 200, batch_lock.data)
+        self.assertEqual(batch_lock.data["status"], "locked")

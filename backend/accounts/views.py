@@ -1,3 +1,5 @@
+from collections.abc import Mapping
+
 from django.contrib.auth.password_validation import validate_password
 from django.core.exceptions import ValidationError as DjangoValidationError
 from rest_framework.decorators import api_view
@@ -30,8 +32,18 @@ def change_password(request):
     Đổi xong thì xoá bản mã hoá của mật khẩu tạm → PM không còn xem được mật khẩu nữa.
     """
     user = request.user
-    current = request.data.get("current_password") or ""
-    new = request.data.get("new_password") or ""
+    if not isinstance(request.data, Mapping):
+        raise ValidationError({"detail": "Dữ liệu yêu cầu không hợp lệ."})
+    current = request.data.get("current_password")
+    new = request.data.get("new_password")
+    if not isinstance(current, str):
+        raise ValidationError({"current_password": "Mật khẩu hiện tại phải là chuỗi ký tự."})
+    if not isinstance(new, str):
+        raise ValidationError({"new_password": "Mật khẩu mới phải là chuỗi ký tự."})
+    if not current:
+        raise ValidationError({"current_password": "Vui lòng nhập mật khẩu hiện tại."})
+    if not new:
+        raise ValidationError({"new_password": "Vui lòng nhập mật khẩu mới."})
     if not user.check_password(current):
         raise ValidationError({"current_password": "Mật khẩu hiện tại không đúng."})
     if new == current:

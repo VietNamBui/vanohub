@@ -9,23 +9,87 @@ gom trong Audit đang mở của task (Batch). Frame được chọn cố địn
 import math
 import random
 
-from django.db.models import Count, Q
-
 from accounts.models import Role, User
-from jobs.models import JobStatus
+from django.db import IntegrityError, transaction
+from django.db.models import Count, Q
+from jobs.models import Job, JobStatus
+from projects.models import ActivityLog, Batch
 
-from .models import Audit, AuditSample
+from .models import Audit, AuditSample, ReviewError, ReviewStage
+
+ANNOTATOR_EVENTS = (
+    "annotator.claim",
+    "annotator.start",
+    "annotator.start_rework",
+    "annotator.submit",
+    "annotator.resubmit",
+)
+QC1_EVENTS = ("qc1.start", "qc1.pass", "qc1.reject")
+
+
+def get_stage_history(job) -> tuple[set[int], set[int], set[int]]:
+    """Trả về (annotator_ids, qc1_ids, qc2_ids) gồm cả người hiện tại và lịch sử đa giai đoạn của job."""
+    annotator_ids: set[int] = {job.annotator_id} if job.annotator_id else set()
+    qc1_ids: set[int] = {job.qc1_reviewer_id} if job.qc1_reviewer_id else set()
+    qc2_ids: set[int] = set()
+
+    log_rows = (
+        ActivityLog.objects.filter(job=job, actor_id__isnull=False)
+        .filter(
+            Q(action__in=ANNOTATOR_EVENTS + QC1_EVENTS)
+            | Q(action__in=("job.status", "job.assign"), after__event__in=ANNOTATOR_EVENTS)
+        )
+        .values_list("action", "after", "actor_id")
+    )
+    for action, after, actor_id in log_rows:
+        if action in QC1_EVENTS:
+            qc1_ids.add(actor_id)
+        elif action in ANNOTATOR_EVENTS or (isinstance(after, dict) and after.get("event") in ANNOTATOR_EVENTS):
+            annotator_ids.add(actor_id)
+
+    for stage, reported_by_id in ReviewError.objects.filter(
+        job=job, reported_by_id__isnull=False
+    ).values_list("stage", "reported_by_id"):
+        if stage == ReviewStage.QC1:
+            qc1_ids.add(reported_by_id)
+        elif stage == ReviewStage.QC2:
+            qc2_ids.add(reported_by_id)
+
+    for auditor_id, reviewed_by_id in AuditSample.objects.filter(job=job).values_list("auditor_id", "reviewed_by_id"):
+        if auditor_id:
+            qc2_ids.add(auditor_id)
+        if reviewed_by_id:
+            qc2_ids.add(reviewed_by_id)
+
+    return annotator_ids, qc1_ids, qc2_ids
+
+
+def four_eyes_conflicts(job) -> set[int]:
+    """Luật bốn mắt cho QC2: chặn mọi người đã từng annotate hoặc QC1 job này (kể cả lịch sử)."""
+    annotator_ids, qc1_ids, _ = get_stage_history(job)
+    return annotator_ids | qc1_ids
 
 
 def pick_auditor(job):
     """ĐỀ XUẤT (chưa chốt): tự giao lượt QC2 cho người có vai trò QC2 (gán trực tiếp, không tính PM kiêm QC2)
     đang giữ ít lượt chờ kiểm nhất, trừ người đã annotate / QC1 job (luật bốn mắt). Không có ai → để trống, PM phân."""
-    blocked = {uid for uid in (job.annotator_id, job.qc1_reviewer_id) if uid}
+    blocked = four_eyes_conflicts(job)
     candidates = (
-        User.objects.filter(role_assignments__project=job.project, role_assignments__role=Role.QC2)
+        User.objects.filter(
+            is_active=True,
+            role_assignments__project=job.project,
+            role_assignments__role=Role.QC2,
+        )
         .exclude(pk__in=blocked)
-        .annotate(load=Count("audit_samples", filter=Q(audit_samples__result=AuditSample.Result.PENDING,
-                                                       audit_samples__audit__project=job.project)))
+        .annotate(
+            load=Count(
+                "audit_samples",
+                filter=Q(
+                    audit_samples__result=AuditSample.Result.PENDING,
+                    audit_samples__audit__project=job.project,
+                ),
+            )
+        )
         .order_by("load", "id")
     )
     return candidates.first()
@@ -34,7 +98,7 @@ def pick_auditor(job):
 def pick_frames(job, rate):
     total = max(job.frame_count, 1)
     count = min(total, max(1, math.ceil(total * rate / 100)))
-    rng = random.Random(f"{job.pk}:{job.rework_round}")
+    rng = random.Random(f"{job.pk}:{job.rework_round}")  # noqa: S311
     return [job.cvat_start_frame + offset for offset in sorted(rng.sample(range(total), count))]
 
 
@@ -42,13 +106,37 @@ def ensure_qc2_sample(job):
     """Job đang Chờ QC2 mà chưa có lượt QC2 đang chờ → tạo lượt mới. Trả về lượt QC2 (hoặc None)."""
     if job.status != JobStatus.PENDING_QC2:
         return None
-    pending = job.audit_samples.filter(result=AuditSample.Result.PENDING).first()
-    if pending:
-        return pending
-    project = job.project
-    audit = Audit.objects.filter(batch=job.batch, status=Audit.Status.IN_PROGRESS).first()
-    if audit is None:
-        audit = Audit.objects.create(project=project, batch=job.batch, method="random",
-                                     sampling_rate=project.sampling_rate, seed=0, eligible_count=0)
-    return AuditSample.objects.create(audit=audit, job=job, rework_round=job.rework_round,
-                                      frames=pick_frames(job, project.sampling_rate), auditor=pick_auditor(job))
+    with transaction.atomic():
+        batch = Batch.objects.select_for_update(of=("self",)).get(pk=job.batch_id)
+        locked_job = Job.objects.select_for_update(of=("self",)).select_related("project", "batch").get(pk=job.pk)
+        if locked_job.status != JobStatus.PENDING_QC2:
+            return None
+        pending = AuditSample.objects.filter(job=locked_job, result=AuditSample.Result.PENDING).first()
+        if pending is not None:
+            return pending
+        project = locked_job.project
+        audit = Audit.objects.filter(batch=batch, status=Audit.Status.IN_PROGRESS).first()
+        if audit is None:
+            try:
+                with transaction.atomic():
+                    audit = Audit.objects.create(
+                        project=project,
+                        batch=batch,
+                        method="random",
+                        sampling_rate=project.sampling_rate,
+                        seed=0,
+                        eligible_count=0,
+                    )
+            except IntegrityError:
+                audit = Audit.objects.get(batch=batch, status=Audit.Status.IN_PROGRESS)
+        try:
+            with transaction.atomic():
+                return AuditSample.objects.create(
+                    audit=audit,
+                    job=locked_job,
+                    rework_round=locked_job.rework_round,
+                    frames=pick_frames(locked_job, project.sampling_rate),
+                    auditor=pick_auditor(locked_job),
+                )
+        except IntegrityError:
+            return AuditSample.objects.get(job=locked_job, result=AuditSample.Result.PENDING)

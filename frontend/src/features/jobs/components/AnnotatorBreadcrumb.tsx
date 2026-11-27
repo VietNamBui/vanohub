@@ -8,7 +8,7 @@ export interface Crumb {
 
 /** Breadcrumb chuẩn thiết kế Annota: Home icon > cấp cha > trang hiện tại màu tím #6941C6. */
 export default function AnnotatorBreadcrumb({ projectId, items }: { projectId: number | null; items: Crumb[] }) {
-  const homeTo = projectId ? `/projects/${projectId}/annotator/dashboard` : '/projects'
+  const homeTo = projectId ? `/projects/${projectId}` : '/projects'
 
   return (
     <nav aria-label="Breadcrumb" className="flex flex-wrap items-center gap-2 text-sm">

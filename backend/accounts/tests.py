@@ -1,9 +1,8 @@
 from django.db import IntegrityError
 from django.test import TestCase
 from django.urls import reverse
-from rest_framework.test import APIClient
-
 from projects.models import Project
+from rest_framework.test import APIClient
 
 from .models import Role, RoleAssignment, User, expand_roles
 
@@ -106,3 +105,49 @@ class AuthApiTests(TestCase):
         self.user.refresh_from_db()
         self.assertTrue(self.user.check_password("NewStrongPassword#2026"))
         self.assertEqual(self.user.initial_password_encrypted, "")
+
+    def test_patch_me_rejects_xss_and_invalid_avatar_urls(self):
+        self.client.force_authenticate(self.user)
+        bad_urls = [
+            "javascript:alert(1)",
+            "JAVASCRIPT:alert(document.cookie)",
+            "data:text/html,<script>alert(1)</script>",
+            "data:text/html;base64,PHNjcmlwdD5hbGVydCgxKTwvc2NyaXB0Pg==",
+            "data:image/svg+xml;base64,PHN2ZyBvbmxvYWQ9YWxlcnQoMSk+PC9zdmc+",
+            "ftp://example.com/avatar.png",
+            "data:image/png;base64," + ("A" * 500_000),
+        ]
+        for url in bad_urls:
+            res = self.client.patch(reverse("me"), {"avatar_url": url}, format="json")
+            self.assertEqual(res.status_code, 400, f"Expected 400 for {url[:60]}, got {res.status_code}")
+
+    def test_patch_me_accepts_safe_avatar_urls_and_empty(self):
+        self.client.force_authenticate(self.user)
+        safe_urls = [
+            "",
+            "https://cdn.example.com/avatar.png",
+            "http://localhost:8000/media/avatar.jpg",
+            "data:image/png;base64,iVBORw0KGgo=",
+            "data:image/webp;base64,UklGRh4AAABXRUJQ",
+            "data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7",
+        ]
+        for url in safe_urls:
+            res = self.client.patch(reverse("me"), {"avatar_url": url}, format="json")
+            self.assertEqual(res.status_code, 200, f"Expected 200 for {url}, got {res.status_code}: {res.data}")
+            self.assertEqual(res.data["avatar_url"], url)
+
+    def test_change_password_rejects_non_string_payloads_with_400(self):
+        self.client.force_authenticate(self.user)
+        payloads = [
+            {"current_password": ["secret-pw"], "new_password": "NewStrongPassword#2026"},
+            {"current_password": 12345, "new_password": "NewStrongPassword#2026"},
+            {"current_password": {"pw": "secret-pw"}, "new_password": "NewStrongPassword#2026"},
+            {"current_password": None, "new_password": "NewStrongPassword#2026"},
+            {"current_password": "secret-pw", "new_password": ["NewStrongPassword#2026"]},
+            {"current_password": "secret-pw", "new_password": {"pw": "NewStrongPassword#2026"}},
+            {"current_password": "secret-pw", "new_password": 99999999},
+            {"current_password": "secret-pw", "new_password": None},
+        ]
+        for payload in payloads:
+            res = self.client.post(reverse("change-password"), payload, format="json")
+            self.assertEqual(res.status_code, 400, f"Expected 400 for {payload}, got {res.status_code}")

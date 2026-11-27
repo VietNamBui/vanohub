@@ -1,5 +1,6 @@
 import { CheckCircle, Eye, EyeOff, Link01, LinkBroken01, LinkExternal01, Shield01 } from '@untitledui/icons'
 import { useState } from 'react'
+import { useNavigate } from 'react-router'
 import { Badge } from '@/components/base/badges/badges'
 import { Button } from '@/components/base/buttons/button'
 import { Input } from '@/components/base/input/input'
@@ -25,15 +26,20 @@ const BENEFITS = [
  * Token chỉ dùng một lần để VanoHub biết bạn là user nào bên CVAT; VanoHub không lưu token.
  */
 export default function CvatLinkPage() {
-  const { user } = useAuth()
+  const { user, refreshUser } = useAuth()
   const [version, setVersion] = useState(0)
   const [override, setOverride] = useState<CvatLinkState | null>(null)
   const { data, error, isLoading, retry } = useRequest(`cvat-link:${version}`, getCvatLink)
   const state = override ?? data
 
-  const changed = (next: CvatLinkState) => {
+  const changed = async (next: CvatLinkState) => {
     setOverride(next)
     setVersion((v) => v + 1)
+    try {
+      await refreshUser()
+    } catch {
+      // ignore transient refresh failure; page state already updated
+    }
   }
 
   return (
@@ -75,7 +81,7 @@ export default function CvatLinkPage() {
   )
 }
 
-function StatusCard({ state, username, onChanged }: { state: CvatLinkState; username: string; onChanged: (s: CvatLinkState) => void }) {
+function StatusCard({ state, username, onChanged }: { state: CvatLinkState; username: string; onChanged: (s: CvatLinkState) => Promise<void> | void }) {
   const [confirm, setConfirm] = useState(false)
   const [pending, setPending] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -84,7 +90,7 @@ function StatusCard({ state, username, onChanged }: { state: CvatLinkState; user
     setPending(true)
     setError(null)
     try {
-      onChanged(await unlinkCvat())
+      await onChanged(await unlinkCvat())
       setConfirm(false)
     } catch (e) {
       setError(getErrorMessage(e))
@@ -151,33 +157,90 @@ function StatusCard({ state, username, onChanged }: { state: CvatLinkState; user
   )
 }
 
-/** Kết quả đẩy job sang CVAT ngay sau khi liên kết / huỷ liên kết. */
-function SyncNotice({ state }: { state: CvatLinkState }) {
-  if (!state.sync) {
-    if (state.linked && state.jobs_held) {
-      return <p className="mt-4 text-sm text-tertiary">Bạn đang giữ {state.jobs_held} job — mở tab <b>Jobs</b> trong CVAT để làm.</p>
-    }
-    return null
+function summarizeOrganizationsSync(organizations: unknown): { kind: 'synced' | 'error'; message: string } | null {
+  if (organizations == null) return null
+  if (Array.isArray(organizations)) {
+    if (organizations.length === 0) return null
+    return { kind: 'synced', message: `Đã đồng bộ ${organizations.length} organization từ CVAT.` }
   }
-  if (state.sync.error) {
+  if (typeof organizations !== 'object') return null
+  const org = organizations as Record<string, unknown>
+  if (typeof org.error === 'string' && org.error) {
+    return { kind: 'error', message: org.error }
+  }
+  const created = Array.isArray(org.created) ? org.created.length : 0
+  const updated = Array.isArray(org.updated) ? org.updated.length : 0
+  const pmAdded = Array.isArray(org.pm_added) ? org.pm_added.length : 0
+  const membersAdded = Array.isArray(org.members_added) ? org.members_added.length : 0
+  const totalAdded = created + pmAdded + membersAdded
+  if (totalAdded > 0 || updated > 0) {
+    const parts: string[] = []
+    if (created > 0) parts.push(`${created} organization mới`)
+    if (pmAdded + membersAdded > 0) parts.push(`${pmAdded + membersAdded} lượt phân quyền thành viên`)
+    if (updated > 0 && parts.length === 0) parts.push(`${updated} organization đã cập nhật`)
+    return { kind: 'synced', message: `Đã đồng bộ từ CVAT: ${parts.join(', ')}.` }
+  }
+  if (typeof org.synced === 'number' && org.synced > 0) {
+    return { kind: 'synced', message: `Đã đồng bộ ${org.synced} organization từ CVAT.` }
+  }
+  if (typeof org.count === 'number' && org.count > 0) {
+    return { kind: 'synced', message: `Đã đồng bộ ${org.count} organization từ CVAT.` }
+  }
+  return null
+}
+
+/** Kết quả đẩy job và đồng bộ organization sang/từ CVAT ngay sau khi liên kết / huỷ liên kết. */
+function SyncNotice({ state }: { state: CvatLinkState }) {
+  const navigate = useNavigate()
+  const orgSync = state.linked ? summarizeOrganizationsSync(state.organizations) : null
+
+  const jobNotice = (() => {
+    if (!state.sync) {
+      if (state.linked && state.jobs_held) {
+        return <p className="mt-4 text-sm text-tertiary">Bạn đang giữ {state.jobs_held} job — mở tab <b>Jobs</b> trong CVAT để làm.</p>
+      }
+      return null
+    }
+    if (state.sync.error) {
+      return (
+        <div role="alert" className="mt-5 rounded-xl bg-primary p-4 text-sm ring-1 ring-yellow-200 ring-inset">
+          <p className="font-semibold text-warning-primary">Đã liên kết, nhưng chưa đồng bộ được job sang CVAT</p>
+          <p className="mt-0.5 text-tertiary">{state.sync.error} — VanoHub sẽ thử lại ở lần đồng bộ batch tiếp theo. Báo PM nếu lỗi kéo dài.</p>
+        </div>
+      )
+    }
+    if (!state.linked) return null
     return (
-      <div role="alert" className="mt-5 rounded-xl bg-primary p-4 text-sm ring-1 ring-yellow-200 ring-inset">
-        <p className="font-semibold text-warning-primary">Đã liên kết, nhưng chưa đồng bộ được job sang CVAT</p>
-        <p className="mt-0.5 text-tertiary">{state.sync.error} — VanoHub sẽ thử lại ở lần đồng bộ batch tiếp theo. Báo PM nếu lỗi kéo dài.</p>
+      <div role="status" className="mt-5 rounded-xl bg-secondary p-4 text-sm text-tertiary">
+        {state.sync.pushed
+          ? <>Đã giao <b className="text-secondary">{state.sync.pushed} job</b> cho bạn trên CVAT. Mở tab <b>Jobs</b> trong CVAT để làm.</>
+          : state.jobs_held ? <>Các job bạn đang giữ đã có sẵn trên CVAT.</> : <>Hiện bạn chưa giữ job nào.</>}
       </div>
     )
-  }
-  if (!state.linked) return null
+  })()
+
   return (
-    <div role="status" className="mt-5 rounded-xl bg-secondary p-4 text-sm text-tertiary">
-      {state.sync.pushed
-        ? <>Đã giao <b className="text-secondary">{state.sync.pushed} job</b> cho bạn trên CVAT. Mở tab <b>Jobs</b> trong CVAT để làm.</>
-        : state.jobs_held ? <>Các job bạn đang giữ đã có sẵn trên CVAT.</> : <>Hiện bạn chưa giữ job nào.</>}
-    </div>
+    <>
+      {jobNotice}
+      {orgSync?.kind === 'error' && (
+        <div role="alert" className="mt-3 rounded-xl bg-primary p-4 text-sm ring-1 ring-yellow-200 ring-inset">
+          <p className="font-semibold text-warning-primary">Chưa đồng bộ được danh sách Organization từ CVAT</p>
+          <p className="mt-0.5 text-tertiary">{orgSync.message}</p>
+        </div>
+      )}
+      {orgSync?.kind === 'synced' && (
+        <div role="status" className="mt-3 flex flex-wrap items-center justify-between gap-3 rounded-xl bg-secondary p-4 text-sm">
+          <p className="font-medium text-secondary">{orgSync.message}</p>
+          <Button size="sm" color="primary" onPress={() => navigate('/projects')}>
+            Đi tới danh sách Organization
+          </Button>
+        </div>
+      )}
+    </>
   )
 }
 
-function LinkForm({ cvatUrl, onLinked }: { cvatUrl: string; onLinked: (s: CvatLinkState) => void }) {
+function LinkForm({ cvatUrl, onLinked }: { cvatUrl: string; onLinked: (s: CvatLinkState) => Promise<void> | void }) {
   const [token, setToken] = useState('')
   const [show, setShow] = useState(false)
   const [pending, setPending] = useState(false)
@@ -192,7 +255,7 @@ function LinkForm({ cvatUrl, onLinked }: { cvatUrl: string; onLinked: (s: CvatLi
     setPending(true)
     setError(null)
     try {
-      onLinked(await linkCvat(token.trim()))
+      await onLinked(await linkCvat(token.trim()))
       setToken('')
     } catch (e) {
       setError(getErrorMessage(e))

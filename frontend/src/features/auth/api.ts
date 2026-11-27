@@ -6,8 +6,9 @@ export async function obtainTokens(username: string, password: string): Promise<
   return data
 }
 
-export async function changePassword(currentPassword: string, newPassword: string): Promise<void> {
+export async function changePassword(currentPassword: string, newPassword: string): Promise<boolean> {
   await apiClient.post('/auth/me/password/', { current_password: currentPassword, new_password: newPassword })
+  return true
 }
 
 export async function fetchCurrentUser(): Promise<CurrentUser> {

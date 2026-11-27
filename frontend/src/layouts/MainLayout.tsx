@@ -9,7 +9,7 @@ import { useRequest } from '../shared/hooks/useRequest'
 import { ROLE_LABELS, type Role } from '../shared/types/roles'
 import NotificationBell from './NotificationBell'
 import QuickSearchModal from './QuickSearchModal'
-import { ShellContext } from './ShellContext'
+import { ShellContext, type ProjectCapabilitiesState } from './ShellContext'
 import SupportCenterDrawer from './SupportCenterDrawer'
 
 function getInitials(name?: string) {
@@ -27,14 +27,19 @@ export default function MainLayout() {
   const navigate = useNavigate()
   const projectMatch = useMatch('/projects/:projectId/*')
   const projectId = projectMatch ? Number(projectMatch.params.projectId) : null
-  const { data: projects } = useRequest(`header-projects:${projectId ?? 'all'}`, listProjects)
+  const { data: projects } = useRequest(
+    `header-projects:${user?.id ?? 0}:${user?.role_assignments.length ?? 0}`,
+    listProjects,
+  )
   const scopedProjects = (projects ?? []).filter((p) => projectId === null || p.id === projectId)
+  const currentProject = (projects ?? []).find((p) => p.id === projectId) ?? null
 
   const [searchOpen, setSearchOpen] = useState(false)
   const [supportOpen, setSupportOpen] = useState(false)
   const [menuOpen, setMenuOpen] = useState(false)
   const [changingPassword, setChangingPassword] = useState(false)
   const [teamLeaderName, setTeamLeaderName] = useState<string | null>(null)
+  const [projectCapabilities, setProjectCapabilities] = useState<ProjectCapabilitiesState | null>(null)
   const menuRef = useRef<HTMLDivElement>(null)
 
   const displayName =
@@ -52,7 +57,7 @@ export default function MainLayout() {
   const settingsPath = projectId ? `/projects/${projectId}/account/settings` : '/account/settings'
   const cvatLinkPath = projectId ? `/projects/${projectId}/cvat-link` : '/cvat-link'
 
-  // Phím tắt toàn cục: ⌘K / Ctrl+K mở tìm kiếm nhanh; Alt+Shift+Q đăng xuất.
+  // Phím tắt toàn cục: ⌘K / Ctrl+K mở tìm kiếm nhanh; Alt+Shift+Q đăng xuất (bỏ qua khi đang gõ).
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
       if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
@@ -60,8 +65,18 @@ export default function MainLayout() {
         setMenuOpen(false)
         setSearchOpen((prev) => !prev)
       } else if (e.altKey && e.shiftKey && e.key.toLowerCase() === 'q') {
+        const target = e.target as HTMLElement | null
+        const isEditable =
+          target != null &&
+          (target.tagName === 'INPUT' ||
+            target.tagName === 'TEXTAREA' ||
+            target.tagName === 'SELECT' ||
+            target.isContentEditable)
+        if (isEditable) return
         e.preventDefault()
-        logout()
+        if (window.confirm('Bạn muốn đăng xuất?')) {
+          logout()
+        }
       }
     }
     window.addEventListener('keydown', onKeyDown)
@@ -88,12 +103,14 @@ export default function MainLayout() {
   const shellValue = useMemo(
     () => ({
       projectId,
+      projectCapabilities,
+      setProjectCapabilities,
       teamLeaderName,
       setTeamLeaderName,
       openSearch: () => setSearchOpen(true),
       openSupport: () => setSupportOpen(true),
     }),
-    [projectId, teamLeaderName],
+    [projectId, projectCapabilities, teamLeaderName],
   )
 
   return (
@@ -267,7 +284,12 @@ export default function MainLayout() {
           <Outlet />
         </main>
 
-        <QuickSearchModal open={searchOpen} projectId={projectId} onClose={() => setSearchOpen(false)} />
+        <QuickSearchModal
+          open={searchOpen}
+          projectId={projectId}
+          currentProject={currentProject}
+          onClose={() => setSearchOpen(false)}
+        />
         <SupportCenterDrawer
           open={supportOpen}
           projectId={projectId}

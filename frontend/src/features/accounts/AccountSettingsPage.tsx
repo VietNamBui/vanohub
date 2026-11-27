@@ -31,13 +31,11 @@ export default function AccountSettingsPage() {
   const { projectId: projectIdParam } = useParams()
   const projectId = projectIdParam ? Number(projectIdParam) : null
   const [searchParams, setSearchParams] = useSearchParams()
-  const initialTab = (searchParams.get('tab') as SettingsTab) || 'profile'
-  const [tab, setTab] = useState<SettingsTab>(
-    ['profile', 'security', 'notifications'].includes(initialTab) ? initialTab : 'profile',
-  )
+  const rawTab = searchParams.get('tab')
+  const tab: SettingsTab =
+    rawTab === 'security' || rawTab === 'notifications' || rawTab === 'profile' ? rawTab : 'profile'
 
   const switchTab = (next: SettingsTab) => {
-    setTab(next)
     setSearchParams({ tab: next }, { replace: true })
   }
 
@@ -48,11 +46,12 @@ export default function AccountSettingsPage() {
     .filter((ra) => projectId === null || ra.project === projectId || ra.project === null)
     .map((ra) => ra.role)
   const uniqueRoles = [...new Set(scopedRoles)]
-  const primaryRole = uniqueRoles[0] ? ROLE_LABELS[uniqueRoles[0]] : 'Annotator'
+  const primaryRole = uniqueRoles[0] ? ROLE_LABELS[uniqueRoles[0]] : 'Thành viên'
   const scopedProjectName =
     user?.role_assignments.find((ra) => ra.project === projectId)?.project_name ||
     user?.role_assignments.find((ra) => ra.project_name)?.project_name ||
     ''
+  const cvatLinkPath = projectId ? `/projects/${projectId}/cvat-link` : '/cvat-link'
 
   return (
     <div className="mx-auto flex max-w-[1160px] flex-col gap-6 px-6 py-7">
@@ -95,6 +94,7 @@ export default function AccountSettingsPage() {
           user={user}
           primaryRole={primaryRole}
           scopedProjectName={scopedProjectName}
+          cvatLinkPath={cvatLinkPath}
           onSaved={setUser}
         />
       )}
@@ -112,11 +112,13 @@ function ProfileTab({
   user,
   primaryRole,
   scopedProjectName,
+  cvatLinkPath,
   onSaved,
 }: {
   user: CurrentUser | null
   primaryRole: string
   scopedProjectName: string
+  cvatLinkPath: string
   onSaved: (u: CurrentUser) => void
 }) {
   const { run, pending } = useAction()
@@ -212,7 +214,7 @@ function ProfileTab({
             <Badge size="md" type="pill-color" color={user?.cvat_linked ? 'success' : 'warning'}>
               {user?.cvat_linked ? `CVAT: ${user.cvat_username}` : 'Chưa liên kết CVAT'}
             </Badge>
-            <Link to="/cvat-link" className="text-sm font-semibold text-[#6941C6] hover:underline">
+            <Link to={cvatLinkPath} className="text-sm font-semibold text-[#6941C6] hover:underline">
               Quản lý liên kết CVAT
             </Link>
           </div>
@@ -371,7 +373,7 @@ function NotificationsTab({
           isSelected={notifyRequests}
           onChange={setNotifyRequests}
           label="Cập nhật phản hồi lỗi & báo dữ liệu"
-          hint="Thông báo khi Team Leader hoặc PM tiếp nhận và kết luận yêu cầu của bạn."
+          hint="Thông báo khi Project Manager tiếp nhận và kết luận yêu cầu của bạn."
         />
         <Toggle
           size="md"

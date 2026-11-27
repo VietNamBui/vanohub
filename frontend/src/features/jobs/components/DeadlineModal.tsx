@@ -1,5 +1,6 @@
 import { DatePicker, Form, Input, Modal } from 'antd'
 import dayjs, { type Dayjs } from 'dayjs'
+import { formatDateTimeLocalVN, parseDateTimeLocalVN } from '../../../shared/utils/format'
 
 interface Props {
   open: boolean
@@ -12,6 +13,7 @@ interface Props {
 
 export default function DeadlineModal({ open, title, initial, confirmLoading, onCancel, onSubmit }: Props) {
   const [form] = Form.useForm<{ deadline: Dayjs | null; note: string }>()
+  const initialLocal = formatDateTimeLocalVN(initial)
 
   return (
     <Modal
@@ -27,10 +29,15 @@ export default function DeadlineModal({ open, title, initial, confirmLoading, on
         form={form}
         layout="vertical"
         preserve={false}
-        initialValues={{ deadline: initial ? dayjs(initial) : null, note: '' }}
-        onFinish={(v) => onSubmit(v.deadline ? v.deadline.toISOString() : null, v.note ?? '')}
+        initialValues={{ deadline: initialLocal ? dayjs(initialLocal) : null, note: '' }}
+        onFinish={(v) =>
+          onSubmit(
+            v.deadline ? parseDateTimeLocalVN(v.deadline.format('YYYY-MM-DDTHH:mm')) : null,
+            v.note ?? '',
+          )
+        }
       >
-        <Form.Item name="deadline" label="Deadline" extra="Để trống để bỏ deadline.">
+        <Form.Item name="deadline" label="Deadline (UTC+7)" extra="Giờ Việt Nam (UTC+7). Để trống để bỏ deadline.">
           <DatePicker showTime={{ format: 'HH:mm' }} format="DD/MM/YYYY HH:mm" style={{ width: '100%' }} />
         </Form.Item>
         <Form.Item name="note" label="Ghi chú">

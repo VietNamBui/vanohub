@@ -84,6 +84,7 @@ export interface JobFilters {
   search?: string
   escalated?: boolean
   overdue?: boolean
+  due_soon?: boolean
   unassigned?: boolean
   locked?: boolean
   ordering?: string
@@ -116,7 +117,7 @@ export interface AnnotatorMetric {
 }
 
 export type AnnotatorRequestType = 'error_dispute' | 'data_issue'
-export type AnnotatorRequestStatus = 'pending_tl' | 'pending_pm' | 'resolved' | 'rejected'
+export type AnnotatorRequestStatus = 'pending_pm' | 'resolved' | 'rejected'
 
 export interface AnnotatorRequest {
   id: number

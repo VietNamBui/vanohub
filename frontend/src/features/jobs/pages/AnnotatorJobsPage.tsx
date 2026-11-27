@@ -1,7 +1,6 @@
-import { ArrowRight, Plus, SearchLg } from '@untitledui/icons'
-import dayjs from 'dayjs'
+import { ArrowRight, Plus, SearchLg, XClose } from '@untitledui/icons'
 import { useState } from 'react'
-import { useNavigate } from 'react-router'
+import { useNavigate, useSearchParams } from 'react-router'
 import { Tabs } from '@/components/application/tabs/tabs'
 import { Badge, BadgeWithDot } from '@/components/base/badges/badges'
 import { Button } from '@/components/base/buttons/button'
@@ -11,7 +10,7 @@ import { getErrorMessage } from '../../../shared/api/errors'
 import PageState from '../../../shared/components/ui/PageState'
 import { useAction } from '../../../shared/hooks/useAction'
 import { useRequest } from '../../../shared/hooks/useRequest'
-import { formatNumber } from '../../../shared/utils/format'
+import { formatNumber, formatShortDateTime } from '../../../shared/utils/format'
 import { useProject } from '../../projects/projectContext'
 import { claimAnnotatorJob, getAnnotatorDashboard, listAnnotatorJobs } from '../api'
 import AnnotatorBreadcrumb from '../components/AnnotatorBreadcrumb'
@@ -31,6 +30,9 @@ const TABS: { id: AnnotatorJobTab; label: string }[] = [
 export default function AnnotatorJobsPage() {
   const { projectId, project } = useProject()
   const navigate = useNavigate()
+  const [searchParams, setSearchParams] = useSearchParams()
+  const dueSoon = searchParams.get('due_soon') === '1'
+  const overdue = searchParams.get('overdue') === '1'
   const [tab, setTab] = useState<AnnotatorJobTab>('active')
   const [search, setSearch] = useState('')
   const [query, setQuery] = useState('')
@@ -39,9 +41,24 @@ export default function AnnotatorJobsPage() {
   const [drawerJobId, setDrawerJobId] = useState<number | null>(null)
   const { run, pending } = useAction()
 
-  const jobs = useRequest(`annotator-jobs:${projectId}:${tab}:${query}:${page}:${version}`, () =>
-    listAnnotatorJobs(projectId, { tab, search: query || undefined, page }),
+  const jobs = useRequest(
+    `annotator-jobs:${projectId}:${tab}:${query}:${page}:${dueSoon ? 1 : 0}:${overdue ? 1 : 0}:${version}`,
+    () =>
+      listAnnotatorJobs(projectId, {
+        tab,
+        search: query || undefined,
+        page,
+        due_soon: dueSoon || undefined,
+        overdue: overdue || undefined,
+      }),
   )
+
+  function clearParam(key: 'due_soon' | 'overdue') {
+    const next = new URLSearchParams(searchParams)
+    next.delete(key)
+    setSearchParams(next, { replace: true })
+    setPage(1)
+  }
   const dash = useRequest(`annotator-wip:${projectId}:${version}`, () => getAnnotatorDashboard(projectId, 'week'))
 
   const rows = jobs.data?.results ?? []
@@ -119,6 +136,26 @@ export default function AnnotatorJobsPage() {
                 onChange={setSearch}
               />
             </form>
+            {dueSoon && (
+              <button
+                type="button"
+                onClick={() => clearParam('due_soon')}
+                className="inline-flex cursor-pointer items-center gap-1.5 rounded-full border border-[#FEDF89] bg-[#FFFAEB] px-3 py-1 text-xs font-semibold text-[#B54708] hover:bg-[#FEF0C7]"
+              >
+                <span>Sắp / quá hạn</span>
+                <XClose className="size-3.5" />
+              </button>
+            )}
+            {overdue && (
+              <button
+                type="button"
+                onClick={() => clearParam('overdue')}
+                className="inline-flex cursor-pointer items-center gap-1.5 rounded-full border border-[#FECDCA] bg-[#FEF3F2] px-3 py-1 text-xs font-semibold text-[#B42318] hover:bg-[#FEE4E2]"
+              >
+                <span>Quá hạn</span>
+                <XClose className="size-3.5" />
+              </button>
+            )}
           </div>
         </div>
 
@@ -196,7 +233,7 @@ export default function AnnotatorJobsPage() {
                       </td>
                       <td className="px-4 py-4">
                         <div className="text-xs font-medium text-[#344054]">
-                          {job.deadline ? dayjs(job.deadline).format('DD/MM HH:mm') : 'Chưa đặt'}
+                          {job.deadline ? formatShortDateTime(job.deadline) : 'Chưa đặt'}
                         </div>
                         {countdown && (
                           <div className="mt-1">

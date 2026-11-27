@@ -1,13 +1,15 @@
 from unittest import mock
 
-from django.test import TestCase
-
+from accounts.models import Role, RoleAssignment, User
 from accounts.testing import ProjectFixture
-from jobs.models import JobStatus
-from projects.models import ActivityLog
-from quality.models import Audit, AuditSample
+from django.db import connection
+from django.test import TestCase
+from jobs.models import Job, JobStatus
+from projects.models import ActivityLog, DataStatus, Project
+from quality.models import Audit, AuditSample, ErrorCategory
 
-from .assignee import push_assignees
+from . import sync
+from .assignee import jobs_held_by, push_assignees
 from .client import CvatError
 from .models import CvatAccount
 
@@ -118,10 +120,13 @@ class AssigneePushTests(TestCase):
 
     def test_assignment_succeeds_even_if_cvat_is_down(self):
         job = self.f.job(status=JobStatus.PENDING_ANNOTATION, annotator=self.f.ann2, cvat_job_id=8)
-        with mock.patch.object(FakeCvatClient, "set_job_assignee", side_effect=CvatError("down")):
-            with self.captureOnCommitCallbacks(execute=True):
-                response = self.f.client(self.f.pm).post(self.f.url(f"jobs/{job.id}/assign/"),
-                                                         {"annotator": self.f.ann1.id}, format="json")
+        with (
+            mock.patch.object(FakeCvatClient, "set_job_assignee", side_effect=CvatError("down")),
+            self.captureOnCommitCallbacks(execute=True),
+        ):
+            response = self.f.client(self.f.pm).post(
+                self.f.url(f"jobs/{job.id}/assign/"), {"annotator": self.f.ann1.id}, format="json"
+            )
         self.assertEqual(response.status_code, 200)
         job.refresh_from_db()
         self.assertEqual((job.annotator, job.cvat_assignee_id), (self.f.ann1, None))
@@ -177,3 +182,252 @@ class AutoOrgMembershipTests(TestCase):
         self.assertEqual(client.pushed, [(4, 33)])
         self.assertEqual(len(result["warnings"]), 1)
         self.assertIn("chưa có email", result["warnings"][0])
+
+
+class _FakeSyncClient:
+    """CVAT client giả phục vụ kiểm thử sync workflow & kiểm tra không gọi HTTP trong transaction."""
+
+    def __init__(self, jobs, orgs=None, memberships=None, expected_atomic_depth=None):
+        self.jobs = jobs
+        self.orgs = orgs or []
+        self.memberships = memberships or {}
+        self.expected_atomic_depth = expected_atomic_depth
+        self.pushed = []
+        self.http_calls = []
+
+    def _check_not_in_nested_atomic(self, label):
+        self.http_calls.append(label)
+        if self.expected_atomic_depth is not None:
+            assert len(connection.atomic_blocks) == self.expected_atomic_depth, (
+                f"CVAT HTTP call {label} ran inside nested transaction.atomic()"
+            )
+
+    def list_organizations(self):
+        self._check_not_in_nested_atomic("list_organizations")
+        return self.orgs
+
+    def list_memberships(self, org_id):
+        self._check_not_in_nested_atomic("list_memberships")
+        return self.memberships.get(org_id, [])
+
+    def list_org_projects(self, org_id):
+        self._check_not_in_nested_atomic("list_org_projects")
+        return [{"id": 900, "name": "Synced Project"}]
+
+    def list_project_tasks(self, project_id):
+        self._check_not_in_nested_atomic("list_project_tasks")
+        return [{"id": 5, "name": "Synced Task"}]
+
+    def list_task_jobs(self, task_id):
+        self._check_not_in_nested_atomic("list_task_jobs")
+        return self.jobs
+
+    def count_job_objects(self, job_id):
+        self._check_not_in_nested_atomic("count_job_objects")
+        return 12
+
+    def set_job_assignee(self, job_id, cvat_user_id):
+        self._check_not_in_nested_atomic("set_job_assignee")
+        self.pushed.append((job_id, cvat_user_id))
+
+
+class CvatSyncWorkflowSafetyTests(TestCase):
+    def setUp(self):
+        self.f = ProjectFixture()
+        self.f.project.cvat_org_id = 7
+        self.f.project.cvat_org_slug = "acme"
+        self.f.project.save()
+        self.f.dataset.cvat_project_id = 900
+        self.f.dataset.save()
+        self.f.batch.cvat_task_id = 5
+        self.f.batch.save()
+
+    def test_rework_job_not_teleported_to_pending_qc2(self):
+        """P0: Job bị QC2 reject về REWORK không bị CVAT kéo ngược lên PENDING_QC2."""
+        job_val = self.f.job(status=JobStatus.REWORK, rework_round=1, cvat_job_id=401)
+        job_acc = self.f.job(status=JobStatus.REWORK, rework_round=1, cvat_job_id=402)
+        client = _FakeSyncClient([
+            {"id": 401, "stage": "validation", "state": "completed"},
+            {"id": 402, "stage": "acceptance", "state": "completed"},
+        ])
+        sync.sync_organization(self.f.project, self.f.pm, client=client)
+        job_val.refresh_from_db()
+        job_acc.refresh_from_db()
+        self.assertEqual((job_val.status, job_val.rework_round), (JobStatus.REWORK, 1))
+        self.assertEqual((job_acc.status, job_acc.rework_round), (JobStatus.REWORK, 1))
+        self.assertEqual(job_val.audit_samples.count(), 0)
+        self.assertEqual(job_acc.audit_samples.count(), 0)
+
+    def test_pending_qc1_and_qc1_reviewing_not_rolled_back_to_annotating(self):
+        """P0: Job đang ở PENDING_QC1/QC1_REVIEWING không bị CVAT kéo lùi về ANNOTATING."""
+        j_pending = self.f.job(status=JobStatus.PENDING_QC1, cvat_job_id=411)
+        j_reviewing = self.f.job(status=JobStatus.QC1_REVIEWING, cvat_job_id=412)
+        client = _FakeSyncClient([
+            {"id": 411, "stage": "annotation", "state": "in progress"},
+            {"id": 412, "stage": "annotation", "state": "in progress"},
+        ])
+        sync.sync_organization(self.f.project, self.f.pm, client=client)
+        j_pending.refresh_from_db()
+        j_reviewing.refresh_from_db()
+        self.assertEqual(j_pending.status, JobStatus.PENDING_QC1)
+        self.assertEqual(j_reviewing.status, JobStatus.QC1_REVIEWING)
+
+    def test_stale_cvat_rejection_does_not_double_increment_rework_round(self):
+        """P0: CVAT giữ nguyên ('validation', 'rejected') cũ không được tăng rework_round lần 2."""
+        j_rework = self.f.job(
+            status=JobStatus.REWORK,
+            rework_round=1,
+            cvat_job_id=415,
+            cvat_stage="validation",
+            cvat_state="rejected",
+        )
+        j_resubmitted = self.f.job(
+            status=JobStatus.QC1_REVIEWING,
+            rework_round=1,
+            cvat_job_id=416,
+            cvat_stage="validation",
+            cvat_state="rejected",
+        )
+        client = _FakeSyncClient([
+            {"id": 415, "stage": "validation", "state": "rejected"},
+            {"id": 416, "stage": "validation", "state": "rejected"},
+        ])
+        sync.sync_organization(self.f.project, self.f.pm, client=client)
+        j_rework.refresh_from_db()
+        j_resubmitted.refresh_from_db()
+        self.assertEqual((j_rework.status, j_rework.rework_round), (JobStatus.REWORK, 1))
+        self.assertEqual((j_resubmitted.status, j_resubmitted.rework_round), (JobStatus.QC1_REVIEWING, 1))
+
+    def test_locked_escalated_and_locked_batch_jobs_not_mutated_in_status(self):
+        """P0: Job is_locked / is_escalated / batch bị khoá không bị sync đổi trạng thái."""
+        j_locked = self.f.job(status=JobStatus.PENDING_ANNOTATION, is_locked=True, cvat_job_id=421)
+        j_escalated = self.f.job(status=JobStatus.ANNOTATING, is_escalated=True, cvat_job_id=422)
+        client = _FakeSyncClient([
+            {"id": 421, "stage": "annotation", "state": "in progress"},
+            {"id": 422, "stage": "annotation", "state": "completed"},
+        ])
+        sync.sync_organization(self.f.project, self.f.pm, client=client)
+        j_locked.refresh_from_db()
+        j_escalated.refresh_from_db()
+        self.assertEqual(j_locked.status, JobStatus.PENDING_ANNOTATION)
+        self.assertEqual(j_escalated.status, JobStatus.ANNOTATING)
+
+        # Khoá batch → job trong batch không đổi trạng thái khi sync
+        self.f.batch.status = DataStatus.LOCKED
+        self.f.batch.save(update_fields=["status"])
+        j_in_locked_batch = self.f.job(status=JobStatus.PENDING_ANNOTATION, cvat_job_id=423)
+        sync.sync_organization(
+            self.f.project,
+            self.f.pm,
+            client=_FakeSyncClient([{"id": 423, "stage": "annotation", "state": "in progress"}]),
+        )
+        j_in_locked_batch.refresh_from_db()
+        self.assertEqual(j_in_locked_batch.status, JobStatus.PENDING_ANNOTATION)
+
+    def test_cvat_http_calls_run_outside_transaction_atomic(self):
+        """P0: Toàn bộ lệnh gọi HTTP tới CVAT chạy ngoài transaction.atomic()."""
+        CvatAccount.objects.create(user=self.f.ann1, cvat_user_id=11, cvat_username="a1")
+        self.f.job(status=JobStatus.PENDING_ANNOTATION, annotator=self.f.ann1, cvat_job_id=430)
+        client = _FakeSyncClient(
+            [{"id": 430, "stage": "annotation", "state": "in progress"}],
+            memberships={7: [{"user": {"id": 11}, "is_active": True}]},
+            expected_atomic_depth=len(connection.atomic_blocks),
+        )
+        sync.sync_organization(self.f.project, self.f.pm, client=client, count_objects=True)
+        self.assertIn("list_org_projects", client.http_calls)
+        self.assertIn("count_job_objects", client.http_calls)
+        self.assertIn("set_job_assignee", client.http_calls)
+
+    def test_new_job_ignores_non_annotator_cvat_assignee(self):
+        CvatAccount.objects.create(user=self.f.pm, cvat_user_id=50, cvat_username="pm_cvat")
+        CvatAccount.objects.create(user=self.f.ann1, cvat_user_id=11, cvat_username="ann_cvat")
+        client = _FakeSyncClient([
+            {"id": 440, "stage": "annotation", "state": "in progress", "assignee": {"id": 50}},
+            {"id": 441, "stage": "annotation", "state": "in progress", "assignee": {"id": 11}},
+        ])
+        sync.sync_organization(self.f.project, self.f.pm, client=client)
+        self.assertIsNone(Job.objects.get(cvat_job_id=440).annotator)
+        self.assertEqual(Job.objects.get(cvat_job_id=441).annotator, self.f.ann1)
+
+    def test_sync_organizations_seeds_default_error_categories_for_existing_org(self):
+        CvatAccount.objects.create(user=self.f.pm, cvat_user_id=50, cvat_username="pm_cvat")
+        ErrorCategory.objects.filter(project=self.f.project).delete()
+        self.assertEqual(ErrorCategory.objects.filter(project=self.f.project).count(), 0)
+        client = _FakeSyncClient(
+            jobs=[],
+            orgs=[{"id": 7, "slug": "acme", "name": self.f.project.name}],
+            memberships={7: [{"user": {"id": 50}, "role": "owner", "is_active": True}]},
+        )
+        sync.sync_organizations(actor=self.f.pm, client=client)
+        self.assertGreater(ErrorCategory.objects.filter(project=self.f.project).count(), 0)
+
+
+class JobsHeldByAndSyncOrgsRbacTests(TestCase):
+    def setUp(self):
+        self.f = ProjectFixture()
+
+    def test_jobs_held_by_excludes_rejected_prior_qc2_samples(self):
+        """P1: Auditor có mẫu QC2 đã reject trong audit in_progress không còn giữ job."""
+        other_qc2 = User.objects.create_user("qc2_new", password="pw")
+        RoleAssignment.objects.create(user=other_qc2, role=Role.QC2, project=self.f.project)
+        CvatAccount.objects.create(user=self.f.qc2, cvat_user_id=22, cvat_username="q2_old")
+        CvatAccount.objects.create(user=other_qc2, cvat_user_id=23, cvat_username="q2_new")
+
+        job = self.f.job(status=JobStatus.PENDING_QC2, cvat_job_id=601)
+        audit = Audit.objects.create(
+            project=self.f.project,
+            batch=self.f.batch,
+            method="random",
+            sampling_rate=50,
+            seed=1,
+            eligible_count=1,
+            created_by=self.f.pm,
+        )
+        AuditSample.objects.create(audit=audit, job=job, auditor=self.f.qc2, result=AuditSample.Result.REJECT)
+        AuditSample.objects.create(audit=audit, job=job, auditor=other_qc2, result=AuditSample.Result.PENDING)
+
+        self.assertEqual(list(jobs_held_by(self.f.qc2)), [])
+        held = list(jobs_held_by(other_qc2))
+        self.assertEqual([j.pk for j in held], [job.pk])
+        self.assertTrue(hasattr(held[0], "_pending_samples"))
+
+    @mock.patch("cvat_integration.views.sync_organizations")
+    def test_sync_organizations_view_blocks_outsider_and_annotator(self, mock_sync):
+        outsider = User.objects.create_user("outsider", password="pw")
+        for user in (outsider, self.f.ann1, self.f.qc1, self.f.qc2):
+            res = self.f.client(user).post("/api/cvat/sync-organizations/", {}, format="json")
+            self.assertEqual(res.status_code, 403, f"Expected 403 for {user.username}")
+        mock_sync.assert_not_called()
+
+    @mock.patch("cvat_integration.views.sync_organizations")
+    def test_sync_organizations_view_filters_result_for_pm_and_shows_all_for_superuser(self, mock_sync):
+        other = Project.objects.create(name="Secret Org")
+        mock_sync.return_value = {
+            "created": [self.f.project.name, other.name],
+            "updated": [other.name],
+            "pm_added": [
+                {"organization": self.f.project.name, "user": self.f.pm.username},
+                {"organization": other.name, "user": "other_pm"},
+            ],
+            "members_added": [
+                {"organization": self.f.project.name, "user": self.f.ann1.username},
+                {"organization": other.name, "user": "other_ann"},
+            ],
+            "waiting": [{"cvat_org_id": 99, "name": "Unlinked Org", "reason": "No PM"}],
+        }
+
+        pm_res = self.f.client(self.f.pm).post("/api/cvat/sync-organizations/", {}, format="json")
+        self.assertEqual(pm_res.status_code, 200, pm_res.data)
+        self.assertEqual(pm_res.data["created"], [self.f.project.name])
+        self.assertEqual(pm_res.data["updated"], [])
+        self.assertEqual(pm_res.data["pm_added"], [{"organization": self.f.project.name, "user": self.f.pm.username}])
+        self.assertEqual(
+            pm_res.data["members_added"], [{"organization": self.f.project.name, "user": self.f.ann1.username}]
+        )
+        self.assertEqual(pm_res.data["waiting"], [])
+
+        admin = User.objects.create_superuser("super_admin", "super@example.com", "pw")
+        admin_res = self.f.client(admin).post("/api/cvat/sync-organizations/", {}, format="json")
+        self.assertEqual(admin_res.status_code, 200, admin_res.data)
+        self.assertEqual(admin_res.data["created"], [self.f.project.name, other.name])
+        self.assertEqual(len(admin_res.data["waiting"]), 1)

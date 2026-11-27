@@ -1,34 +1,34 @@
 from collections import defaultdict
-
 from datetime import timedelta
 
-from django.db import transaction
+from accounts import credentials
+from accounts.datetime_utils import parse_int_param
+from accounts.models import Role, RoleAssignment, User, expand_roles
+from accounts.permissions import CAPABILITY_ROLES, Cap, ProjectScopedViewMixin
+from accounts.serializers import UserBriefSerializer
+from cvat_integration.client import CvatError
+from cvat_integration.sync import dataset_labels, sync_organization
+from django.db import IntegrityError, transaction
 from django.db.models import Count, Max, Prefetch, Q
 from django.utils import timezone
 from django.utils.dateparse import parse_date
+from jobs.models import ACTIVE_ANNOTATOR_STATUSES, OPEN_STATUSES, STAGE_STATUSES, Job, JobStatus
+from quality.models import AuditSample
 from rest_framework import mixins, serializers, status, viewsets
 from rest_framework.decorators import action
 from rest_framework.exceptions import NotFound, ValidationError
 from rest_framework.pagination import PageNumberPagination
 from rest_framework.response import Response
 from rest_framework.views import APIView
-
-from accounts import credentials
-from accounts.models import Role, RoleAssignment, User, expand_roles
-from accounts.permissions import CAPABILITY_ROLES, Cap, ProjectScopedViewMixin
-from accounts.serializers import UserBriefSerializer
-from cvat_integration.client import CvatError
-from cvat_integration.sync import dataset_labels, sync_organization
-from jobs.models import ACTIVE_ANNOTATOR_STATUSES, OPEN_STATUSES, STAGE_STATUSES, Job, JobStatus
-from quality.models import AuditSample
 from teams.models import Team, TeamMember
 
 from .models import (
     ActivityLog,
     Announcement,
+    AnnouncementRead,
     Batch,
-    DataStatus,
     Dataset,
+    DataStatus,
     Delivery,
     Guideline,
     Project,
@@ -112,6 +112,7 @@ class ProjectMembersView(ProjectScopedViewMixin, APIView):
             project.jobs.filter(status__in=OPEN_STATUSES, annotator__isnull=False)
             .values_list("annotator").annotate(n=Count("id"))
         )
+        can_manage_team = self.has_cap(Cap.MANAGE_TEAM)
         data = [
             {
                 "user": UserBriefSerializer(user).data,
@@ -121,7 +122,7 @@ class ProjectMembersView(ProjectScopedViewMixin, APIView):
                 "active_jobs": active.get(uid, 0),
                 "cvat_linked": hasattr(user, "cvat_account"),
                 "cvat_username": user.cvat_account.cvat_username if hasattr(user, "cvat_account") else None,
-                "has_initial_password": bool(user.initial_password_encrypted),
+                "has_initial_password": bool(user.initial_password_encrypted) if can_manage_team else False,
             }
             for uid, user in sorted(users.items(), key=lambda kv: kv[1].username)
         ]
@@ -172,17 +173,26 @@ class ProjectMemberRolesView(ProjectScopedViewMixin, APIView):
 
     def post(self, request, project_id, user_id):
         project = self.project
-        current = set(RoleAssignment.objects.filter(project=project, user_id=user_id).values_list("role", flat=True))
-        if not current:
-            raise NotFound("Người này không thuộc dự án.")
         role = request.data.get("role")
-        if role not in GRANTABLE_ROLES:
-            raise ValidationError({"role": f"Không gán được vai trò này. Cho phép: {', '.join(GRANTABLE_ROLES)}."})
-        if role in expand_roles(current):
-            raise ValidationError({"role": "Người này đã có vai trò này."})
-        assignment = RoleAssignment.objects.create(project=project, user_id=user_id, role=role)
-        ActivityLog.record(project=project, actor=request.user, action="member.add_role", target=assignment.user,
-                           after={"role": role})
+        try:
+            with transaction.atomic():
+                user = User.objects.select_for_update().filter(pk=user_id).first()
+                if user is None:
+                    raise NotFound("Người này không thuộc dự án.")
+                current = set(
+                    RoleAssignment.objects.filter(project=project, user=user).values_list("role", flat=True)
+                )
+                if not current:
+                    raise NotFound("Người này không thuộc dự án.")
+                if role not in GRANTABLE_ROLES:
+                    raise ValidationError({"role": f"Không gán được vai trò này. Cho phép: {', '.join(GRANTABLE_ROLES)}."})
+                if role in expand_roles(current):
+                    raise ValidationError({"role": "Người này đã có vai trò này."})
+                RoleAssignment.objects.create(project=project, user=user, role=role, granted_by=request.user)
+                ActivityLog.record(project=project, actor=request.user, action="member.add_role", target=user,
+                                   after={"role": role})
+        except IntegrityError as exc:
+            raise ValidationError({"role": "Người này đã có vai trò này."}) from exc
         return Response(_roles_payload(user_id, current | {role}), status=status.HTTP_201_CREATED)
 
 
@@ -218,25 +228,30 @@ class ProjectMemberRoleDetailView(ProjectScopedViewMixin, APIView):
 
     def delete(self, request, project_id, user_id, role):
         project = self.project
-        assignments = RoleAssignment.objects.filter(project=project, user_id=user_id).select_related("user")
-        current = {a.role for a in assignments}
-        if not current:
-            raise NotFound("Người này không thuộc dự án.")
-        if role not in GRANTABLE_ROLES:
-            raise ValidationError("Không gỡ được vai trò này (PM lấy từ Owner / Maintainer của CVAT organization).")
-        if role not in current:
-            if role in expand_roles(current):
-                raise ValidationError("Vai trò này đi kèm vai trò PM — không gỡ riêng được.")
-            raise ValidationError("Người này không có vai trò này.")
-        if current == {role}:
-            raise ValidationError("Phải còn ít nhất một vai trò. Gán vai trò khác trước khi gỡ vai trò này.")
-        user = assignments[0].user
-        reason = _role_removal_blocker(project, user, role)
-        if reason:
-            raise ValidationError(reason)
-        assignments.filter(role=role).delete()
-        ActivityLog.record(project=project, actor=request.user, action="member.remove_role", target=user,
-                           before={"role": role})
+        with transaction.atomic():
+            user = User.objects.select_for_update().filter(pk=user_id).first()
+            if user is None:
+                raise NotFound("Người này không thuộc dự án.")
+            assignments = RoleAssignment.objects.filter(project=project, user=user)
+            current = set(assignments.values_list("role", flat=True))
+            if not current:
+                raise NotFound("Người này không thuộc dự án.")
+            if role not in GRANTABLE_ROLES:
+                raise ValidationError("Không gỡ được vai trò này (PM lấy từ Owner / Maintainer của CVAT organization).")
+            if role not in current:
+                if role in expand_roles(current):
+                    raise ValidationError("Vai trò này đi kèm vai trò PM — không gỡ riêng được.")
+                raise ValidationError("Người này không có vai trò này.")
+            if current == {role}:
+                raise ValidationError("Phải còn ít nhất một vai trò. Gán vai trò khác trước khi gỡ vai trò này.")
+            reason = _role_removal_blocker(project, user, role)
+            if reason:
+                raise ValidationError(reason)
+            deleted, _ = assignments.filter(role=role).delete()
+            if deleted == 0:
+                raise ValidationError("Người này không có vai trò này.")
+            ActivityLog.record(project=project, actor=request.user, action="member.remove_role", target=user,
+                               before={"role": role})
         return Response(_roles_payload(user_id, current - {role}))
 
 
@@ -323,6 +338,8 @@ class MemberResetPasswordView(ProjectScopedViewMixin, APIView):
 class PermissionMatrixView(ProjectScopedViewMixin, APIView):
     """GET /api/projects/{id}/permission-matrix/ — ma trận quyền đang áp dụng (chỉ đọc)."""
 
+    required_capabilities = {"*": Cap.VIEW_PROJECT}
+
     def get(self, request, project_id):
         self.get_project()
         return Response({
@@ -350,12 +367,15 @@ class DatasetViewSet(ProjectScopedViewMixin, mixins.ListModelMixin, mixins.Retri
     serializer_class = DatasetSerializer
     required_capabilities = {"list": Cap.VIEW_JOBS, "retrieve": Cap.VIEW_JOBS, "*": Cap.MANAGE_DATA}
 
-    def get_queryset(self):
-        queryset = Dataset.objects.filter(project=self.project).annotate(
+    def _base_queryset(self):
+        return Dataset.objects.filter(project=self.project).annotate(
             task_count=Count("batches", distinct=True),
             job_count=Count("jobs", distinct=True),
             done_count=Count("jobs", filter=Q(jobs__status__in=[JobStatus.APPROVED, JobStatus.DELIVERED]), distinct=True),
         )
+
+    def get_queryset(self):
+        queryset = self._base_queryset()
         status_filter = self.request.query_params.get("status")
         if status_filter:
             queryset = queryset.filter(status=status_filter)
@@ -379,13 +399,15 @@ class DatasetViewSet(ProjectScopedViewMixin, mixins.ListModelMixin, mixins.Retri
     def lock(self, request, project_id, pk=None):
         dataset = self.get_object()
         _set_status(dataset, DataStatus.LOCKED, project=self.project, actor=request.user, action="dataset.lock")
-        return Response(self.get_serializer(self.get_object()).data)
+        fresh = self._base_queryset().get(pk=dataset.pk)
+        return Response(self.get_serializer(fresh).data)
 
     @action(detail=True, methods=["post"])
     def unlock(self, request, project_id, pk=None):
         dataset = self.get_object()
         _set_status(dataset, DataStatus.ACTIVE, project=self.project, actor=request.user, action="dataset.unlock")
-        return Response(self.get_serializer(self.get_object()).data)
+        fresh = self._base_queryset().get(pk=dataset.pk)
+        return Response(self.get_serializer(fresh).data)
 
 
 class ProjectCvatSyncView(ProjectScopedViewMixin, APIView):
@@ -407,11 +429,11 @@ class BatchViewSet(ProjectScopedViewMixin, mixins.ListModelMixin, mixins.Retriev
     """"Task" (CVAT task). Không tạo trên VanoHub — đồng bộ từ CVAT. PM đặt deadline, team phụ trách, khoá / mở khoá."""
 
     serializer_class = BatchSerializer
-    required_capabilities = {"list": [Cap.VIEW_JOBS, Cap.MANAGE_AUDITS], "retrieve": Cap.VIEW_JOBS, "*": Cap.MANAGE_DATA}
+    required_capabilities = {"list": Cap.VIEW_PROJECT, "retrieve": Cap.VIEW_JOBS, "*": Cap.MANAGE_DATA}
 
-    def get_queryset(self):
+    def _base_queryset(self):
         done = [JobStatus.APPROVED, JobStatus.DELIVERED]
-        queryset = (
+        return (
             Batch.objects.filter(project=self.project)
             .select_related("team", "dataset")
             .annotate(
@@ -422,9 +444,12 @@ class BatchViewSet(ProjectScopedViewMixin, mixins.ListModelMixin, mixins.Retriev
             )
             .order_by("dataset__name", "name")
         )
+
+    def get_queryset(self):
+        queryset = self._base_queryset()
         params = self.request.query_params
         if params.get("dataset"):
-            queryset = queryset.filter(dataset_id=params["dataset"])
+            queryset = queryset.filter(dataset_id=parse_int_param(params["dataset"], "dataset"))
         if params.get("status"):
             queryset = queryset.filter(status=params["status"])
         if params.get("search"):
@@ -449,13 +474,17 @@ class BatchViewSet(ProjectScopedViewMixin, mixins.ListModelMixin, mixins.Retriev
 
     @action(detail=True, methods=["post"])
     def lock(self, request, project_id, pk=None):
-        _set_status(self.get_object(), DataStatus.LOCKED, project=self.project, actor=request.user, action="batch.lock")
-        return Response(self.get_serializer(self.get_object()).data)
+        batch = self.get_object()
+        _set_status(batch, DataStatus.LOCKED, project=self.project, actor=request.user, action="batch.lock")
+        fresh = self._base_queryset().get(pk=batch.pk)
+        return Response(self.get_serializer(fresh).data)
 
     @action(detail=True, methods=["post"])
     def unlock(self, request, project_id, pk=None):
-        _set_status(self.get_object(), DataStatus.ACTIVE, project=self.project, actor=request.user, action="batch.unlock")
-        return Response(self.get_serializer(self.get_object()).data)
+        batch = self.get_object()
+        _set_status(batch, DataStatus.ACTIVE, project=self.project, actor=request.user, action="batch.unlock")
+        fresh = self._base_queryset().get(pk=batch.pk)
+        return Response(self.get_serializer(fresh).data)
 
 
 class DeliveryViewSet(ProjectScopedViewMixin, mixins.ListModelMixin, mixins.CreateModelMixin,
@@ -466,7 +495,7 @@ class DeliveryViewSet(ProjectScopedViewMixin, mixins.ListModelMixin, mixins.Crea
     required_capabilities = {"list": [Cap.MANAGE_DELIVERY, Cap.VIEW_DASHBOARD], "*": Cap.MANAGE_DELIVERY}
 
     def get_queryset(self):
-        return Delivery.objects.filter(project=self.project).select_related("batch", "delivered_by")
+        return Delivery.objects.filter(project=self.project).select_related("batch__dataset", "delivered_by")
 
     @action(detail=False)
     def candidates(self, request, project_id):
@@ -474,9 +503,11 @@ class DeliveryViewSet(ProjectScopedViewMixin, mixins.ListModelMixin, mixins.Crea
         batches = (
             Batch.objects.filter(project=self.project)
             .exclude(status=DataStatus.DELIVERED)
+            .select_related("dataset")
             .annotate(
                 job_count=Count("jobs", distinct=True),
                 approved_count=Count("jobs", filter=Q(jobs__status=JobStatus.APPROVED), distinct=True),
+                locked_jobs=Count("jobs", filter=Q(jobs__is_locked=True), distinct=True),
                 pending_qc2_samples=Count(
                     "audits__samples",
                     filter=Q(audits__samples__result=AuditSample.Result.PENDING),
@@ -486,31 +517,58 @@ class DeliveryViewSet(ProjectScopedViewMixin, mixins.ListModelMixin, mixins.Crea
         )
         return Response([
             {
-                "batch": b.id, "batch_name": b.name,
-                "job_count": b.job_count, "approved_count": b.approved_count, "open_audits": b.pending_qc2_samples,
-                "ready": b.job_count > 0 and b.approved_count == b.job_count and b.pending_qc2_samples == 0,
+                "batch": b.id,
+                "batch_name": b.name,
+                "dataset_name": b.dataset.name,
+                "job_count": b.job_count,
+                "approved_count": b.approved_count,
+                "open_audits": b.pending_qc2_samples,
+                "ready": (
+                    b.job_count > 0
+                    and b.approved_count == b.job_count
+                    and b.pending_qc2_samples == 0
+                    and b.locked_jobs == 0
+                ),
             }
             for b in batches
         ])
 
     def perform_create(self, serializer):
-        batch = serializer.validated_data["batch"]
-        jobs = batch.jobs.all()
-        if batch.status == DataStatus.DELIVERED:
-            raise ValidationError("Batch đã được bàn giao.")
-        if not jobs.exists() or jobs.exclude(status=JobStatus.APPROVED).exists():
-            raise ValidationError("Chỉ bàn giao được khi mọi job trong batch đã ở trạng thái Đã duyệt.")
-        if AuditSample.objects.filter(audit__batch=batch, result=AuditSample.Result.PENDING).exists():
-            raise ValidationError("Task còn lượt QC2 chưa kiểm.")
-        with transaction.atomic():
-            delivery = serializer.save(project=self.project, delivered_by=self.request.user)
-            jobs.update(status=JobStatus.DELIVERED)
-            batch.status = DataStatus.DELIVERED
-            batch.save(update_fields=["status"])
-            # Bàn giao xong → chốt các đợt QC2 của task.
-            batch.audits.filter(status="in_progress").update(status="completed", completed_at=timezone.now())
-            ActivityLog.record(project=self.project, actor=self.request.user, action="batch.deliver", target=batch,
-                               after={"delivery": delivery.id, "jobs": jobs.count()})
+        batch_id = serializer.validated_data["batch"].pk
+        try:
+            with transaction.atomic():
+                batch = (
+                    Batch.objects.select_for_update(of=("self",))
+                    .select_related("dataset")
+                    .get(pk=batch_id, project=self.project)
+                )
+                if batch.status == DataStatus.DELIVERED or Delivery.objects.filter(batch=batch).exists():
+                    raise ValidationError("Batch đã được bàn giao.")
+                jobs = list(Job.objects.select_for_update(of=("self",)).filter(batch=batch).order_by("id"))
+                job_count = len(jobs)
+                approved_count = sum(1 for j in jobs if j.status == JobStatus.APPROVED)
+                locked_jobs = sum(1 for j in jobs if j.is_locked)
+                if job_count == 0 or approved_count != job_count:
+                    raise ValidationError("Chỉ bàn giao được khi mọi job trong batch đã ở trạng thái Đã duyệt.")
+                if locked_jobs > 0:
+                    raise ValidationError("Task còn job đang bị khoá — mở khoá trước khi bàn giao.")
+                if AuditSample.objects.filter(audit__batch=batch, result=AuditSample.Result.PENDING).exists():
+                    raise ValidationError("Task còn lượt QC2 chưa kiểm.")
+                delivery = serializer.save(project=self.project, batch=batch, delivered_by=self.request.user)
+                Job.objects.filter(pk__in=[j.pk for j in jobs]).update(status=JobStatus.DELIVERED)
+                batch.status = DataStatus.DELIVERED
+                batch.save(update_fields=["status"])
+                # Bàn giao xong → chốt các đợt QC2 của task.
+                batch.audits.filter(status="in_progress").update(status="completed", completed_at=timezone.now())
+                ActivityLog.record(
+                    project=self.project,
+                    actor=self.request.user,
+                    action="batch.deliver",
+                    target=batch,
+                    after={"delivery": delivery.id, "jobs": job_count},
+                )
+        except IntegrityError as exc:
+            raise ValidationError("Batch đã được bàn giao.") from exc
 
     def perform_update(self, serializer):
         # Sau khi bàn giao chỉ cho sửa ghi chú và phản hồi khách hàng.
@@ -530,7 +588,7 @@ class ActivityLogViewSet(ProjectScopedViewMixin, viewsets.ReadOnlyModelViewSet):
         queryset = ActivityLog.objects.filter(project=self.project).select_related("actor")
         params = self.request.query_params
         if params.get("actor"):
-            queryset = queryset.filter(actor_id=params["actor"])
+            queryset = queryset.filter(actor_id=parse_int_param(params["actor"], "actor"))
         if params.get("action"):
             queryset = queryset.filter(action__startswith=params["action"])
         if params.get("date_from") and parse_date(params["date_from"]):
@@ -538,6 +596,27 @@ class ActivityLogViewSet(ProjectScopedViewMixin, viewsets.ReadOnlyModelViewSet):
         if params.get("date_to") and parse_date(params["date_to"]):
             queryset = queryset.filter(created_at__date__lte=parse_date(params["date_to"]))
         return queryset
+
+
+def _visible_announcements(project, user, *, can_see_all):
+    """Lọc thông báo dự án phù hợp vai trò & team của user trước khi phân trang/cắt giới hạn."""
+    queryset = Announcement.objects.filter(project=project).select_related("sender", "target_team")
+    if can_see_all:
+        return list(queryset)
+    my_roles = {
+        r.value
+        for r in expand_roles(
+            RoleAssignment.objects.filter(user=user, project=project).values_list("role", flat=True)
+        )
+    }
+    my_team_ids = set(
+        TeamMember.objects.filter(user=user, team__project=project).values_list("team_id", flat=True)
+    )
+    return [
+        a for a in queryset
+        if (not a.target_roles or set(a.target_roles) & my_roles)
+        and (a.target_team_id is None or a.target_team_id in my_team_ids)
+    ]
 
 
 class AnnouncementViewSet(ProjectScopedViewMixin, mixins.ListModelMixin, mixins.CreateModelMixin,
@@ -548,19 +627,9 @@ class AnnouncementViewSet(ProjectScopedViewMixin, mixins.ListModelMixin, mixins.
     required_capabilities = {"list": Cap.VIEW_PROJECT, "*": Cap.SEND_ANNOUNCEMENT}
 
     def get_queryset(self):
-        queryset = Announcement.objects.filter(project=self.project).select_related("sender", "target_team")
-        if self.has_cap(Cap.SEND_ANNOUNCEMENT):
-            return queryset
-        user = self.request.user
-        my_roles = expand_roles(
-            RoleAssignment.objects.filter(user=user, project=self.project).values_list("role", flat=True)
+        return _visible_announcements(
+            self.project, self.request.user, can_see_all=self.has_cap(Cap.SEND_ANNOUNCEMENT)
         )
-        my_team_ids = set(TeamMember.objects.filter(user=user, team__project=self.project).values_list("team_id", flat=True))
-        return [
-            a for a in queryset
-            if (not a.target_roles or set(a.target_roles) & my_roles)
-            and (a.target_team_id is None or a.target_team_id in my_team_ids)
-        ]
 
     def perform_create(self, serializer):
         announcement = serializer.save(project=self.project, sender=self.request.user)
@@ -597,6 +666,7 @@ class ProjectNotificationsView(ProjectScopedViewMixin, APIView):
         user = request.user
         now = timezone.now()
         items = []
+        can_annotate = self.has_cap(Cap.ANNOTATE_JOBS)
 
         # 1. Thông báo cá nhân đã lưu trong DB
         persisted = list(
@@ -606,6 +676,16 @@ class ProjectNotificationsView(ProjectScopedViewMixin, APIView):
             n.job_id for n in persisted if n.category == UserNotification.Category.DEADLINE and n.job_id
         }
         for n in persisted:
+            if n.action_url:
+                action_url = n.action_url
+            elif n.job_id:
+                action_url = (
+                    f"/projects/{self.project.pk}/annotator/jobs/{n.job_id}"
+                    if can_annotate
+                    else f"/projects/{self.project.pk}/jobs"
+                )
+            else:
+                action_url = f"/projects/{self.project.pk}"
             items.append({
                 "id": f"sys-{n.id}",
                 "notification_id": n.id,
@@ -614,14 +694,14 @@ class ProjectNotificationsView(ProjectScopedViewMixin, APIView):
                 "title": n.title,
                 "body": n.body,
                 "job_id": n.job_id,
-                "action_url": n.action_url or (f"/projects/{self.project.id}/annotator/jobs/{n.job_id}" if n.job_id else ""),
+                "action_url": action_url,
                 "is_read": n.is_read,
                 "is_pinned_pending": n.is_pinned_pending,
                 "created_at": n.created_at.isoformat(),
             })
 
-        # 2. Cảnh báo job sắp / quá hạn đang giữ (TB03 + DB06)
-        if user.notify_deadline and self.has_cap(Cap.ANNOTATE_JOBS):
+        # 2. Cảnh báo job sắp / quá hạn đang giữ
+        if user.notify_deadline and can_annotate:
             urgent_jobs = (
                 Job.objects.filter(
                     project=self.project,
@@ -643,9 +723,9 @@ class ProjectNotificationsView(ProjectScopedViewMixin, APIView):
                     "category": UserNotification.Category.DEADLINE,
                     "title": f"{j.name} đã quá hạn" if overdue else f"{j.name} sắp đến hạn",
                     "body": (
-                        f"Quá hạn {hours} giờ — ưu tiên xử lý ngay (DB06)."
+                        f"Quá hạn {hours} giờ — ưu tiên xử lý ngay."
                         if overdue
-                        else f"Còn {hours} giờ — ưu tiên làm trước (DB06)."
+                        else f"Còn {hours} giờ — ưu tiên làm trước."
                     ),
                     "job_id": j.id,
                     "action_url": f"/projects/{self.project.id}/annotator/jobs/{j.id}",
@@ -654,21 +734,17 @@ class ProjectNotificationsView(ProjectScopedViewMixin, APIView):
                     "created_at": j.updated_at.isoformat(),
                 })
 
-        # 3. Thông báo dự án (Announcement) phù hợp vai trò / team
-        announcements = Announcement.objects.filter(project=self.project).select_related("sender", "target_team")[:20]
-        if not self.has_cap(Cap.SEND_ANNOUNCEMENT):
-            my_roles = expand_roles(
-                RoleAssignment.objects.filter(user=user, project=self.project).values_list("role", flat=True)
-            )
-            my_team_ids = set(
-                TeamMember.objects.filter(user=user, team__project=self.project).values_list("team_id", flat=True)
-            )
-            announcements = [
-                a for a in announcements
-                if (not a.target_roles or set(a.target_roles) & my_roles)
-                and (a.target_team_id is None or a.target_team_id in my_team_ids)
-            ]
-        for a in announcements:
+        # 3. Thông báo dự án (Announcement) phù hợp vai trò / team — lọc trước rồi mới cắt 20 mục
+        visible_announcements = _visible_announcements(
+            self.project, user, can_see_all=self.has_cap(Cap.SEND_ANNOUNCEMENT)
+        )[:20]
+        read_ann_ids = set(
+            AnnouncementRead.objects.filter(
+                user=user,
+                announcement_id__in=[a.id for a in visible_announcements],
+            ).values_list("announcement_id", flat=True)
+        )
+        for a in visible_announcements:
             sender_name = a.sender.get_full_name() or a.sender.username if a.sender else "Hệ thống"
             items.append({
                 "id": f"ann-{a.id}",
@@ -679,7 +755,7 @@ class ProjectNotificationsView(ProjectScopedViewMixin, APIView):
                 "body": a.content,
                 "job_id": None,
                 "action_url": f"/projects/{self.project.id}/announcements",
-                "is_read": a.sender_id == user.id,
+                "is_read": a.sender_id == user.id or a.id in read_ann_ids,
                 "is_pinned_pending": False,
                 "created_at": a.created_at.isoformat(),
             })
@@ -702,8 +778,53 @@ class MarkNotificationsReadView(ProjectScopedViewMixin, APIView):
 
     def post(self, request, project_id):
         notif_id = request.data.get("notification_id")
-        qs = UserNotification.objects.filter(recipient=request.user, project=self.project, is_read=False)
         if notif_id is not None:
-            qs = qs.filter(pk=notif_id)
-        updated = qs.update(is_read=True)
+            if isinstance(notif_id, str):
+                raw = notif_id.strip()
+                if raw.startswith("ann-"):
+                    ann_pk = parse_int_param(raw[4:], "notification_id")
+                    if not Announcement.objects.filter(pk=ann_pk, project=self.project).exists():
+                        return Response({"updated": 0})
+                    _, created = AnnouncementRead.objects.get_or_create(
+                        announcement_id=ann_pk, user=request.user
+                    )
+                    return Response({"updated": 1 if created else 0})
+                sys_pk = parse_int_param(raw[4:] if raw.startswith("sys-") else raw, "notification_id")
+            else:
+                sys_pk = parse_int_param(notif_id, "notification_id")
+
+            updated = UserNotification.objects.filter(
+                pk=sys_pk,
+                recipient=request.user,
+                project=self.project,
+                is_read=False,
+            ).update(is_read=True)
+            return Response({"updated": updated})
+
+        # Đánh dấu đọc tất cả: giữ nguyên thông báo đang ghim chờ xử lý (is_pinned_pending=True)
+        updated = UserNotification.objects.filter(
+            recipient=request.user,
+            project=self.project,
+            is_read=False,
+            is_pinned_pending=False,
+        ).update(is_read=True)
+
+        visible_announcements = _visible_announcements(
+            self.project, request.user, can_see_all=self.has_cap(Cap.SEND_ANNOUNCEMENT)
+        )
+        candidate_ann_ids = [a.id for a in visible_announcements if a.sender_id != request.user.id]
+        if candidate_ann_ids:
+            already_read = set(
+                AnnouncementRead.objects.filter(
+                    user=request.user, announcement_id__in=candidate_ann_ids
+                ).values_list("announcement_id", flat=True)
+            )
+            to_create = [
+                AnnouncementRead(announcement_id=aid, user=request.user)
+                for aid in candidate_ann_ids
+                if aid not in already_read
+            ]
+            if to_create:
+                AnnouncementRead.objects.bulk_create(to_create, ignore_conflicts=True)
+                updated += len(to_create)
         return Response({"updated": updated})

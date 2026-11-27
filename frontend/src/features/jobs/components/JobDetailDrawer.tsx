@@ -79,10 +79,10 @@ export default function JobDetailDrawer({ jobId, onClose, onChanged }: Props) {
             <Button onClick={() => act(() => setJobLock(projectId, job.id, !job.is_locked), job.is_locked ? 'Đã mở khoá' : 'Đã khoá job')}>
               {job.is_locked ? 'Mở khoá' : 'Khoá job'}
             </Button>
-            <Button onClick={() => setModal('assign')} disabled={job.is_locked}>
+            <Button onClick={() => setModal('assign')} disabled={job.is_locked || job.status === 'delivered'}>
               Giao lại
             </Button>
-            <Button type="primary" onClick={() => setModal('deadline')} disabled={job.is_locked}>
+            <Button type="primary" onClick={() => setModal('deadline')} disabled={job.is_locked || job.status === 'delivered'}>
               Đặt deadline
             </Button>
           </Space>

@@ -31,7 +31,14 @@ SECRET_KEY = os.environ['DJANGO_SECRET_KEY']
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = os.getenv('DJANGO_DEBUG', 'False').lower() == 'true'
 
-ALLOWED_HOSTS = []
+ALLOWED_HOSTS = [
+    host.strip()
+    for host in os.getenv(
+        'DJANGO_ALLOWED_HOSTS',
+        'localhost,127.0.0.1' if DEBUG else '',
+    ).split(',')
+    if host.strip()
+]
 
 
 # Application definition
@@ -126,6 +133,9 @@ AUTH_PASSWORD_VALIDATORS = [
 LANGUAGE_CODE = 'en-us'
 
 TIME_ZONE = 'UTC'
+
+# Múi giờ nghiệp vụ cố định cho vận hành nội bộ Việt Nam (cắt ngày KPI, thống kê, hạn thông báo).
+APP_TIME_ZONE = 'Asia/Ho_Chi_Minh'
 
 USE_I18N = True
 

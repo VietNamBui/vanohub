@@ -1,7 +1,6 @@
-from rest_framework import serializers
-
 from accounts.serializers import UserBriefSerializer
 from jobs.models import Job, ReworkScope
+from rest_framework import serializers
 
 from .models import Audit, AuditSample, ErrorCategory, ReviewError, Severity
 
@@ -89,6 +88,7 @@ class ErrorInputSerializer(serializers.Serializer):
 class RejectSerializer(serializers.Serializer):
     errors = ErrorInputSerializer(many=True, allow_empty=False)
     comment = serializers.CharField(required=False, allow_blank=True, default="")
+    rework_scope = serializers.ChoiceField(choices=ReworkScope.choices, required=False, default=ReworkScope.PARTIAL)
 
 
 class PassSerializer(serializers.Serializer):

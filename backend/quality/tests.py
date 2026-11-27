@@ -1,7 +1,6 @@
-from django.test import TestCase
-
 from accounts.models import Role
 from accounts.testing import ProjectFixture, make_user
+from django.test import TestCase
 from jobs.models import Job, JobStatus
 
 from .models import Audit, AuditSample, ReviewError
@@ -263,7 +262,6 @@ class Qc1WorkflowTests(TestCase):
     def test_end_to_end_annotator_qc1_rework_qc2_pipeline(self):
         """Toàn luồng: PENDING_ANNOTATION -> start -> submit -> QC1 reject -> rework -> resubmit -> QC1 pass -> QC2 pass."""
         job = self.f.job(status=JobStatus.PENDING_ANNOTATION, annotator=self.f.ann1)
-        pm = self.f.client(self.f.pm)
         qc2 = self.f.client(self.f.qc2)
 
         self.assertEqual(self.ann1.post(self.f.url(f"annotator/jobs/{job.id}/start/"), {}, format="json").status_code, 200)
@@ -300,11 +298,263 @@ class Qc1WorkflowTests(TestCase):
         from projects.models import ActivityLog
 
         body = {"errors": [{"category": self.f.category.id, "description": "loi"}]}
-        with patch.object(ActivityLog, "record", side_effect=RuntimeError("db failure")):
-            with self.assertRaises(RuntimeError):
-                self.qc1.post(self.f.url(f"qc1/jobs/{self.job.id}/reject/"), body, format="json")
+        with (
+            patch.object(ActivityLog, "record", side_effect=RuntimeError("db failure")),
+            self.assertRaises(RuntimeError),
+        ):
+            self.qc1.post(self.f.url(f"qc1/jobs/{self.job.id}/reject/"), body, format="json")
 
         self.job.refresh_from_db()
         self.assertEqual(self.job.status, JobStatus.PENDING_QC1)
         self.assertEqual(self.job.rework_round, 0)
         self.assertEqual(ReviewError.objects.filter(job=self.job).count(), 0)
+
+
+class QualityBugFixTests(TestCase):
+    """Kiểm thử hồi quy các lỗi P0/P1 ở quality (khoá/escalation, 4-eyes lịch sử, timezone, param validation)."""
+
+    def setUp(self):
+        self.f = ProjectFixture()
+        self.pm = self.f.client(self.f.pm)
+        self.qc1 = self.f.client(self.f.qc1)
+        self.qc2 = self.f.client(self.f.qc2)
+        self.ann1 = self.f.client(self.f.ann1)
+
+    def test_qc2_actions_blocked_on_locked_job_batch_dataset_escalated_and_completed_audit(self):
+        from projects.models import DataStatus
+
+        job = self.f.job(status=JobStatus.PENDING_QC2, frame_count=10)
+        sample = ensure_qc2_sample(job)
+        reject_body = {"errors": [{"category": self.f.category.id, "description": "loi"}]}
+        other_qc2 = make_user("qc2_alt", Role.QC2, project=self.f.project)
+
+        # 1. Locked job
+        Job.objects.filter(pk=job.pk).update(is_locked=True)
+        self.assertEqual(self.qc2.post(self.f.url(f"audit-samples/{sample.id}/pass/"), {}, format="json").status_code, 400)
+        self.assertEqual(self.qc2.post(self.f.url(f"audit-samples/{sample.id}/reject/"), reject_body, format="json").status_code, 400)
+        self.assertEqual(self.pm.post(self.f.url(f"audit-samples/{sample.id}/assign/"), {"auditor": other_qc2.id}, format="json").status_code, 400)
+        Job.objects.filter(pk=job.pk).update(is_locked=False)
+
+        # 2. Locked batch
+        self.f.batch.status = DataStatus.LOCKED
+        self.f.batch.save(update_fields=["status"])
+        self.assertEqual(self.qc2.post(self.f.url(f"audit-samples/{sample.id}/pass/"), {}, format="json").status_code, 400)
+        self.assertEqual(self.qc2.post(self.f.url(f"audit-samples/{sample.id}/reject/"), reject_body, format="json").status_code, 400)
+        self.assertEqual(self.pm.post(self.f.url(f"audit-samples/{sample.id}/assign/"), {"auditor": other_qc2.id}, format="json").status_code, 400)
+        self.f.batch.status = DataStatus.ACTIVE
+        self.f.batch.save(update_fields=["status"])
+
+        # 3. Locked dataset
+        self.f.dataset.status = DataStatus.LOCKED
+        self.f.dataset.save(update_fields=["status"])
+        self.assertEqual(self.qc2.post(self.f.url(f"audit-samples/{sample.id}/pass/"), {}, format="json").status_code, 400)
+        self.f.dataset.status = DataStatus.ACTIVE
+        self.f.dataset.save(update_fields=["status"])
+
+        # 4. Escalated job
+        Job.objects.filter(pk=job.pk).update(is_escalated=True)
+        self.assertEqual(self.qc2.post(self.f.url(f"audit-samples/{sample.id}/pass/"), {}, format="json").status_code, 400)
+        self.assertEqual(self.qc2.post(self.f.url(f"audit-samples/{sample.id}/reject/"), reject_body, format="json").status_code, 400)
+        self.assertEqual(self.pm.post(self.f.url(f"audit-samples/{sample.id}/assign/"), {"auditor": other_qc2.id}, format="json").status_code, 400)
+        Job.objects.filter(pk=job.pk).update(is_escalated=False)
+
+        # 5. Completed audit
+        Audit.objects.filter(pk=sample.audit_id).update(status=Audit.Status.COMPLETED)
+        self.assertEqual(self.qc2.post(self.f.url(f"audit-samples/{sample.id}/pass/"), {}, format="json").status_code, 400)
+        self.assertEqual(self.qc2.post(self.f.url(f"audit-samples/{sample.id}/reject/"), reject_body, format="json").status_code, 400)
+        self.assertEqual(self.pm.post(self.f.url(f"audit-samples/{sample.id}/assign/"), {"auditor": other_qc2.id}, format="json").status_code, 400)
+
+    def test_qc2_reject_creates_pinned_notification_in_vn_tz_sets_scope_and_total_rework_rounds(self):
+        from datetime import UTC, datetime
+
+        from jobs.models import ReworkScope
+        from projects.models import UserNotification
+
+        # 2026-11-26 18:30 UTC == 2026-11-27 01:30 Asia/Ho_Chi_Minh
+        deadline_utc = datetime(2026, 11, 26, 18, 30, tzinfo=UTC)
+        job = self.f.job(status=JobStatus.PENDING_QC2, annotator=self.f.ann1, deadline=deadline_utc)
+        sample = ensure_qc2_sample(job)
+
+        # Gửi kèm ?result=pending trên URL POST vẫn trả 200 (không 500 DoesNotExist)
+        res = self.qc2.post(
+            self.f.url(f"audit-samples/{sample.id}/reject/?result=pending"),
+            {
+                "errors": [{"category": self.f.category.id, "location": "frame 1"}],
+                "rework_scope": ReworkScope.FULL,
+            },
+            format="json",
+        )
+        self.assertEqual(res.status_code, 200, res.data)
+        self.assertEqual(res.data["result"], AuditSample.Result.REJECT)
+
+        job.refresh_from_db()
+        self.assertEqual(job.status, JobStatus.REWORK)
+        self.assertEqual(job.rework_round, 1)
+        self.assertEqual(job.total_rework_rounds, 1)
+        self.assertEqual(job.rework_scope, ReworkScope.FULL)
+
+        notif = UserNotification.objects.get(
+            recipient=self.f.ann1,
+            job=job,
+            category=UserNotification.Category.REWORK,
+        )
+        self.assertTrue(notif.is_pinned_pending)
+        self.assertIn("27/11 01:30", notif.body)
+
+    def test_qc2_pass_with_pending_query_param_returns_200(self):
+        job = self.f.job(status=JobStatus.PENDING_QC2)
+        sample = ensure_qc2_sample(job)
+        res = self.qc2.post(self.f.url(f"audit-samples/{sample.id}/pass/?result=pending"), {}, format="json")
+        self.assertEqual(res.status_code, 200, res.data)
+        self.assertEqual(res.data["result"], AuditSample.Result.PASS)
+
+    def test_historical_and_cross_stage_four_eyes_blocks_qc1_and_qc2_after_reassignment(self):
+        from .qc2 import four_eyes_conflicts, get_stage_history, pick_auditor
+
+        # User có cả ANNOTATOR, QC1, QC2
+        multi = make_user("multi_stage", Role.ANNOTATOR, Role.QC1, Role.QC2, project=self.f.project)
+        job = self.f.job(status=JobStatus.PENDING_ANNOTATION, annotator=multi)
+        Job.objects.filter(pk=job.pk).update(qc1_reviewer=None)
+
+        # multi annotate + submit job
+        multi_client = self.f.client(multi)
+        self.assertEqual(multi_client.post(self.f.url(f"annotator/jobs/{job.id}/start/"), {}, format="json").status_code, 200)
+        self.assertEqual(multi_client.post(self.f.url(f"annotator/jobs/{job.id}/submit/"), {}, format="json").status_code, 200)
+
+        # PM đổi annotator sang ann2 → multi không còn là job.annotator hiện tại nhưng vẫn có lịch sử annotate
+        Job.objects.filter(pk=job.pk).update(annotator=self.f.ann2)
+        job.refresh_from_db()
+
+        ann_ids, qc1_ids, qc2_ids = get_stage_history(job)
+        self.assertIn(multi.id, ann_ids)
+        self.assertIn(multi.id, four_eyes_conflicts(job))
+
+        # multi bị chặn ở QC1 (ẩn khỏi pool và 403 khi gọi thẳng)
+        self.assertEqual(multi_client.get(self.f.url("qc1/jobs/?scope=pool")).data["count"], 0)
+        self.assertEqual(multi_client.post(self.f.url(f"qc1/jobs/{job.id}/start/"), {}, format="json").status_code, 403)
+        self.assertEqual(multi_client.post(self.f.url(f"qc1/jobs/{job.id}/pass/"), {}, format="json").status_code, 403)
+
+        # qc1 duyệt job → vào PENDING_QC2; multi cũng bị chặn ở QC2 (assign → 400, pass → 403)
+        self.assertEqual(self.qc1.post(self.f.url(f"qc1/jobs/{job.id}/pass/"), {}, format="json").status_code, 200)
+        sample = AuditSample.objects.get(job=job, result=AuditSample.Result.PENDING)
+        self.assertNotEqual(sample.auditor_id, multi.id)
+        self.assertEqual(
+            self.pm.post(self.f.url(f"audit-samples/{sample.id}/assign/"), {"auditor": multi.id}, format="json").status_code,
+            400,
+        )
+        # Kể cả nếu sample chưa có auditor, multi vẫn bị chặn 403 luật bốn mắt
+        AuditSample.objects.filter(pk=sample.pk).update(auditor=None)
+        self.assertEqual(multi_client.post(self.f.url(f"audit-samples/{sample.id}/pass/"), {}, format="json").status_code, 403)
+
+        # Ngược lại: người đã audit QC2 (self.f.qc2 có thêm role QC1) không được QC1 lại job đó sau rework
+        from accounts.models import RoleAssignment
+
+        RoleAssignment.objects.create(user=self.f.qc2, role=Role.QC1, project=self.f.project)
+        AuditSample.objects.filter(pk=sample.pk).update(auditor=self.f.qc2)
+        self.assertEqual(
+            self.qc2.post(
+                self.f.url(f"audit-samples/{sample.id}/reject/"),
+                {"errors": [{"category": self.f.category.id, "description": "sai"}]},
+                format="json",
+            ).status_code,
+            200,
+        )
+        Job.objects.filter(pk=job.pk).update(status=JobStatus.PENDING_QC1, qc1_reviewer=None)
+        self.assertEqual(self.qc2.get(self.f.url("qc1/jobs/?scope=pool")).data["count"], 0)
+        self.assertEqual(self.qc2.post(self.f.url(f"qc1/jobs/{job.id}/start/"), {}, format="json").status_code, 403)
+
+        # pick_auditor bỏ qua user không hoạt động (is_active=False)
+        self.f.qc2.is_active = False
+        self.f.qc2.save(update_fields=["is_active"])
+        fresh_job = self.f.job(status=JobStatus.PENDING_QC2, annotator=self.f.ann1)
+        self.assertEqual(pick_auditor(fresh_job), multi)
+
+    def test_ensure_qc2_sample_idempotent_and_handles_concurrent_integrity_error(self):
+        from unittest.mock import patch
+
+        from django.db import IntegrityError
+
+        job = self.f.job(status=JobStatus.PENDING_QC2, frame_count=10)
+        first = ensure_qc2_sample(job)
+        second = ensure_qc2_sample(job)
+        self.assertEqual(first.pk, second.pk)
+        self.assertEqual(Audit.objects.filter(batch=self.f.batch, status=Audit.Status.IN_PROGRESS).count(), 1)
+        self.assertEqual(AuditSample.objects.filter(job=job, result=AuditSample.Result.PENDING).count(), 1)
+
+        # Giả lập race condition khi tạo AuditSample: IntegrityError → lấy lại sample đang chờ
+        real_filter = AuditSample.objects.filter
+        call_count = {"n": 0}
+
+        def fake_filter(*args, **kwargs):
+            qs = real_filter(*args, **kwargs)
+            if kwargs.get("result") == AuditSample.Result.PENDING and call_count["n"] == 0:
+                call_count["n"] += 1
+                return AuditSample.objects.none()
+            return qs
+
+        with (
+            patch.object(AuditSample.objects, "filter", side_effect=fake_filter),
+            patch.object(AuditSample.objects, "create", side_effect=IntegrityError("duplicate pending")),
+        ):
+            recovered = ensure_qc2_sample(job)
+        self.assertEqual(recovered.pk, first.pk)
+
+    def test_qc1_pool_excludes_locked_batch_and_dataset_and_reject_formats_vn_deadline(self):
+        from datetime import UTC, datetime
+
+        from projects.models import DataStatus, UserNotification
+
+        pool_job = self.f.job(
+            status=JobStatus.PENDING_QC1,
+            annotator=self.f.ann1,
+            deadline=datetime(2026, 11, 26, 19, 15, tzinfo=UTC),  # 27/11 02:15 VN
+        )
+        Job.objects.filter(pk=pool_job.pk).update(qc1_reviewer=None)
+
+        # Khoá batch → ẩn khỏi pool QC1
+        self.f.batch.status = DataStatus.LOCKED
+        self.f.batch.save(update_fields=["status"])
+        self.assertEqual(self.qc1.get(self.f.url("qc1/jobs/?scope=pool")).data["count"], 0)
+        self.f.batch.status = DataStatus.ACTIVE
+        self.f.batch.save(update_fields=["status"])
+
+        # Khoá dataset → ẩn khỏi pool QC1
+        self.f.dataset.status = DataStatus.LOCKED
+        self.f.dataset.save(update_fields=["status"])
+        self.assertEqual(self.qc1.get(self.f.url("qc1/jobs/?scope=pool")).data["count"], 0)
+        self.f.dataset.status = DataStatus.ACTIVE
+        self.f.dataset.save(update_fields=["status"])
+
+        # Mở lại → hiện trong pool và reject tăng total_rework_rounds + format deadline VN
+        self.assertEqual(self.qc1.get(self.f.url("qc1/jobs/?scope=pool")).data["count"], 1)
+        res = self.qc1.post(
+            self.f.url(f"qc1/jobs/{pool_job.id}/reject/"),
+            {"errors": [{"category": self.f.category.id, "description": "thieu"}]},
+            format="json",
+        )
+        self.assertEqual(res.status_code, 200, res.data)
+        pool_job.refresh_from_db()
+        self.assertEqual(pool_job.total_rework_rounds, 1)
+        notif = UserNotification.objects.get(recipient=self.f.ann1, job=pool_job, category=UserNotification.Category.REWORK)
+        self.assertIn("27/11 02:15", notif.body)
+
+    def test_invalid_int_params_return_400_and_large_search_does_not_500(self):
+        job = self.f.job(status=JobStatus.PENDING_QC2)
+        sample = ensure_qc2_sample(job)
+
+        self.assertEqual(self.pm.get(self.f.url("audits/?batch=abc")).status_code, 400)
+        self.assertEqual(self.pm.get(self.f.url("audits/?batch=9999999999999")).status_code, 400)
+        self.assertEqual(self.pm.get(self.f.url("audit-samples/?audit=abc")).status_code, 400)
+        self.assertEqual(
+            self.pm.post(self.f.url(f"audit-samples/{sample.id}/assign/"), {"auditor": "not_int"}, format="json").status_code,
+            400,
+        )
+        self.assertEqual(
+            self.pm.post(self.f.url(f"audit-samples/{sample.id}/assign/"), {"auditor": 9999999999999}, format="json").status_code,
+            400,
+        )
+        self.assertEqual(self.qc1.get(self.f.url("qc1/jobs/?batch=abc")).status_code, 400)
+        self.assertEqual(self.qc1.get(self.f.url("qc1/jobs/?annotator=abc")).status_code, 400)
+        # Số vượt PG_INT32_MAX trong ô tìm kiếm không gây lỗi 500
+        search_res = self.qc1.get(self.f.url("qc1/jobs/?search=999999999999999999"))
+        self.assertEqual(search_res.status_code, 200)

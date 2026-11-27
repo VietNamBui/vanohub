@@ -1,11 +1,11 @@
+from accounts.models import Role, RoleAssignment
 from django.conf import settings
 from django.db import transaction
+from projects.models import ActivityLog, Project
 from rest_framework import status as http_status
 from rest_framework.decorators import api_view
-from rest_framework.exceptions import ValidationError
+from rest_framework.exceptions import PermissionDenied, ValidationError
 from rest_framework.response import Response
-
-from projects.models import ActivityLog
 
 from .assignee import jobs_held_by, push_assignees
 from .client import CvatClient, CvatError
@@ -96,17 +96,41 @@ def link(request):
         _log(user, "cvat.link", cvat_username=cvat_username, cvat_user_id=cvat_id)
     data = _link_state(user, _sync_held_jobs(user))
     # Organization trên CVAT mà tài khoản này là thành viên → hiện trên VanoHub ngay.
-    data["organizations"] = sync_organizations_quietly(user)
+    data["organizations"] = _filter_sync_result_for_user(user, sync_organizations_quietly(user))
     return Response(data, status=http_status.HTTP_200_OK)
+
+
+def _is_pm(user):
+    return RoleAssignment.objects.filter(user=user, role=Role.PROJECT_MANAGER).exists()
+
+
+def _filter_sync_result_for_user(user, result):
+    """Chỉ trả kết quả thuộc các organization mà user là thành viên (trừ superuser)."""
+    if user.is_superuser or "error" in result:
+        return result
+    allowed_names = set(Project.objects.filter(role_assignments__user=user).values_list("name", flat=True))
+    return {
+        "created": [name for name in result.get("created", []) if name in allowed_names],
+        "updated": [name for name in result.get("updated", []) if name in allowed_names],
+        "pm_added": [item for item in result.get("pm_added", []) if item.get("organization") in allowed_names],
+        "members_added": [
+            item for item in result.get("members_added", []) if item.get("organization") in allowed_names
+        ],
+        "waiting": [],
+    }
 
 
 @api_view(["POST"])
 def sync_organizations_view(request):
     """POST /api/cvat/sync-organizations/ — kéo CVAT organization (và vai trò thành viên) về VanoHub.
 
-    Ai cũng gọi được: chỉ phản chiếu đúng việc phân quyền trên CVAT, không tự cấp thêm quyền nào khác.
+    Chỉ PM (của ít nhất một organization) hoặc superuser được kích hoạt; non-superuser chỉ thấy
+    kết quả của các organization mà mình thuộc về.
     """
+    if not (request.user.is_superuser or _is_pm(request.user)):
+        raise PermissionDenied("Chỉ Project Manager hoặc quản trị viên mới có quyền đồng bộ organization từ CVAT.")
     try:
-        return Response(sync_organizations(request.user))
+        result = sync_organizations(request.user)
+        return Response(_filter_sync_result_for_user(request.user, result))
     except CvatError as exc:
         return Response({"detail": str(exc)}, status=http_status.HTTP_502_BAD_GATEWAY)

@@ -1,5 +1,4 @@
 import { AlertTriangle, Check, CheckCircle, LinkExternal01 } from '@untitledui/icons'
-import dayjs from 'dayjs'
 import { useState } from 'react'
 import { useNavigate, useParams } from 'react-router'
 import { Badge, BadgeWithDot } from '@/components/base/badges/badges'
@@ -13,7 +12,7 @@ import FormDialog from '../../../shared/components/ui/FormDialog'
 import PageState from '../../../shared/components/ui/PageState'
 import { useAction } from '../../../shared/hooks/useAction'
 import { useRequest } from '../../../shared/hooks/useRequest'
-import { formatDateTime, formatNumber } from '../../../shared/utils/format'
+import { formatDateTime, formatNumber, formatShortDateTime } from '../../../shared/utils/format'
 import { listGuidelines } from '../../projects/api'
 import { useProject } from '../../projects/projectContext'
 import { SEVERITY_LABELS } from '../../quality/constants'
@@ -31,21 +30,15 @@ const SEVERITY_BADGE: Record<string, 'gray' | 'warning' | 'error'> = {
   critical: 'error',
 }
 
-const DEFAULT_CHECKLIST = [
-  'Vị trí, kích thước và hướng',
-  'Đối tượng và lớp',
-  'ID giữa các frame',
-]
-
 function extractChecklist(markdown?: string): string[] {
-  if (!markdown) return DEFAULT_CHECKLIST
+  if (!markdown) return []
   const headings = markdown
     .split('\n')
     .map((line) => line.trim())
     .filter((line) => line.startsWith('## ') || line.startsWith('- '))
     .map((line) => line.replace(/^##\s+|^-\s+/, '').trim())
     .filter(Boolean)
-  return headings.length > 0 ? headings.slice(0, 5) : DEFAULT_CHECKLIST
+  return headings.slice(0, 5)
 }
 
 /** Trang chi tiết Job chuyên biệt cho Annotator (/projects/:projectId/annotator/jobs/:jobId). */
@@ -63,6 +56,7 @@ export default function AnnotatorJobDetailPage() {
   const [dataIssueOpen, setDataIssueOpen] = useState(false)
   const [submitModalOpen, setSubmitModalOpen] = useState(false)
   const [submitObjects, setSubmitObjects] = useState('')
+  const [submitObjectsError, setSubmitObjectsError] = useState<string | null>(null)
   const [submitNote, setSubmitNote] = useState('')
 
   const jobReq = useRequest(`annotator-job-detail:${projectId}:${jobId}:${version}`, () =>
@@ -87,7 +81,15 @@ export default function AnnotatorJobDetailPage() {
   async function handleConfirmSubmit() {
     if (!job) return
     const trimmed = submitObjects.trim()
-    const parsed = trimmed !== '' && /^\d+$/.test(trimmed) ? Number(trimmed) : undefined
+    let parsed: number | undefined
+    if (trimmed !== '') {
+      if (!/^\d+$/.test(trimmed)) {
+        setSubmitObjectsError('Vui lòng nhập số nguyên không âm (ví dụ: 120).')
+        return
+      }
+      parsed = Number(trimmed)
+    }
+    setSubmitObjectsError(null)
     const ok = await run(
       () => submitAnnotatorJob(projectId, job.id, { note: submitNote.trim(), ...(parsed !== undefined ? { object_count: parsed } : {}) }),
       `Đã nộp ${job.name} lên QC1`,
@@ -169,6 +171,7 @@ export default function AnnotatorJobDetailPage() {
                   iconLeading={Check}
                   onPress={() => {
                     setSubmitObjects(job.object_count > 0 ? String(job.object_count) : '')
+                    setSubmitObjectsError(null)
                     setSubmitNote('')
                     setSubmitModalOpen(true)
                   }}
@@ -211,7 +214,7 @@ export default function AnnotatorJobDetailPage() {
               <div className="flex flex-wrap items-center gap-2.5">
                 <span className="text-xs text-[#344054]">
                   {job.deadline
-                    ? `Hạn sửa ${dayjs(job.deadline).format('DD/MM HH:mm')} · DH01/02`
+                    ? `${job.status === 'rework' ? 'Hạn sửa' : 'Hạn nộp'} ${formatShortDateTime(job.deadline)} · DH01/02`
                     : 'Chưa đặt hạn · DH01/02'}
                 </span>
                 {countdown && (
@@ -310,14 +313,24 @@ export default function AnnotatorJobDetailPage() {
                   {latestGuideline ? `Phiên bản v${latestGuideline.version} · DL07` : 'Chưa xuất bản phiên bản · DL07'}
                 </p>
 
-                <ul className="mt-5 flex flex-col gap-3.5">
-                  {checklist.map((item) => (
-                    <li key={item} className="flex items-start gap-2.5 text-sm text-[#344054]">
-                      <CheckCircle className="mt-0.5 size-4 shrink-0 text-[#7F56D9]" />
-                      <span>{item}</span>
-                    </li>
-                  ))}
-                </ul>
+                {!latestGuideline ? (
+                  <p className="mt-5 text-sm text-[#667085]">
+                    Chưa có hướng dẫn gán nhãn nào được xuất bản cho dự án này.
+                  </p>
+                ) : checklist.length === 0 ? (
+                  <p className="mt-5 text-sm text-[#667085]">
+                    Mở trang Hướng dẫn để xem chi tiết phiên bản v{latestGuideline.version}.
+                  </p>
+                ) : (
+                  <ul className="mt-5 flex flex-col gap-3.5">
+                    {checklist.map((item) => (
+                      <li key={item} className="flex items-start gap-2.5 text-sm text-[#344054]">
+                        <CheckCircle className="mt-0.5 size-4 shrink-0 text-[#7F56D9]" />
+                        <span>{item}</span>
+                      </li>
+                    ))}
+                  </ul>
+                )}
               </div>
 
               <div className="mt-6 pt-4">
@@ -399,7 +412,12 @@ export default function AnnotatorJobDetailPage() {
                 label="Số object-frame đã hoàn tất (không bắt buộc)"
                 placeholder="Để trống để giữ nguyên số hiện tại"
                 value={submitObjects}
-                onChange={setSubmitObjects}
+                onChange={(v) => {
+                  setSubmitObjects(v)
+                  if (submitObjectsError) setSubmitObjectsError(null)
+                }}
+                isInvalid={!!submitObjectsError}
+                hint={submitObjectsError ?? undefined}
               />
               <TextArea
                 label="Ghi chú cho QC1 (không bắt buộc)"
