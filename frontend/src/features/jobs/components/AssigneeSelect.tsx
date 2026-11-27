@@ -1,3 +1,4 @@
+import { WarningFilled } from '@ant-design/icons'
 import { Select, Tooltip, Typography } from 'antd'
 import type { UserBrief } from '../../../shared/api/types'
 import RoleBadges from '../../../shared/components/RoleBadges'
@@ -17,7 +18,9 @@ interface Props {
   blockedIds?: number[]
 }
 
-/** Ô chọn người phụ trách ngay trong bảng job (Annotator / QC1 / QC2). */
+export const CVAT_UNLINKED_HINT = 'Chưa liên kết CVAT — job vẫn giao được trên VanoHub, sẽ tự đồng bộ sang CVAT khi người này liên kết.'
+
+/** Ô chọn người phụ trách ngay trong bảng job (Annotator / QC1 / QC2). Người chưa liên kết CVAT có cảnh báo. */
 export default function AssigneeSelect({
   value, options, onChange, allowClear = true, disabled, disabledReason, placeholder = 'Chưa giao', blockedIds = [],
 }: Props) {
@@ -34,13 +37,16 @@ export default function AssigneeSelect({
     label: m.user.full_name,
     username: m.user.username,
     roles: m.roles,
+    cvatLinked: m.cvat_linked,
     disabled: blockedIds.includes(m.user.id),
   }))
   if (value && !items.some((i) => i.value === value.id)) {
-    items.unshift({ value: value.id, label: value.full_name, username: value.username, roles: [], disabled: true })
+    items.unshift({ value: value.id, label: value.full_name, username: value.username, roles: [], cvatLinked: true, disabled: true })
   }
+  const selectedUnlinked = value != null && items.find((i) => i.value === value.id)?.cvatLinked === false
 
   return (
+    <span style={{ display: 'inline-flex', alignItems: 'center', gap: 2 }}>
     <Select
       size="small"
       variant="borderless"
@@ -56,6 +62,7 @@ export default function AssigneeSelect({
           <span style={{ minWidth: 0 }}>
             <div>{option.data.label}</div>
             <div style={{ fontSize: 12, opacity: 0.6 }}>{option.data.username}</div>
+            {!option.data.cvatLinked && <div style={{ fontSize: 12, color: '#b54708' }}>Chưa liên kết CVAT</div>}
           </span>
           <RoleBadges roles={option.data.roles} short />
         </div>
@@ -65,5 +72,11 @@ export default function AssigneeSelect({
       onChange={(id?: number) => onChange(id ?? null)}
       onClick={(event) => event.stopPropagation()}
     />
+    {selectedUnlinked && (
+      <Tooltip title={CVAT_UNLINKED_HINT}>
+        <WarningFilled aria-label="Chưa liên kết CVAT" style={{ color: '#dc6803' }} />
+      </Tooltip>
+    )}
+    </span>
   )
 }

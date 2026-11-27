@@ -22,6 +22,7 @@ export interface Job {
   status: JobStatus
   status_label: string
   stage: Stage
+  /** Task (CVAT task) chứa job. */
   batch: number
   batch_name: string
   dataset: number
@@ -35,6 +36,8 @@ export interface Job {
   due_state?: DueState
   hours_remaining?: number | null
   rework_round: number
+  total_rework_rounds?: number
+  first_qc1_result?: '' | 'pass' | 'reject'
   max_rework_rounds: number
   escalation_policy?: 'block' | 'warn_only'
   rework_scope?: ReworkScope
@@ -43,6 +46,8 @@ export interface Job {
   is_locked: boolean
   frame_count: number
   object_count: number
+  last_counted_objects?: number
+  round_credited_objects?: number
   target_object_count?: number
   progress_percent?: number
   open_error_count?: number
@@ -52,6 +57,7 @@ export interface Job {
   cvat_task_id: number | null
   cvat_stage: string
   cvat_state: string
+  source_missing?: boolean
   cvat_url: string | null
   updated_at: string
 }
@@ -62,11 +68,18 @@ export interface JobErrorBrief {
   rework_round: number
   category: string
   severity: string
+  verdict?: 'fail' | 'edge'
+  frame_number?: number | null
+  cvat_object_id?: number | null
+  is_missing_object?: boolean
   location: string
   description: string
+  is_voided?: boolean
   reported_by: UserBrief | null
   created_at: string
 }
+
+export type ReviewErrorBrief = JobErrorBrief
 
 export interface JobDetail extends Job {
   timeline: ActivityLog[]
@@ -78,15 +91,10 @@ export interface JobFilters {
   page_size?: number
   stage?: Stage | ''
   status?: string
-  dataset?: number | string
-  batch?: number | string
+  dataset?: number
+  /** Task (CVAT task). */
+  batch?: number
   assignee?: number
-  annotator?: number
-  qc1_reviewer?: number
-  min_rework?: number
-  max_rework?: number
-  deadline_from?: string
-  deadline_to?: string
   search?: string
   escalated?: boolean
   overdue?: boolean
@@ -201,6 +209,7 @@ export interface AnnotatorDashboard {
   }[]
   meta: {
     team_name: string | null
+    team_leader_name: string | null
     project_name: string
     last_cvat_sync_at: string | null
     wip_limit: number

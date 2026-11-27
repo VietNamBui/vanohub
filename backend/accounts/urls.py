@@ -8,7 +8,8 @@ urlpatterns = [
     path("token/", TokenObtainPairView.as_view(), name="token_obtain_pair"),
     # Gửi refresh token → nhận access token mới khi access token cũ hết hạn.
     path("token/refresh/", TokenRefreshView.as_view(), name="token_refresh"),
-    path("me/", views.me, name="me"),
-    path("change-password/", views.change_password, name="change_password"),
-    path("users/", views.users_list, name="users_list"),
+    path("me/", views.MeView.as_view(), name="me"),
+    path("me/password/", views.ChangePasswordView.as_view(), name="change-password"),
+    path("change-password/", views.ChangePasswordView.as_view(), name="change_password"),
+    path("users/", views.UserListView.as_view(), name="users_list"),
 ]

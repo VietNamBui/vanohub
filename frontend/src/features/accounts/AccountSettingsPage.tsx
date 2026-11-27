@@ -1,16 +1,17 @@
 import { useRef, useState } from 'react'
-import { useParams, useSearchParams } from 'react-router'
+import { Link, useParams, useSearchParams } from 'react-router'
+import { Tabs } from '@/components/application/tabs/tabs'
 import { Badge } from '@/components/base/badges/badges'
 import { Button } from '@/components/base/buttons/button'
 import { Input } from '@/components/base/input/input'
 import { Toggle } from '@/components/base/toggle/toggle'
+import SectionCard from '../../shared/components/ui/SectionCard'
 import { useAction } from '../../shared/hooks/useAction'
 import { ROLE_LABELS, type Role } from '../../shared/types/roles'
-import { cx } from '@/utils/cx'
 import { changePassword, updateCurrentUser } from '../auth/api'
 import type { CurrentUser } from '../auth/types'
 import { useAuth } from '../auth/useAuth'
-import ProjectBreadcrumb from '../../shared/components/ui/ProjectBreadcrumb'
+import AnnotatorBreadcrumb from '../jobs/components/AnnotatorBreadcrumb'
 
 type SettingsTab = 'profile' | 'security' | 'notifications'
 
@@ -25,21 +26,21 @@ function getFullName(user: CurrentUser | null) {
   return user?.full_name || [user?.first_name, user?.last_name].filter(Boolean).join(' ') || user?.username || ''
 }
 
-/** Trang "Cài đặt tài khoản": Hồ sơ (PQ03), Bảo mật, Thông báo. */
+/** Trang "Cài đặt tài khoản": Hồ sơ, Bảo mật, Thông báo. */
 export default function AccountSettingsPage() {
   const { user, setUser } = useAuth()
   const { projectId: projectIdParam } = useParams()
   const projectId = projectIdParam ? Number(projectIdParam) : null
   const [searchParams, setSearchParams] = useSearchParams()
-  const rawTab = searchParams.get('tab') as SettingsTab | null
+  const rawTab = searchParams.get('tab')
   const tab: SettingsTab =
-    rawTab && ['profile', 'security', 'notifications'].includes(rawTab) ? rawTab : 'profile'
+    rawTab === 'security' || rawTab === 'notifications' || rawTab === 'profile' ? rawTab : 'profile'
 
   const switchTab = (next: SettingsTab) => {
     setSearchParams({ tab: next }, { replace: true })
   }
 
-  const userSyncKey = `${user?.id ?? 0}:${user?.email ?? ''}:${user?.avatar_url ?? ''}:${getFullName(user)}`
+  const userSyncKey = `${user?.id ?? 0}:${user?.email ?? ''}:${user?.timezone_name ?? ''}:${user?.avatar_url ?? ''}:${getFullName(user)}`
   const notifSyncKey = `${user?.id ?? 0}:${user?.notify_rework}:${user?.notify_deadline}:${user?.notify_request_updates}:${user?.notify_qc_pass}`
 
   const scopedRoles: Role[] = (user?.role_assignments ?? [])
@@ -51,57 +52,43 @@ export default function AccountSettingsPage() {
     user?.role_assignments.find((ra) => ra.project === projectId)?.project_name ||
     user?.role_assignments.find((ra) => ra.project_name)?.project_name ||
     ''
+  const cvatLinkPath = projectId ? `/projects/${projectId}/cvat-link` : '/cvat-link'
 
   return (
-    <div className="mx-auto flex max-w-[1160px] flex-col gap-6 px-6 py-7">
-      <ProjectBreadcrumb projectId={projectId} items={[{ label: 'Cài đặt tài khoản' }]} />
+    <div className="mx-auto flex w-full max-w-[1160px] flex-col gap-6 px-6 py-7">
+      <AnnotatorBreadcrumb projectId={projectId} items={[{ label: 'Cài đặt tài khoản' }]} />
 
       <header>
-        <h1 className="text-[30px] leading-tight font-bold text-[#101828]">Cài đặt tài khoản</h1>
-        <p className="mt-1 text-base text-[#475467]">Quản lý hồ sơ, bảo mật và tuỳ chọn thông báo.</p>
+        <h1 className="text-display-xs font-semibold text-primary">Cài đặt tài khoản</h1>
+        <p className="mt-1 text-sm text-tertiary">Quản lý hồ sơ, bảo mật và tuỳ chọn thông báo.</p>
       </header>
 
-      <div className="flex items-center gap-6 border-b border-[#EAECF0]">
-        {(
-          [
-            { id: 'profile', label: 'Hồ sơ' },
-            { id: 'security', label: 'Bảo mật' },
-            { id: 'notifications', label: 'Thông báo' },
-          ] as { id: SettingsTab; label: string }[]
-        ).map((item) => {
-          const active = tab === item.id
-          return (
-            <button
-              key={item.id}
-              type="button"
-              onClick={() => switchTab(item.id)}
-              className={cx(
-                'relative cursor-pointer pb-3 text-sm font-semibold transition',
-                active ? 'text-[#6941C6]' : 'text-[#667085] hover:text-[#344054]',
-              )}
-            >
-              {item.label}
-              {active && <span className="absolute inset-x-0 bottom-0 h-0.5 bg-[#7F56D9]" />}
-            </button>
-          )
-        })}
-      </div>
+      <Tabs selectedKey={tab} onSelectionChange={(key) => switchTab(key as SettingsTab)}>
+        <Tabs.List type="underline" size="sm" aria-label="Cài đặt tài khoản" className="gap-6">
+          <Tabs.Item id="profile" label="Hồ sơ" />
+          <Tabs.Item id="security" label="Bảo mật" />
+          <Tabs.Item id="notifications" label="Thông báo" />
+        </Tabs.List>
 
-      {tab === 'profile' && (
-        <ProfileTab
-          key={userSyncKey}
-          user={user}
-          primaryRole={primaryRole}
-          scopedProjectName={scopedProjectName}
-          onSaved={setUser}
-        />
-      )}
+        <Tabs.Panel id="profile" className="mt-6">
+          <ProfileTab
+            key={userSyncKey}
+            user={user}
+            primaryRole={primaryRole}
+            scopedProjectName={scopedProjectName}
+            cvatLinkPath={cvatLinkPath}
+            onSaved={setUser}
+          />
+        </Tabs.Panel>
 
-      {tab === 'security' && <SecurityTab />}
+        <Tabs.Panel id="security" className="mt-6">
+          <SecurityTab />
+        </Tabs.Panel>
 
-      {tab === 'notifications' && (
-        <NotificationsTab key={notifSyncKey} user={user} onSaved={setUser} />
-      )}
+        <Tabs.Panel id="notifications" className="mt-6">
+          <NotificationsTab key={notifSyncKey} user={user} onSaved={setUser} />
+        </Tabs.Panel>
+      </Tabs>
     </div>
   )
 }
@@ -110,11 +97,13 @@ function ProfileTab({
   user,
   primaryRole,
   scopedProjectName,
+  cvatLinkPath,
   onSaved,
 }: {
   user: CurrentUser | null
   primaryRole: string
   scopedProjectName: string
+  cvatLinkPath: string
   onSaved: (u: CurrentUser) => void
 }) {
   const { run, pending } = useAction()
@@ -124,30 +113,13 @@ function ProfileTab({
   const [fullName, setFullName] = useState(initialName)
   const [email, setEmail] = useState(user?.email ?? '')
   const [avatarUrl, setAvatarUrl] = useState(user?.avatar_url ?? '')
-  const [avatarError, setAvatarError] = useState<string | null>(null)
 
   function handleAvatarFile(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0]
-    e.target.value = ''
     if (!file) return
-    if (!/^image\/(png|jpeg|webp|gif)$/.test(file.type)) {
-      setAvatarError('Chỉ hỗ trợ ảnh PNG, JPG, WEBP hoặc GIF.')
-      return
-    }
-    if (file.size > 350 * 1024) {
-      setAvatarError('Ảnh quá lớn (tối đa 350 KB).')
-      return
-    }
     const reader = new FileReader()
     reader.onload = () => {
-      if (typeof reader.result === 'string') {
-        if (reader.result.length > 500_000) {
-          setAvatarError('Ảnh vượt quá kích thước cho phép.')
-          return
-        }
-        setAvatarError(null)
-        setAvatarUrl(reader.result)
-      }
+      if (typeof reader.result === 'string') setAvatarUrl(reader.result)
     }
     reader.readAsDataURL(file)
   }
@@ -173,90 +145,88 @@ function ProfileTab({
   }
 
   return (
-    <form onSubmit={saveProfile} className="rounded-xl border border-[#EAECF0] bg-white p-6">
-      <div className="divide-y divide-[#EAECF0]">
-        <div className="grid grid-cols-1 gap-4 py-5 first:pt-1 md:grid-cols-12 md:items-center">
-          <label className="text-sm font-semibold text-[#344054] md:col-span-4">Ảnh đại diện</label>
-          <div className="flex items-center gap-4 md:col-span-8">
-            <span className="flex size-16 shrink-0 items-center justify-center overflow-hidden rounded-full bg-[#F4EBFF] text-2xl font-bold text-[#6941C6]">
-              {avatarUrl ? (
-                <img src={avatarUrl} alt={fullName} className="size-full object-cover" />
-              ) : (
-                initialsOf(fullName)
-              )}
-            </span>
-            <input
-              ref={fileInputRef}
-              type="file"
-              accept="image/png,image/jpeg,image/webp,image/gif"
-              className="hidden"
-              onChange={handleAvatarFile}
-            />
-            <Button color="secondary" size="sm" onPress={() => fileInputRef.current?.click()}>
-              Tải ảnh lên
-            </Button>
-            {avatarUrl && (
-              <Button
-                color="tertiary"
-                size="sm"
-                onPress={() => {
-                  setAvatarError(null)
-                  setAvatarUrl('')
-                }}
-              >
-                Xoá ảnh
+    <SectionCard title="Hồ sơ cá nhân" description="Cập nhật ảnh đại diện và thông tin liên hệ của bạn.">
+      <form onSubmit={saveProfile}>
+        <div className="divide-y divide-secondary">
+          <div className="grid grid-cols-1 gap-4 py-5 first:pt-1 md:grid-cols-12 md:items-center">
+            <label className="text-sm font-semibold text-secondary md:col-span-4">Ảnh đại diện</label>
+            <div className="flex items-center gap-4 md:col-span-8">
+              <span className="flex size-16 shrink-0 items-center justify-center overflow-hidden rounded-full bg-brand-secondary text-2xl font-bold text-brand-secondary">
+                {avatarUrl ? (
+                  <img src={avatarUrl} alt={fullName} className="size-full object-cover" />
+                ) : (
+                  initialsOf(fullName)
+                )}
+              </span>
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept="image/*"
+                className="hidden"
+                onChange={handleAvatarFile}
+              />
+              <Button color="secondary" size="sm" onPress={() => fileInputRef.current?.click()}>
+                Tải ảnh lên
               </Button>
-            )}
+              {avatarUrl && (
+                <Button color="tertiary" size="sm" onPress={() => setAvatarUrl('')}>
+                  Xoá ảnh
+                </Button>
+              )}
+            </div>
           </div>
-          {avatarError && <p className="text-xs text-[#D92D20] md:col-span-8 md:col-start-5">{avatarError}</p>}
+
+          <div className="grid grid-cols-1 gap-4 py-5 md:grid-cols-12 md:items-center">
+            <label className="text-sm font-semibold text-secondary md:col-span-4">Họ và tên</label>
+            <div className="max-w-[480px] md:col-span-8">
+              <Input aria-label="Họ và tên" value={fullName} onChange={setFullName} placeholder="Nhập họ và tên" />
+            </div>
+          </div>
+
+          <div className="grid grid-cols-1 gap-4 py-5 md:grid-cols-12 md:items-center">
+            <label className="text-sm font-semibold text-secondary md:col-span-4">Email</label>
+            <div className="max-w-[480px] md:col-span-8">
+              <Input aria-label="Email" type="email" value={email} onChange={setEmail} placeholder="name@vanohub.vn" />
+            </div>
+          </div>
+
+          <div className="grid grid-cols-1 gap-4 py-5 md:grid-cols-12 md:items-center">
+            <label className="text-sm font-semibold text-secondary md:col-span-4">Vai trò & CVAT</label>
+            <div className="flex flex-wrap items-center gap-3 md:col-span-8">
+              <Badge size="md" type="pill-color" color="gray">
+                {primaryRole}
+              </Badge>
+              {scopedProjectName && <span className="text-sm text-tertiary">{scopedProjectName}</span>}
+              <Badge size="md" type="pill-color" color={user?.cvat_linked ? 'success' : 'warning'}>
+                {user?.cvat_linked ? `CVAT: ${user.cvat_username}` : 'Chưa liên kết CVAT'}
+              </Badge>
+              <Link to={cvatLinkPath} className="text-sm font-semibold text-brand-secondary hover:text-brand-secondary_hover hover:underline">
+                Quản lý liên kết CVAT
+              </Link>
+            </div>
+          </div>
+
+          <div className="grid grid-cols-1 gap-4 py-5 md:grid-cols-12 md:items-center">
+            <label className="text-sm font-semibold text-secondary md:col-span-4">Múi giờ</label>
+            <div className="flex flex-wrap items-center gap-2 md:col-span-8">
+              <Badge size="md" type="pill-color" color="gray">
+                (UTC+07:00) Việt Nam · Asia/Ho_Chi_Minh
+              </Badge>
+              <span className="text-xs text-tertiary">Cố định theo vận hành nội bộ.</span>
+            </div>
+          </div>
         </div>
 
-        <div className="grid grid-cols-1 gap-4 py-5 md:grid-cols-12 md:items-center">
-          <label className="text-sm font-semibold text-[#344054] md:col-span-4">Họ và tên</label>
-          <div className="max-w-[480px] md:col-span-8">
-            <Input value={fullName} onChange={setFullName} placeholder="Nhập họ và tên" />
-          </div>
+        <div className="mt-6 flex items-center justify-end gap-3 border-t border-secondary pt-5">
+          <Button color="secondary" size="md" onPress={resetProfile}>
+            Hủy
+          </Button>
+          <Button type="submit" color="primary" size="md" isLoading={pending}>
+            Lưu thay đổi
+          </Button>
         </div>
-
-        <div className="grid grid-cols-1 gap-4 py-5 md:grid-cols-12 md:items-center">
-          <label className="text-sm font-semibold text-[#344054] md:col-span-4">Email</label>
-          <div className="max-w-[480px] md:col-span-8">
-            <Input type="email" value={email} onChange={setEmail} placeholder="name@annota.vn" />
-          </div>
-        </div>
-
-        <div className="grid grid-cols-1 gap-4 py-5 md:grid-cols-12 md:items-center">
-          <label className="text-sm font-semibold text-[#344054] md:col-span-4">Vai trò</label>
-          <div className="flex flex-wrap items-center gap-3 md:col-span-8">
-            <Badge size="md" type="pill-color" color="gray">
-              {primaryRole}
-            </Badge>
-            <span className="text-sm text-[#475467]">
-              {[scopedProjectName, 'tài khoản ánh xạ từ CVAT (PQ03)'].filter(Boolean).join(' · ')}
-            </span>
-          </div>
-        </div>
-
-        <div className="grid grid-cols-1 gap-4 py-5 md:grid-cols-12 md:items-center">
-          <label className="text-sm font-semibold text-[#344054] md:col-span-4">Múi giờ</label>
-          <div className="flex flex-wrap items-center gap-3 md:col-span-8">
-            <Badge size="md" type="pill-color" color="gray">
-              (UTC+07:00) Việt Nam
-            </Badge>
-            <span className="text-sm text-[#475467]">Asia/Ho_Chi_Minh · cố định toàn hệ thống</span>
-          </div>
-        </div>
-      </div>
-
-      <div className="mt-6 flex items-center justify-end gap-3 border-t border-[#EAECF0] pt-5">
-        <Button color="secondary" size="md" onPress={resetProfile}>
-          Hủy
-        </Button>
-        <Button type="submit" color="primary" size="md" isLoading={pending}>
-          Lưu thay đổi
-        </Button>
-      </div>
-    </form>
+      </form>
+    </SectionCard>
   )
 }
 
@@ -279,7 +249,7 @@ function SecurityTab() {
     }
     setPwError(null)
     const ok = await run(
-      () => changePassword({ current_password: currentPassword, new_password: newPassword }),
+      () => changePassword(currentPassword, newPassword),
       'Đã cập nhật mật khẩu thành công',
     )
     if (ok) {
@@ -290,48 +260,49 @@ function SecurityTab() {
   }
 
   return (
-    <form onSubmit={savePassword} className="rounded-xl border border-[#EAECF0] bg-white p-6">
-      <div className="max-w-[520px] space-y-4">
-        <h2 className="text-base font-bold text-[#101828]">Đổi mật khẩu</h2>
-        <p className="text-sm text-[#475467]">
-          Dùng mật khẩu mạnh tối thiểu 8 ký tự để bảo vệ tài khoản làm việc của bạn.
-        </p>
-        <Input
-          type="password"
-          label="Mật khẩu hiện tại"
-          value={currentPassword}
-          onChange={setCurrentPassword}
-          placeholder="Nhập mật khẩu hiện tại"
-        />
-        <Input
-          type="password"
-          label="Mật khẩu mới"
-          value={newPassword}
-          onChange={(v) => {
-            setNewPassword(v)
-            if (pwError) setPwError(null)
-          }}
-          placeholder="Tối thiểu 8 ký tự"
-        />
-        <Input
-          type="password"
-          label="Xác nhận mật khẩu mới"
-          value={confirmPassword}
-          onChange={(v) => {
-            setConfirmPassword(v)
-            if (pwError) setPwError(null)
-          }}
-          isInvalid={!!pwError}
-          hint={pwError ?? undefined}
-          placeholder="Nhập lại mật khẩu mới"
-        />
-      </div>
-      <div className="mt-6 flex items-center justify-end gap-3 border-t border-[#EAECF0] pt-5">
-        <Button type="submit" color="primary" size="md" isLoading={pending}>
-          Cập nhật mật khẩu
-        </Button>
-      </div>
-    </form>
+    <SectionCard
+      title="Đổi mật khẩu"
+      description="Dùng mật khẩu mạnh tối thiểu 8 ký tự để bảo vệ tài khoản làm việc của bạn."
+    >
+      <form onSubmit={savePassword}>
+        <div className="max-w-[520px] space-y-4">
+          <Input
+            type="password"
+            label="Mật khẩu hiện tại"
+            value={currentPassword}
+            onChange={setCurrentPassword}
+            placeholder="Nhập mật khẩu hiện tại"
+          />
+          <Input
+            type="password"
+            label="Mật khẩu mới"
+            value={newPassword}
+            onChange={(v) => {
+              setNewPassword(v)
+              if (pwError) setPwError(null)
+            }}
+            placeholder="Tối thiểu 8 ký tự"
+          />
+          <Input
+            type="password"
+            label="Xác nhận mật khẩu mới"
+            value={confirmPassword}
+            onChange={(v) => {
+              setConfirmPassword(v)
+              if (pwError) setPwError(null)
+            }}
+            isInvalid={!!pwError}
+            hint={pwError ?? undefined}
+            placeholder="Nhập lại mật khẩu mới"
+          />
+        </div>
+        <div className="mt-6 flex items-center justify-end gap-3 border-t border-secondary pt-5">
+          <Button type="submit" color="primary" size="md" isLoading={pending}>
+            Cập nhật mật khẩu
+          </Button>
+        </div>
+      </form>
+    </SectionCard>
   )
 }
 
@@ -364,48 +335,48 @@ function NotificationsTab({
   }
 
   return (
-    <form onSubmit={saveNotifications} className="rounded-xl border border-[#EAECF0] bg-white p-6">
-      <h2 className="text-base font-bold text-[#101828]">Tuỳ chọn thông báo</h2>
-      <p className="mt-1 text-sm text-[#475467]">
-        Chọn loại thông báo xuất hiện trong ngăn kéo Thông báo (TB03).
-      </p>
+    <SectionCard
+      title="Tuỳ chọn thông báo"
+      description="Chọn loại thông báo xuất hiện trong ngăn kéo Thông báo."
+    >
+      <form onSubmit={saveNotifications}>
+        <div className="flex flex-col gap-5">
+          <Toggle
+            size="md"
+            isSelected={notifyRework}
+            onChange={setNotifyRework}
+            label="Job bị trả sửa (Rework)"
+            hint="Nhận thông báo ngay khi QC1 hoặc QC2 trả lại lỗi cần sửa."
+          />
+          <Toggle
+            size="md"
+            isSelected={notifyDeadline}
+            onChange={setNotifyDeadline}
+            label="Cảnh báo sắp / quá hạn"
+            hint="Nhắc nhở tự động khi job đang giữ còn dưới 24 giờ tới hạn."
+          />
+          <Toggle
+            size="md"
+            isSelected={notifyRequests}
+            onChange={setNotifyRequests}
+            label="Cập nhật phản hồi lỗi & báo dữ liệu"
+            hint="Thông báo khi Project Manager tiếp nhận và kết luận yêu cầu của bạn."
+          />
+          <Toggle
+            size="md"
+            isSelected={notifyQcPass}
+            onChange={setNotifyQcPass}
+            label="Job đạt kiểm tra QC1"
+            hint="Thông báo khi job vượt qua QC1 và được ghi nhận FPY."
+          />
+        </div>
 
-      <div className="mt-6 flex flex-col gap-5">
-        <Toggle
-          size="md"
-          isSelected={notifyRework}
-          onChange={setNotifyRework}
-          label="Job bị trả sửa (Rework)"
-          hint="Nhận thông báo ngay khi QC1 hoặc QC2 trả lại lỗi cần sửa."
-        />
-        <Toggle
-          size="md"
-          isSelected={notifyDeadline}
-          onChange={setNotifyDeadline}
-          label="Cảnh báo sắp / quá hạn (DH02 · DH04)"
-          hint="Nhắc nhở tự động khi job đang giữ còn dưới 24 giờ tới hạn."
-        />
-        <Toggle
-          size="md"
-          isSelected={notifyRequests}
-          onChange={setNotifyRequests}
-          label="Cập nhật phản hồi lỗi & báo dữ liệu"
-          hint="Thông báo khi PM tiếp nhận và kết luận yêu cầu của bạn."
-        />
-        <Toggle
-          size="md"
-          isSelected={notifyQcPass}
-          onChange={setNotifyQcPass}
-          label="Job đạt kiểm tra QC1"
-          hint="Thông báo khi job vượt qua QC1 và được ghi nhận FPY."
-        />
-      </div>
-
-      <div className="mt-6 flex items-center justify-end gap-3 border-t border-[#EAECF0] pt-5">
-        <Button type="submit" color="primary" size="md" isLoading={pending}>
-          Lưu tuỳ chọn
-        </Button>
-      </div>
-    </form>
+        <div className="mt-6 flex items-center justify-end gap-3 border-t border-secondary pt-5">
+          <Button type="submit" color="primary" size="md" isLoading={pending}>
+            Lưu tuỳ chọn
+          </Button>
+        </div>
+      </form>
+    </SectionCard>
   )
 }

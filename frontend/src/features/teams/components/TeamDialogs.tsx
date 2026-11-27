@@ -59,15 +59,14 @@ function TeamFormDialog({ projectId, onClose, onDone, team }: DialogProps & { te
   const { run, pending } = useAction()
 
   async function submit() {
-    const data = { name: name.trim() }
     const ok = team
-      ? await run(() => updateTeam(projectId, team.id, data), 'Đã lưu team')
-      : await run(() => createTeam(projectId, data), 'Đã tạo team')
+      ? await run(() => updateTeam(projectId, team.id, { name: name.trim() }), 'Đã lưu team')
+      : await run(() => createTeam(projectId, { name: name.trim() }), 'Đã tạo team')
     if (ok) onDone()
   }
 
   return (
-    <FormDialog isOpen title={team ? 'Sửa team' : 'Tạo team'} onClose={onClose} onSubmit={submit} pending={pending}>
+    <FormDialog isOpen title={team ? 'Đổi tên team' : 'Tạo team'} onClose={onClose} onSubmit={submit} pending={pending}>
       <Input label="Tên team" isRequired autoFocus value={name} onChange={setName} placeholder="VD: Team Alpha" />
     </FormDialog>
   )
@@ -76,14 +75,13 @@ function TeamFormDialog({ projectId, onClose, onDone, team }: DialogProps & { te
 function AddMemberDialog({ projectId, teams, members, onClose, onDone, teamId }: DialogProps & { teamId?: number }) {
   const [team, setTeam] = useState<number | null>(teamId ?? teams[0]?.id ?? null)
   const [user, setUser] = useState<number | null>(null)
-  const [capacity, setCapacity] = useState(5)
   const { run, pending } = useAction()
   // Đề xuất đang dùng: mỗi người chỉ thuộc một team → chỉ thêm được người chưa có team.
   const unassigned = members.filter((m) => !m.team)
 
   async function submit() {
     if (team == null || user == null) return
-    const ok = await run(() => addTeamMember(projectId, team, user, capacity), 'Đã thêm thành viên')
+    const ok = await run(() => addTeamMember(projectId, team, user), 'Đã thêm thành viên')
     if (ok) onDone()
   }
 
@@ -113,8 +111,6 @@ function AddMemberDialog({ projectId, teams, members, onClose, onDone, teamId }:
       >
         {(item) => <Select.Item id={item.id} label={item.label} supportingText={item.supportingText} />}
       </Select>
-      <InputNumber label="Sức chứa" hint="Số job tối đa người này giữ cùng lúc." minValue={1} maxValue={100}
-        value={capacity} onChange={(v) => setCapacity(Number.isNaN(v) ? 5 : v)} />
     </FormDialog>
   )
 }
@@ -178,7 +174,7 @@ function RemoveDialog({ projectId, onClose, onDone, team, member }: DialogProps 
       isOpen
       destructive
       title="Bỏ khỏi team?"
-      description={`${member.user.full_name} sẽ rời ${team.name}. Vai trò trong dự án và job đang giữ không thay đổi.`}
+      description={`${member.user.full_name} sẽ rời ${team.name}. Vai trò trong organization và job đang giữ không thay đổi.`}
       submitLabel="Bỏ khỏi team"
       onClose={onClose}
       onSubmit={submit}
@@ -208,7 +204,7 @@ function DeleteTeamDialog({ projectId, onClose, onDone, team }: DialogProps & { 
           {team.members.length > 0
             ? `${team.members.length} thành viên sẽ chuyển sang "Chưa có team" (vai trò và job đang giữ không đổi). `
             : 'Team chưa có thành viên. '}
-          Batch đang giao cho team sẽ thành "Chưa giao"; thông báo gửi riêng cho team này bị xoá. Không hoàn tác được.
+          Task đang giao cho team sẽ thành "Chưa giao"; thông báo gửi riêng cho team này bị xoá. Không hoàn tác được.
         </>
       }
       submitLabel="Xoá team"

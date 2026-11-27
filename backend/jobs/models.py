@@ -21,7 +21,7 @@ def user_work_date(user: Any = None, at: Any = None) -> date:
 
 
 class JobStatus(models.TextChoices):
-    """Trạng thái vòng đời của Job (đủ luồng PM xác nhận theo batch sang QC2 và chốt batch)."""
+    """Trạng thái vòng đời của Job (luồng Hybrid: QC1 Pass → PM xác nhận Task sang QC2 20% frame)."""
 
     PENDING_ANNOTATION = "pending_annotation", "Chờ annotate"
     ANNOTATING = "annotating", "Đang annotate"
@@ -62,6 +62,7 @@ class Job(models.Model):
     if TYPE_CHECKING:
         id: int
         project_id: int
+        dataset_id: int
         batch_id: int
         annotator_id: int | None
         qc1_reviewer_id: int | None
@@ -74,7 +75,10 @@ class Job(models.Model):
         def get_status_display(self) -> str: ...
         def get_rework_scope_display(self) -> str: ...
         def get_first_qc1_result_display(self) -> str: ...
+
     project = models.ForeignKey("projects.Project", on_delete=models.CASCADE, related_name="jobs")
+    # project = organization; dataset = CVAT project; batch = CVAT task (xem projects/models.py).
+    dataset = models.ForeignKey("projects.Dataset", on_delete=models.CASCADE, related_name="jobs")
     batch = models.ForeignKey("projects.Batch", on_delete=models.CASCADE, related_name="jobs")
     name = models.CharField(max_length=200)
     status = models.CharField(max_length=30, choices=JobStatus.choices, default=JobStatus.PENDING_ANNOTATION)
@@ -106,27 +110,35 @@ class Job(models.Model):
         default=0, help_text="Sản lượng đã ghi nhận trong vòng làm/rework hiện tại"
     )
     target_object_count = models.PositiveIntegerField(
-        default=0, help_text="Tổng object-frame mục tiêu của job (TD03/TD10)"
+        default=0, help_text="Tổng object-frame mục tiêu của job"
     )
 
     started_at = models.DateTimeField(null=True, blank=True)
     submitted_at = models.DateTimeField(null=True, blank=True)
 
-    # --- Liên kết CVAT (CVAT là nguồn dữ liệu annotation; trạng thái do Vanohub quản lý) ---
+    # --- Liên kết CVAT (CVAT là nguồn dữ liệu annotation; trạng thái do VanoHub quản lý) ---
     cvat_job_id = models.PositiveIntegerField(null=True, blank=True, unique=True)
     cvat_task_id = models.PositiveIntegerField(null=True, blank=True)
+    # Frame đầu của job trong task (CVAT đánh số frame theo task) — để chỉ đúng frame cần QC2 kiểm.
+    cvat_start_frame = models.PositiveIntegerField(default=0)
     cvat_stage = models.CharField(max_length=30, blank=True)
     cvat_state = models.CharField(max_length=30, blank=True)
     source_missing = models.BooleanField(
         default=False, help_text="True nếu CVAT job không còn tồn tại ở lần đồng bộ gần nhất"
     )
+    # Assignee hiện tại bên CVAT (ID user CVAT) — để biết đã đồng bộ người giữ job sang CVAT chưa.
+    cvat_assignee_id = models.PositiveIntegerField(null=True, blank=True)
 
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
         ordering = ["deadline", "id"]
-        indexes = [models.Index(fields=["project", "status"])]
+        indexes = [
+            models.Index(fields=["project", "status"]),
+            models.Index(fields=["project", "annotator", "status"]),
+            models.Index(fields=["project", "qc1_reviewer", "status"]),
+        ]
         constraints = [
             models.CheckConstraint(
                 condition=models.Q(cvat_job_id__isnull=True) | models.Q(cvat_job_id__gte=1),
@@ -136,12 +148,24 @@ class Job(models.Model):
                 condition=models.Q(cvat_task_id__isnull=True) | models.Q(cvat_task_id__gte=1),
                 name="job_cvat_task_id_positive",
             ),
+            models.CheckConstraint(
+                condition=(
+                    models.Q(annotator__isnull=True)
+                    | models.Q(qc1_reviewer__isnull=True)
+                    | ~models.Q(annotator=models.F("qc1_reviewer"))
+                ),
+                name="job_four_eyes_annotator_neq_qc1",
+            ),
         ]
 
     def clean(self):
         super().clean()
-        if self.batch_id and self.project_id and self.batch.dataset.project_id != self.project_id:
-            raise ValidationError({"batch": "Batch không thuộc cùng dự án với Job."})
+        if self.dataset_id and self.project_id and self.dataset.project_id != self.project_id:
+            raise ValidationError({"dataset": "Project không thuộc cùng organization với Job."})
+        if self.batch_id and self.project_id and self.batch.project_id != self.project_id:
+            raise ValidationError({"batch": "Task không thuộc cùng organization với Job."})
+        if self.batch_id and self.dataset_id and self.batch.dataset_id != self.dataset_id:
+            raise ValidationError({"batch": "Task không thuộc cùng project với Job."})
 
     def __str__(self):
         return self.name
@@ -170,7 +194,7 @@ class Job(models.Model):
 
     @property
     def overdue_hours(self):
-        """DH03: chưa xong thì max(0, hiện tại - hạn); đã xong thì max(0, hoàn tất - hạn)."""
+        """Chưa xong thì max(0, hiện tại - hạn); đã xong thì max(0, hoàn tất - hạn)."""
         if not self.deadline:
             return 0.0
         ref = timezone.now() if self.status in OPEN_STATUSES else (self.submitted_at or self.updated_at or timezone.now())
@@ -179,7 +203,7 @@ class Job(models.Model):
 
     @property
     def is_on_time(self):
-        """DH05: hoàn tất/nộp <= deadline."""
+        """Hoàn tất/nộp <= deadline."""
         if not self.deadline or self.status not in SUBMITTED_OR_DONE_STATUSES:
             return None
         ref = self.submitted_at or self.updated_at
@@ -204,11 +228,13 @@ class Job(models.Model):
         base = getattr(settings, "CVAT_PUBLIC_URL", "")
         if not (base and self.cvat_job_id and self.cvat_task_id):
             return None
-        return f"{base.rstrip('/')}/tasks/{self.cvat_task_id}/jobs/{self.cvat_job_id}"
+        url = f"{base.rstrip('/')}/tasks/{self.cvat_task_id}/jobs/{self.cvat_job_id}"
+        slug = self.project.cvat_org_slug if self.project_id else ""
+        return f"{url}?org={slug}" if slug else url
 
 
 class AnnotatorRequest(models.Model):
-    """Yêu cầu của Annotator (TD13): phản hồi lỗi QC1 hoặc báo dữ liệu bị chặn."""
+    """Yêu cầu của Annotator: phản hồi lỗi QC hoặc báo dữ liệu bị chặn."""
 
     class RequestType(models.TextChoices):
         ERROR_DISPUTE = "error_dispute", "Phản hồi lỗi"
@@ -261,7 +287,7 @@ class AnnotatorRequest(models.Model):
 
 
 class DailyOutputRecord(models.Model):
-    """Sổ sản lượng theo ngày của Annotator (SL01/SL03/SL04/SL06, CS02/CS03).
+    """Sổ sản lượng theo ngày của Annotator.
 
     Ghi nhận số cuboid 3D / object 2D làm được theo đúng ngày thực hiện — tính cả khi chưa QC
     (qua đồng bộ CVAT) và giữ nguyên sau khi QC (không cộng đúp, không trừ ngược ngày cũ,
@@ -281,7 +307,7 @@ class DailyOutputRecord(models.Model):
     project = models.ForeignKey("projects.Project", on_delete=models.CASCADE, related_name="daily_outputs")
     job = models.ForeignKey(Job, on_delete=models.CASCADE, related_name="daily_outputs")
     user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="daily_outputs")
-    work_date = models.DateField(help_text="Ngày làm việc theo múi giờ người thực hiện")
+    work_date = models.DateField(help_text="Ngày làm việc theo múi giờ nghiệp vụ Việt Nam")
     is_rework = models.BooleanField(default=False)
     rework_round = models.PositiveSmallIntegerField(default=0)
     object_count = models.PositiveIntegerField(help_text="Số cuboid/object-frame làm thêm trong lần ghi nhận")

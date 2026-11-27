@@ -1,8 +1,8 @@
 import type { UserBrief } from '../../shared/api/types'
-import type { DueState, JobStatus } from '../jobs/types'
-import type { SamplingMethod, StratifyBy } from '../projects/types'
+import type { JobStatus } from '../jobs/types'
 
 export type Severity = 'minor' | 'major' | 'critical'
+export type ErrorVerdict = 'fail' | 'edge'
 
 export interface ErrorCategory {
   id: number
@@ -17,17 +17,15 @@ export interface SampleJob {
   id: number
   name: string
   status: JobStatus
+  dataset_name: string
   batch_name: string
   annotator: UserBrief | null
   qc1_reviewer: UserBrief | null
-  deadline: string | null
-  is_overdue: boolean
-  due_state?: DueState
-  hours_remaining?: number | null
   rework_round: number
-  max_rework_rounds?: number
   object_count: number
   frame_count: number
+  /** Frame đầu của job trong task (CVAT đánh số frame theo task). */
+  cvat_start_frame: number
   cvat_job_id: number | null
   cvat_url: string | null
 }
@@ -39,8 +37,13 @@ export interface ReviewError {
   category: number
   category_name: string
   severity: Severity
+  verdict?: ErrorVerdict
+  frame_number?: number | null
+  cvat_object_id?: number | null
+  is_missing_object?: boolean
   location: string
   description: string
+  is_voided?: boolean
   reported_by: UserBrief | null
   created_at: string
 }
@@ -50,46 +53,27 @@ export interface AuditSample {
   audit: number
   audit_status: 'in_progress' | 'completed'
   job: SampleJob
-  stratum: string
+  /** Frame (đánh số theo task) QC2 cần kiểm — sampling_rate % số frame của job. */
+  frames: number[]
+  rework_round: number
+  checked_object_count?: number | null
   auditor: UserBrief | null
   result: 'pending' | 'pass' | 'reject'
+  created_at?: string
   reviewed_by: UserBrief | null
   reviewed_at: string | null
   comment: string
   errors: ReviewError[]
 }
 
-export type AuditDecision = '' | 'accept' | 'reject' | 'partial_reject'
-
-export interface AuditStratumSummary {
-  stratum: string
-  eligible: number
-  sampled: number
-  passed: number
-  rejected: number
-  pending: number
-  decision: '' | 'accept' | 'reject'
-}
-
+/** Đợt QC2 của một task — tự tạo khi job đầu tiên vào Chờ QC2, tự chốt khi task bàn giao. */
 export interface Audit {
   id: number
   batch: number
   batch_name: string
   dataset_name: string
   status: 'in_progress' | 'completed'
-  decision: AuditDecision
-  decision_label?: string
-  decision_reason: string
-  decided_by: UserBrief | null
-  stratum_decisions: Record<string, 'accept' | 'reject'>
-  strata_summary: AuditStratumSummary[]
-  method: SamplingMethod
   sampling_rate: number
-  stratify_by: StratifyBy | ''
-  seed: number
-  eligible_count: number
-  note: string
-  created_by: UserBrief | null
   created_at: string
   completed_at: string | null
   sample_count: number
@@ -98,38 +82,13 @@ export interface Audit {
   pending: number
 }
 
-export interface AuditCompleteInput {
-  decision: 'accept' | 'reject' | 'partial_reject'
-  reason?: string
-  stratum_decisions?: Record<string, 'accept' | 'reject'>
-}
-
-export interface AuditInput {
-  batch: number
-  method?: SamplingMethod
-  sampling_rate?: number
-  stratify_by?: StratifyBy
-  seed?: number
-  auditors?: number[]
-  note?: string
-}
-
-export interface AuditPreview {
-  batch: number
-  method: SamplingMethod
-  sampling_rate: number
-  stratify_by: StratifyBy | ''
-  seed: number
-  eligible_count: number
-  sample_count: number
-  estimated_objects: number
-  estimated_frames: number
-  samples: { stratum: string; job: SampleJob }[]
-}
-
 export interface ErrorInput {
   category: number
   severity?: Severity
+  verdict?: ErrorVerdict
+  frame_number?: number | null
+  cvat_object_id?: number | null
+  is_missing_object?: boolean
   location?: string
   description?: string
 }
@@ -155,35 +114,26 @@ export interface Qc2Summary {
   error_percent_in_job: PendingMetric
   audit_speed: PendingMetric
   scope: 'project' | 'mine'
-  stats: {
-    assigned: number
-    pending: number
-    passed: number
-    rejected: number
-    audited_in_period: number
-    overdue?: number
-    due_soon?: number
-  }
+  stats: { assigned: number; pending: number; passed: number; rejected: number; audited_in_period: number }
   pass_rate: number | null
   qc1_missed_errors: number
   reworked_after_audit: number
   errors_by_category: { category: string; count: number }[]
-  progress_by_batch: { batch: string; total: number; done: number }[]
+  progress_by_batch: { batch_id?: number; batch: string; dataset_name?: string; total: number; done: number }[]
 }
 
 export interface AuditStrategy {
-  method: SamplingMethod
+  /** % số frame của mỗi job QC2 kiểm. */
   sampling_rate: number
-  stratify_by: StratifyBy | ''
-  /** Chỉ PM sửa được; QC2 chỉ xem. */
+  /** Chỉ PM có quyền cấu hình mới sửa được. */
   can_edit: boolean
   history: {
     at: string
     actor: UserBrief | null
-    before: Partial<Record<'sampling_method' | 'sampling_rate' | 'stratify_by', string | number>>
-    after: Partial<Record<'sampling_method' | 'sampling_rate' | 'stratify_by', string | number>>
+    before: { sampling_rate?: number }
+    after: { sampling_rate?: number }
   }[]
-  preview_batches: { id: number; name: string; dataset_name: string; pending_qc2: number }[]
+  stats: { pending: number; passed: number; rejected: number }
 }
 
 export type Qc1Scope = 'mine' | 'pool' | 'all'
@@ -202,18 +152,24 @@ export interface Qc1Summary {
   stats: {
     assigned: number
     pending: number
+    pool_pending?: number
     reviewing: number
     qc1_passed?: number
-    overdue?: number
-    due_soon?: number
     passed: number
     rejected: number
     reviewed_in_period: number
+    overdue?: number
+    due_soon?: number
   }
   pass_rate: number | null
+  on_time_pct?: number | null
+  pool_pending?: number
   kpi: { current: Qc1Window; previous: Qc1Window }
   trend: { date: string; reviewed: number; rejected: number; errors: number }[]
   qc2_escape_errors: number
+  escaped_jobs?: number
+  qc1_escape_job_rate?: number | null
+  audited_jobs_count?: number
   errors_by_category: { category: string; count: number }[]
   kpi_target: number | null
 }

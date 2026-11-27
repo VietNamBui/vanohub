@@ -1,1 +1,1 @@
-# Register your models here.
+# Analytics aggregates data from other apps; no admin models registered.

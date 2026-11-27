@@ -4,16 +4,20 @@ import { useNavigate } from 'react-router'
 import { Table } from '@/components/application/table/table'
 import { Tabs } from '@/components/application/tabs/tabs'
 import { Button } from '@/components/base/buttons/button'
+import { Badge } from '@/components/base/badges/badges'
 import { Input } from '@/components/base/input/input'
+import { Tooltip, TooltipTrigger } from '@/components/base/tooltip/tooltip'
 import { getErrorMessage } from '../../../shared/api/errors'
 import StatCard from '../../../shared/components/ui/StatCard'
 import EmptyRow from '../../../shared/components/ui/EmptyRow'
-import type { Role } from '../../../shared/types/roles'
+import { useAuth } from '../../auth/useAuth'
 import { useProject } from '../../projects/projectContext'
 import type { Member } from '../../projects/types'
+import CreateMemberDialog from '../components/CreateMemberDialog'
+import MemberPasswordCell from '../components/MemberPasswordCell'
 import MemberRolesCell from '../components/MemberRolesCell'
 import TeamDialogs, { type TeamDialogState } from '../components/TeamDialogs'
-import { useTeamData } from '../hooks/useTeamData'
+import { type RoleState, useTeamData } from '../hooks/useTeamData'
 import type { Team, Workload } from '../types'
 
 type TabKey = 'teams' | 'members'
@@ -22,19 +26,22 @@ type TabKey = 'teams' | 'members'
  * PM-07 Phân roster & luân chuyển + PM-08 Team & Thành viên (giao diện Untitled UI).
  * Đề xuất (chưa chốt): mỗi người chỉ thuộc một team trong dự án → đổi team = điều chuyển.
  * "Quá tải" = số job đang annotate > sức chứa (giống trang Workload).
+ * "Thêm thành viên" tạo tài khoản mới (hệ thống sinh tài khoản + mật khẩu tạm); xếp người vào team ở cột thao tác.
  */
 export default function TeamsPage() {
   const { project, projectId } = useProject()
   const [tab, setTab] = useState<TabKey>('teams')
   const [search, setSearch] = useState('')
   const [dialog, setDialog] = useState<TeamDialogState>(null)
+  const [creating, setCreating] = useState(false)
   const navigate = useNavigate()
   const data = useTeamData(projectId)
   const { teams: teamList, members: memberList, workload: loadList, error, isLoading } = data
 
   const overloaded = loadList.filter((w) => w.holding > w.capacity).length
   const keyword = search.trim().toLowerCase()
-  const shownTeams = teamList.filter((t) => !keyword || t.name.toLowerCase().includes(keyword))
+  const shownTeams = teamList.filter((t) =>
+    !keyword || t.name.toLowerCase().includes(keyword))
   const shownMembers = memberList.filter((m) =>
     !keyword || [m.user.full_name, m.user.username, m.team?.name ?? ''].some((s) => s.toLowerCase().includes(keyword)))
   const unassignedCount = memberList.filter((m) => !m.team).length
@@ -50,11 +57,9 @@ export default function TeamsPage() {
         <header className="flex flex-wrap items-start justify-between gap-4">
           <div>
             <h1 className="text-display-xs font-semibold text-primary">Team & Members</h1>
-            <p className="mt-1 text-sm text-tertiary">Dự án: {project.name}</p>
+            <p className="mt-1 text-sm text-tertiary">Organization: {project.name}</p>
           </div>
-          <Button size="md" iconLeading={Plus} onPress={() => setDialog({ type: 'add-member' })} isDisabled={!teamList.length}>
-            Thêm thành viên
-          </Button>
+          <Button size="md" iconLeading={Plus} onPress={() => setCreating(true)}>Thêm thành viên</Button>
         </header>
 
         {error != null ? (
@@ -66,7 +71,7 @@ export default function TeamsPage() {
           <>
             <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
               <StatCard value={isLoading ? '–' : teamList.length} label="Teams" />
-              <StatCard value={isLoading ? '–' : memberList.length} label="Thành viên dự án" />
+              <StatCard value={isLoading ? '–' : memberList.length} label="Thành viên" />
               <StatCard value={isLoading ? '–' : overloaded} label="Quá tải" tone={overloaded ? 'error' : undefined} />
             </div>
 
@@ -102,6 +107,10 @@ export default function TeamsPage() {
       </div>
 
       <TeamDialogs state={dialog} projectId={projectId} teams={teamList} members={memberList} onClose={() => setDialog(null)} onDone={done} />
+      {creating && (
+        <CreateMemberDialog projectId={projectId} teams={teamList} onClose={() => setCreating(false)}
+          onDone={() => { setCreating(false); data.reload() }} />
+      )}
     </div>
   )
 }
@@ -139,17 +148,22 @@ function TeamsTable({ teams, isLoading, onOpen, onDelete }: {
 
 function MembersTable({ members, workload, isLoading, openDialog, projectId, onRolesChange }: {
   projectId: number
-  onRolesChange: (userId: number, roles: Role[]) => void
+  onRolesChange: (userId: number, roles: RoleState) => void
   members: Member[]
   workload: Workload[]
   isLoading: boolean
   openDialog: (state: TeamDialogState) => void
 }) {
+  const { user: me } = useAuth()
   return (
     <Table aria-label="Danh sách thành viên" size="sm">
       <Table.Header>
         <Table.Head id="member" label="Thành viên" isRowHeader />
-        <Table.Head id="roles" label="Vai trò" tooltip="Bấm + để gán thêm vai trò trong dự án." />
+        <Table.Head id="username" label="Tài khoản" />
+        <Table.Head id="password" label="Mật khẩu"
+          tooltip="Mật khẩu tạm do hệ thống cấp. Bấm con mắt để xem (có ghi lịch sử). Người dùng tự đổi mật khẩu thì không xem được nữa." />
+        <Table.Head id="roles" label="Vai trò" tooltip="Bấm + để gán thêm vai trò trong organization." />
+        <Table.Head id="cvat" label="CVAT" tooltip="Đã liên kết tài khoản CVAT chưa. Chưa liên kết vẫn giao job được; job sẽ đồng bộ sang CVAT khi họ liên kết." />
         <Table.Head id="team" label="Team" />
         <Table.Head id="jobs" label="Job" tooltip="Số job đang mở người này giữ khi annotate." />
         <Table.Head id="load" label="Tải" tooltip="Job đang annotate / sức chứa." />
@@ -162,14 +176,17 @@ function MembersTable({ members, workload, isLoading, openDialog, projectId, onR
           const overloaded = load != null && load.holding > load.capacity
           return (
             <Table.Row id={m.id}>
+              <Table.Cell className="font-medium text-primary">{m.user.full_name}</Table.Cell>
+              <Table.Cell className="font-mono text-sm">{m.user.username}</Table.Cell>
               <Table.Cell>
-                <div className="font-medium text-primary">{m.user.full_name}</div>
-                <div className="text-xs text-tertiary">{m.user.username}</div>
+                <MemberPasswordCell projectId={projectId} member={m}
+                  canReset={m.user.id !== me?.id && !m.roles.includes('project_manager')} />
               </Table.Cell>
               <Table.Cell>
                 <MemberRolesCell projectId={projectId} userId={m.user.id} userName={m.user.full_name} roles={m.roles}
-                  onChange={(roles) => onRolesChange(m.user.id, roles)} />
+                  direct_roles={m.direct_roles} onChange={(state) => onRolesChange(m.user.id, state)} />
               </Table.Cell>
+              <Table.Cell><CvatBadge member={m} /></Table.Cell>
               <Table.Cell>{m.team?.name ?? <span className="text-quaternary">Chưa có team</span>}</Table.Cell>
               <Table.Cell className="tabular-nums">{m.active_jobs}</Table.Cell>
               <Table.Cell className={overloaded ? 'font-medium text-error-primary tabular-nums' : 'tabular-nums'}>
@@ -193,5 +210,16 @@ function MembersTable({ members, workload, isLoading, openDialog, projectId, onR
         }}
       </Table.Body>
     </Table>
+  )
+}
+
+function CvatBadge({ member }: { member: Member }) {
+  if (!member.cvat_linked) return <Badge type="pill-color" size="sm" color="gray">Chưa liên kết</Badge>
+  return (
+    <Tooltip title={`Tài khoản CVAT: ${member.cvat_username}`}>
+      <TooltipTrigger className="cursor-default">
+        <Badge type="pill-color" size="sm" color="success">Đã liên kết</Badge>
+      </TooltipTrigger>
+    </Tooltip>
   )
 }

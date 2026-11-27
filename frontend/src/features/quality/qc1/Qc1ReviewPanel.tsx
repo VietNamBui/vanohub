@@ -2,6 +2,7 @@ import { AlertTriangle, LinkExternal01, Plus, Trash01 } from '@untitledui/icons'
 import { useState } from 'react'
 import { Badge } from '@/components/base/badges/badges'
 import { Button } from '@/components/base/buttons/button'
+import { Checkbox } from '@/components/base/checkbox/checkbox'
 import { Input } from '@/components/base/input/input'
 import { Select } from '@/components/base/select/select'
 import { TextArea } from '@/components/base/textarea/textarea'
@@ -16,7 +17,7 @@ import { ACTION_LABELS, JOB_STATUS_LABELS } from '../../jobs/constants'
 import type { JobDetail, JobStatus, ReworkScope } from '../../jobs/types'
 import { getQc1Job, listErrorCategories, passQc1Job, rejectQc1Job, startQc1Job } from '../api'
 import { SEVERITY_LABELS } from '../constants'
-import type { Severity } from '../types'
+import type { ErrorInput, ErrorVerdict, Severity } from '../types'
 
 interface Props {
   projectId: number
@@ -25,7 +26,19 @@ interface Props {
   onDone: () => void
 }
 
-type ErrorRow = { key: number; category: number | null; severity: Severity | null; location: string; description: string }
+type ErrorRow = {
+  key: number
+  category: number | null
+  severity: Severity | null
+  verdict: ErrorVerdict
+  is_missing_object: boolean
+  frame_number: string
+  cvat_object_id: string
+  location: string
+  description: string
+}
+
+const PG_INT32_MAX = 2_147_483_647
 
 const SEVERITY_BADGE_COLORS: Record<string, 'gray' | 'warning' | 'error'> = {
   minor: 'gray',
@@ -33,7 +46,21 @@ const SEVERITY_BADGE_COLORS: Record<string, 'gray' | 'warning' | 'error'> = {
   critical: 'error',
 }
 
-/** Khung kiểm tra QC1 cho một job: mở CVAT, nhận bắt đầu, Pass sang QC2 hoặc Reject kèm lỗi QC1. */
+const VERDICT_OPTIONS: { id: ErrorVerdict; label: string }[] = [
+  { id: 'fail', label: 'Lỗi (Fail)' },
+  { id: 'edge', label: 'Cận biên (Edge)' },
+]
+
+function parseOptionalInt(raw: string, min: number): { valid: boolean; value: number | null } {
+  const trimmed = raw.trim()
+  if (!trimmed) return { valid: true, value: null }
+  if (!/^\d+$/.test(trimmed)) return { valid: false, value: null }
+  const num = Number(trimmed)
+  if (!Number.isSafeInteger(num) || num < min || num > PG_INT32_MAX) return { valid: false, value: null }
+  return { valid: true, value: num }
+}
+
+/** Khung kiểm tra QC1 cho một job: mở CVAT, nhận bắt đầu, duyệt Đạt QC1 hoặc Reject kèm lỗi QC1. */
 export default function Qc1ReviewPanel({ projectId, jobId, version, onDone }: Props) {
   const { data: job, error, isLoading, retry } = useRequest(`qc1-job:${projectId}:${jobId}:${version}`, () =>
     getQc1Job(projectId, jobId),
@@ -151,19 +178,37 @@ function Qc1ReviewForm({ projectId, job, onDone }: { projectId: number; job: Job
   }
 
   async function pass() {
-    if (await run(() => passQc1Job(projectId, job.id, comment.trim()), `Đã Pass QC1 ${job.name} → Chờ QC2`)) onDone()
+    if (await run(() => passQc1Job(projectId, job.id, comment.trim()), `Đã duyệt đạt QC1 cho ${job.name}`)) onDone()
   }
 
   async function reject() {
     setShowErrors(true)
-    if (rows.length === 0 || rows.some((r) => r.category == null)) return
-    const errors = rows.map((r) => ({
-      category: r.category!,
-      severity: r.severity ?? undefined,
-      location: r.location.trim(),
-      description: r.description.trim(),
-    }))
-    if (await run(() => rejectQc1Job(projectId, job.id, errors, comment.trim(), reworkScope), `Đã Reject ${job.name} — job chuyển về Rework`)) {
+    if (rows.length === 0) return
+
+    const errors: ErrorInput[] = []
+    for (const r of rows) {
+      if (r.category == null) return
+      const frame = parseOptionalInt(r.frame_number, 0)
+      const objId = r.is_missing_object ? { valid: true, value: null } : parseOptionalInt(r.cvat_object_id, 1)
+      if (!frame.valid || !objId.valid) return
+      errors.push({
+        category: r.category,
+        severity: r.severity ?? undefined,
+        verdict: r.is_missing_object ? 'fail' : r.verdict,
+        is_missing_object: r.is_missing_object,
+        frame_number: frame.value,
+        cvat_object_id: objId.value,
+        location: r.location.trim(),
+        description: r.description.trim(),
+      })
+    }
+
+    if (
+      await run(
+        () => rejectQc1Job(projectId, job.id, errors, comment.trim(), reworkScope),
+        `Đã Reject ${job.name} — job chuyển về Rework`,
+      )
+    ) {
       onDone()
     }
   }
@@ -186,80 +231,150 @@ function Qc1ReviewForm({ projectId, job, onDone }: { projectId: number; job: Job
         <span className="text-xs text-tertiary">Bắt buộc ít nhất 1 lỗi khi Reject</span>
       </div>
 
-      {rows.map((row, index) => (
-        <div key={row.key} className="flex flex-col gap-3 rounded-xl bg-secondary p-3.5 ring-1 ring-secondary ring-inset">
-          <div className="flex items-center justify-between">
-            <span className="text-xs font-semibold text-tertiary">Lỗi {index + 1}</span>
-            <Button
-              size="xs"
-              color="tertiary-destructive"
-              iconLeading={Trash01}
-              aria-label={`Xoá lỗi ${index + 1}`}
-              onPress={() => setRows((rs) => rs.filter((r) => r.key !== row.key))}
-            />
+      {rows.map((row, index) => {
+        const frameParsed = parseOptionalInt(row.frame_number, 0)
+        const objectParsed = row.is_missing_object ? { valid: true, value: null } : parseOptionalInt(row.cvat_object_id, 1)
+        return (
+          <div key={row.key} className="flex flex-col gap-3 rounded-xl bg-secondary p-3.5 ring-1 ring-secondary ring-inset">
+            <div className="flex items-center justify-between">
+              <span className="text-xs font-semibold text-tertiary">Lỗi {index + 1}</span>
+              <Button
+                size="xs"
+                color="tertiary-destructive"
+                iconLeading={Trash01}
+                aria-label={`Xoá lỗi ${index + 1}`}
+                onPress={() => setRows((rs) => rs.filter((r) => r.key !== row.key))}
+              />
+            </div>
+            <div className="grid gap-3 sm:grid-cols-2">
+              <Select
+                label="Loại lỗi"
+                size="sm"
+                isRequired
+                placeholder="Chọn loại lỗi"
+                isInvalid={showErrors && row.category == null}
+                hint={showErrors && row.category == null ? 'Chọn loại lỗi' : undefined}
+                items={(categories ?? []).map((c) => ({ id: c.id, label: c.name, supportingText: SEVERITY_LABELS[c.severity] }))}
+                selectedKey={row.category}
+                onSelectionChange={(k) => {
+                  const category = categories?.find((c) => c.id === Number(k))
+                  patch(row.key, { category: Number(k), severity: row.severity ?? category?.severity ?? null })
+                }}
+              >
+                {(item) => <Select.Item id={item.id} label={item.label} supportingText={item.supportingText} />}
+              </Select>
+              <Select
+                label="Mức độ"
+                size="sm"
+                placeholder="Theo loại lỗi"
+                items={(Object.keys(SEVERITY_LABELS) as Severity[]).map((s) => ({ id: s, label: SEVERITY_LABELS[s] }))}
+                selectedKey={row.severity}
+                onSelectionChange={(k) => patch(row.key, { severity: k as Severity })}
+              >
+                {(item) => <Select.Item id={item.id} label={item.label} />}
+              </Select>
+            </div>
+            <div className="grid items-end gap-3 sm:grid-cols-2">
+              <Select
+                label="Kết luận"
+                size="sm"
+                isDisabled={row.is_missing_object}
+                items={VERDICT_OPTIONS}
+                selectedKey={row.is_missing_object ? 'fail' : row.verdict}
+                onSelectionChange={(k) => patch(row.key, { verdict: k as ErrorVerdict })}
+              >
+                {(item) => <Select.Item id={item.id} label={item.label} />}
+              </Select>
+              <div className="pb-1.5">
+                <Checkbox
+                  size="sm"
+                  label="Thiếu đối tượng"
+                  hint="Bắt buộc Lỗi (Fail), bỏ qua Object ID"
+                  isSelected={row.is_missing_object}
+                  onChange={(checked) =>
+                    patch(
+                      row.key,
+                      checked
+                        ? { is_missing_object: true, cvat_object_id: '', verdict: 'fail' }
+                        : { is_missing_object: false },
+                    )
+                  }
+                />
+              </div>
+            </div>
+            <div className="grid gap-3 sm:grid-cols-2">
+              <Input
+                label="Frame"
+                size="sm"
+                inputMode="numeric"
+                placeholder="VD: 12"
+                value={row.frame_number}
+                onChange={(v) => patch(row.key, { frame_number: v })}
+                isInvalid={showErrors && !frameParsed.valid}
+                hint={showErrors && !frameParsed.valid ? 'Nhập số nguyên ≥ 0' : undefined}
+              />
+              <Input
+                label="CVAT Object ID"
+                size="sm"
+                inputMode="numeric"
+                isDisabled={row.is_missing_object}
+                placeholder={row.is_missing_object ? 'Không áp dụng' : 'VD: 42'}
+                value={row.cvat_object_id}
+                onChange={(v) => patch(row.key, { cvat_object_id: v })}
+                isInvalid={showErrors && !objectParsed.valid}
+                hint={showErrors && !objectParsed.valid ? 'Nhập số nguyên ≥ 1' : undefined}
+              />
+            </div>
+            <Input label="Vị trí lỗi" size="sm" placeholder="Mô tả ngắn vị trí (tuỳ chọn)" value={row.location} onChange={(v) => patch(row.key, { location: v })} />
+            <TextArea label="Mô tả lỗi" placeholder="Nhập nội dung…" rows={2} value={row.description} onChange={(v) => patch(row.key, { description: v })} />
           </div>
-          <div className="grid gap-3 sm:grid-cols-2">
-            <Select
-              label="Loại lỗi"
-              size="sm"
-              isRequired
-              placeholder="Chọn loại lỗi"
-              isInvalid={showErrors && row.category == null}
-              hint={showErrors && row.category == null ? 'Chọn loại lỗi' : undefined}
-              items={(categories ?? []).map((c) => ({ id: c.id, label: c.name, supportingText: SEVERITY_LABELS[c.severity] }))}
-              selectedKey={row.category}
-              onSelectionChange={(k) => {
-                const category = categories?.find((c) => c.id === Number(k))
-                patch(row.key, { category: Number(k), severity: row.severity ?? category?.severity ?? null })
-              }}
-            >
-              {(item) => <Select.Item id={item.id} label={item.label} supportingText={item.supportingText} />}
-            </Select>
-            <Select
-              label="Mức độ"
-              size="sm"
-              placeholder="Theo loại lỗi"
-              items={(Object.keys(SEVERITY_LABELS) as Severity[]).map((s) => ({ id: s, label: SEVERITY_LABELS[s] }))}
-              selectedKey={row.severity}
-              onSelectionChange={(k) => patch(row.key, { severity: k as Severity })}
-            >
-              {(item) => <Select.Item id={item.id} label={item.label} />}
-            </Select>
-          </div>
-          <Input label="Vị trí lỗi" size="sm" placeholder="Frame / object ID" value={row.location} onChange={(v) => patch(row.key, { location: v })} />
-          <TextArea label="Mô tả lỗi" placeholder="Nhập nội dung…" rows={2} value={row.description} onChange={(v) => patch(row.key, { description: v })} />
-        </div>
-      ))}
+        )
+      })}
 
       <Button
         color="secondary"
         size="sm"
         iconLeading={Plus}
         className="self-start"
-        onPress={() => setRows((rs) => [...rs, { key: nextKey(), category: null, severity: null, location: '', description: '' }])}
+        onPress={() =>
+          setRows((rs) => [
+            ...rs,
+            {
+              key: nextKey(),
+              category: null,
+              severity: null,
+              verdict: 'fail',
+              is_missing_object: false,
+              frame_number: '',
+              cvat_object_id: '',
+              location: '',
+              description: '',
+            },
+          ])
+        }
       >
         Thêm lỗi
       </Button>
       {showErrors && rows.length === 0 && <p className="text-sm text-error-primary">Thêm ít nhất 1 lỗi trước khi Reject.</p>}
 
       <Select
-        label="Phạm vi sửa khi Reject"
+        label="Phạm vi rework (khi Reject)"
         size="sm"
         items={[
-          { id: 'partial', label: 'Sửa một phần (theo lỗi đã ghi)' },
-          { id: 'full', label: 'Sửa toàn job (rà soát lại toàn bộ)' },
+          { id: 'partial', label: 'Sửa một phần', supportingText: 'Chỉ sửa các lỗi đã ghi' },
+          { id: 'full', label: 'Sửa toàn job', supportingText: 'Rà soát lại toàn bộ frame' },
         ]}
         selectedKey={reworkScope}
         onSelectionChange={(k) => setReworkScope(k as ReworkScope)}
       >
-        {(item) => <Select.Item id={item.id} label={item.label} />}
+        {(item) => <Select.Item id={item.id} label={item.label} supportingText={item.supportingText} />}
       </Select>
 
       <TextArea label="Nhận xét (không bắt buộc)" rows={2} value={comment} onChange={setComment} />
 
       <div className="flex justify-end gap-3 border-t border-secondary pt-4">
         <Button color="primary-destructive" isLoading={pending} onPress={reject}>Reject → Rework</Button>
-        <Button color="primary" isLoading={pending} onPress={pass}>Pass → QC2</Button>
+        <Button color="primary" isLoading={pending} onPress={pass}>Đạt QC1</Button>
       </div>
     </div>
   )
@@ -276,7 +391,7 @@ function Info({ label, value }: { label: string; value: string }) {
 
 function Notice({ text }: { text: string }) {
   return (
-    <div className="flex gap-3 rounded-xl bg-warning-primary p-4 ring-1 ring-yellow-200 ring-inset">
+    <div className="flex gap-3 rounded-xl bg-warning-primary p-4 ring-1 ring-utility-yellow-200 ring-inset">
       <AlertTriangle className="mt-0.5 size-5 shrink-0 text-fg-warning-primary" />
       <p className="text-sm text-warning-primary">{text}</p>
     </div>

@@ -3,6 +3,7 @@ from typing import TYPE_CHECKING, Any
 from django.conf import settings
 from django.core.exceptions import ValidationError
 from django.db import models
+from django.utils import timezone
 
 from projects.models import SamplingMethod, StratifyBy
 
@@ -19,14 +20,14 @@ class ReviewStage(models.TextChoices):
 
 
 class ErrorVerdict(models.TextChoices):
-    """Phân loại kết luận cấp cuboid tách biệt với Severity (CL02/CL11)."""
+    """Phân loại kết luận cấp cuboid tách biệt với Severity."""
 
     FAIL = "fail", "Lỗi (Fail)"
     EDGE = "edge", "Cận biên (Edge)"
 
 
 class ErrorCategory(models.Model):
-    """Danh mục lỗi (PM-15). QC1 và QC2 cùng dùng khi ghi lỗi."""
+    """Danh mục lỗi. QC1 và QC2 cùng dùng khi ghi lỗi."""
 
     if TYPE_CHECKING:
         id: int
@@ -52,48 +53,53 @@ class ErrorCategory(models.Model):
         return self.name
 
 
-class Audit(models.Model):
-    """Một đợt QC2 Internal Audit trên một Batch.
+DEFAULT_ERROR_CATEGORIES: tuple[tuple[str, str, str, str], ...] = (
+    ("Thiếu đối tượng", "Bỏ sót đối tượng cần gán nhãn trên frame", Severity.MAJOR, ErrorCategory.AppliesTo.BOTH),
+    ("Sai nhãn lớp", "Gắn sai class/category so với guideline", Severity.MAJOR, ErrorCategory.AppliesTo.BOTH),
+    ("Lệch khung / biên", "Bounding box / cuboid lệch kích thước hoặc góc xoay", Severity.MINOR, ErrorCategory.AppliesTo.BOTH),
+    ("Gán nhầm / thừa", "Gán nhãn vùng không thuộc đối tượng mục tiêu", Severity.MINOR, ErrorCategory.AppliesTo.BOTH),
+    ("Sai thuộc tính", "Thiếu hoặc sai attribute / occlusion / truncation", Severity.MINOR, ErrorCategory.AppliesTo.BOTH),
+    ("Lỗi nghiêm trọng", "Vi phạm quy tắc guideline nghiêm trọng cần làm lại", Severity.CRITICAL, ErrorCategory.AppliesTo.BOTH),
+)
 
-    Lưu lại cấu hình sampling đã dùng + seed ngẫu nhiên → có thể giải thích vì sao
-    những job này được chọn (yêu cầu "lưu lịch sử Sampling").
+
+def seed_default_error_categories(project) -> int:
+    """Tạo bộ danh mục lỗi mặc định cho organization mới (idempotent) để QC1/QC2 Reject không bị tắc."""
+    if ErrorCategory.objects.filter(project=project).exists():
+        return 0
+    objs = [
+        ErrorCategory(project=project, name=name, description=desc, severity=sev, applies_to=applies)
+        for name, desc, sev, applies in DEFAULT_ERROR_CATEGORIES
+    ]
+    ErrorCategory.objects.bulk_create(objs, ignore_conflicts=True)
+    return len(objs)
+
+
+class Audit(models.Model):
+    """Nhóm các lượt QC2 của MỘT TASK (Batch). Tạo tự động khi job đầu tiên của task vào Chờ QC2;
+    chốt (completed) khi task được bàn giao. Các trường method / seed / eligible_* là của cách
+    lấy mẫu job cũ — không còn dùng (QC2 kiểm mọi job, mỗi job một phần frame).
     """
 
     if TYPE_CHECKING:
         id: int
         project_id: int
         batch_id: int
-        decided_by_id: int | None
         samples: Any
 
     class Status(models.TextChoices):
         IN_PROGRESS = "in_progress", "Đang audit"
         COMPLETED = "completed", "Đã chốt"
 
-    class Decision(models.TextChoices):
-        ACCEPT = "accept", "Chấp nhận batch"
-        REJECT = "reject", "Trả cả batch"
-        PARTIAL_REJECT = "partial_reject", "Trả theo tầng"
-
     project = models.ForeignKey("projects.Project", on_delete=models.CASCADE, related_name="audits")
     batch = models.ForeignKey("projects.Batch", on_delete=models.CASCADE, related_name="audits")
     status = models.CharField(max_length=20, choices=Status.choices, default=Status.IN_PROGRESS)
-    decision = models.CharField(max_length=20, choices=Decision.choices, blank=True, default="")
-    decision_reason = models.TextField(blank=True, default="")
-    decided_by = models.ForeignKey(
-        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name="+"
-    )
-    stratum_decisions = models.JSONField(default=dict, blank=True)
     method = models.CharField(max_length=20, choices=SamplingMethod.choices)
     sampling_rate = models.PositiveSmallIntegerField()
     stratify_by = models.CharField(max_length=20, choices=StratifyBy.choices, blank=True)
     seed = models.BigIntegerField()
     eligible_count = models.PositiveIntegerField()
-    # Job đủ điều kiện TẠI LÚC TẠO audit. Khi chốt, job không được lấy mẫu trong danh sách này
-    # mới được duyệt hoặc trả sửa — job vào hàng chờ QC2 sau đó phải chờ đợt audit sau.
     eligible_job_ids = models.JSONField(default=list)
-    # Bản đồ {str(job_id): stratum_name} lưu tại lúc tạo audit để quyết định theo tầng nhất quán.
-    eligible_job_strata = models.JSONField(default=dict, blank=True)
     note = models.TextField(blank=True)
     created_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, related_name="+")
     created_at = models.DateTimeField(auto_now_add=True)
@@ -106,9 +112,10 @@ class Audit(models.Model):
                 condition=models.Q(sampling_rate__gte=1, sampling_rate__lte=100),
                 name="audit_sampling_rate_1_to_100",
             ),
-            models.CheckConstraint(
-                condition=models.Q(status="in_progress") | ~models.Q(decision=""),
-                name="audit_completed_requires_decision",
+            models.UniqueConstraint(
+                fields=["batch"],
+                condition=models.Q(status="in_progress"),
+                name="unique_in_progress_audit_per_batch",
             ),
         ]
 
@@ -116,17 +123,18 @@ class Audit(models.Model):
         super().clean()
         if not (1 <= self.sampling_rate <= 100):
             raise ValidationError({"sampling_rate": "Tỉ lệ lấy mẫu phải nằm trong khoảng 1..100."})
-        if self.status == self.Status.COMPLETED and not self.decision:
-            raise ValidationError({"decision": "Audit đã chốt phải có quyết định (decision)."})
-        if self.batch_id and self.project_id and self.batch.dataset.project_id != self.project_id:
-            raise ValidationError({"batch": "Batch không thuộc cùng dự án với Audit."})
+        if self.batch_id and self.project_id and self.batch.project_id != self.project_id:
+            raise ValidationError({"batch": "Task không thuộc cùng organization với Audit."})
 
     def __str__(self):
         return f"Audit #{self.pk} · {self.batch}"
 
 
 class AuditSample(models.Model):
-    """Một job được lấy mẫu trong một Audit, và kết quả QC2 của job đó."""
+    """Một lượt QC2 của một job: các frame được chọn để kiểm + kết quả.
+
+    Mỗi lần job vào Chờ QC2 (lần đầu hoặc sau rework) có một lượt mới → cùng job có thể có nhiều lượt.
+    """
 
     if TYPE_CHECKING:
         id: int
@@ -143,20 +151,33 @@ class AuditSample(models.Model):
     audit = models.ForeignKey(Audit, on_delete=models.CASCADE, related_name="samples")
     job = models.ForeignKey("jobs.Job", on_delete=models.CASCADE, related_name="audit_samples")
     stratum = models.CharField(max_length=120, blank=True)
+    # Số frame (đánh số theo task, như trên CVAT) QC2 cần kiểm — sampling_rate % frame của job.
+    frames = models.JSONField(default=list)
+    rework_round = models.PositiveSmallIntegerField(default=0)
     auditor = models.ForeignKey(
         settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name="audit_samples"
     )
     result = models.CharField(max_length=10, choices=Result.choices, default=Result.PENDING)
     checked_object_count = models.PositiveIntegerField(
-        null=True, blank=True, help_text="Snapshot object_count của job tại thời điểm chấm audit QC2"
+        null=True, blank=True, help_text="Số cuboid trên các frame được kiểm (chờ định nghĩa khi tách theo frame)"
     )
+    created_at = models.DateTimeField(default=timezone.now)
     reviewed_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, related_name="+")
     reviewed_at = models.DateTimeField(null=True, blank=True)
     comment = models.TextField(blank=True)
 
     class Meta:
         ordering = ["id"]
-        constraints = [models.UniqueConstraint(fields=["audit", "job"], name="unique_job_per_audit")]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["job"],
+                condition=models.Q(result="pending"),
+                name="unique_pending_sample_per_job",
+            ),
+        ]
+
+    def __str__(self):
+        return f"AuditSample #{self.pk} · {self.job}"
 
 
 class ReviewError(models.Model):
@@ -176,7 +197,7 @@ class ReviewError(models.Model):
         AuditSample, on_delete=models.CASCADE, null=True, blank=True, related_name="errors"
     )
     # RESTRICT (không phải PROTECT): chặn xoá riêng loại lỗi đang được dùng,
-    # nhưng vẫn cho xoá cả dự án (khi đó lỗi cũng bị xoá theo).
+    # nhưng vẫn cho xoá cả organization (khi đó lỗi cũng bị xoá theo).
     category = models.ForeignKey(ErrorCategory, on_delete=models.RESTRICT, related_name="errors")
     severity = models.CharField(max_length=20, choices=Severity.choices)
     verdict = models.CharField(max_length=10, choices=ErrorVerdict.choices, default=ErrorVerdict.FAIL)
@@ -187,7 +208,7 @@ class ReviewError(models.Model):
         null=True, blank=True, help_text="ID đối tượng trên CVAT (trống nếu chưa gắn ID hoặc thiếu object)"
     )
     is_missing_object = models.BooleanField(
-        default=False, help_text="True nếu là lỗi thiếu đối tượng (False Negative), cộng vào mẫu số N_missing"
+        default=False, help_text="True nếu là lỗi thiếu đối tượng (False Negative)"
     )
     location = models.CharField(max_length=120, blank=True, help_text="Frame / object ID")
     description = models.TextField(blank=True)
@@ -204,4 +225,12 @@ class ReviewError(models.Model):
                 condition=models.Q(verdict__in=["fail", "edge"]),
                 name="review_error_valid_verdict",
             ),
+            models.CheckConstraint(
+                condition=~models.Q(is_missing_object=True)
+                | (models.Q(cvat_object_id__isnull=True) & models.Q(verdict="fail")),
+                name="review_error_missing_object_valid",
+            ),
         ]
+
+    def __str__(self):
+        return f"{self.stage} · {self.category} · {self.job}"

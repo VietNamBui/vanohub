@@ -1,29 +1,31 @@
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
+from unittest.mock import patch
 
 from django.test import TestCase
 from django.utils import timezone
 
 from accounts.models import Role
 from accounts.testing import ProjectFixture, make_user
-from cvat_integration.sync import sync_batch
-from jobs.models import Job, JobStatus, ReworkScope
-from projects.models import ActivityLog, Batch, Dataset
-from quality.models import Audit, ErrorVerdict, ReviewError, ReviewStage, Severity
+from jobs.models import DailyOutputRecord, Job, JobStatus, ReworkScope, record_daily_output
+from projects.models import ActivityLog, Batch, Dataset, DataStatus
+from quality.models import AuditSample, ErrorVerdict, ReviewError, ReviewStage, Severity
+from quality.qc2 import ensure_qc2_sample
+from teams.models import Team, TeamMember
 
 
 class AnnotatorAndQc1AnalyticsTests(TestCase):
-    def setUp(self):
+    def setUp(self) -> None:
         self.f = ProjectFixture()
         self.ann1 = self.f.client(self.f.ann1)
         self.qc1 = self.f.client(self.f.qc1)
         self.pm = self.f.client(self.f.pm)
 
-    def test_annotator_dashboard_stats_and_permissions(self):
+    def test_annotator_dashboard_stats_and_permissions(self) -> None:
         self.assertEqual(self.qc1.get(self.f.url("annotator/dashboard/")).status_code, 403)
 
         j1 = self.f.job(status=JobStatus.PENDING_ANNOTATION, annotator=self.f.ann1)
         j2 = self.f.job(status=JobStatus.APPROVED, annotator=self.f.ann1, object_count=30)
-        self.f.job(status=JobStatus.PENDING_ANNOTATION, annotator=self.f.ann2)  # không tính vào ann1
+        self.f.job(status=JobStatus.PENDING_ANNOTATION, annotator=self.f.ann2)
 
         self.ann1.post(self.f.url(f"annotator/jobs/{j1.id}/start/"), {}, format="json")
         self.ann1.post(self.f.url(f"annotator/jobs/{j1.id}/submit/"), {}, format="json")
@@ -43,13 +45,13 @@ class AnnotatorAndQc1AnalyticsTests(TestCase):
         self.assertEqual(len(res.data["daily_results"]), 7)
         self.assertIn("recent_requests", res.data)
 
-    def test_annotator_dashboard_daily_actual_does_not_mix_lifetime_done(self):
+    def test_annotator_dashboard_daily_actual_does_not_mix_lifetime_done(self) -> None:
         self.f.job(status=JobStatus.APPROVED, annotator=self.f.ann1, object_count=500)
         res = self.ann1.get(self.f.url("annotator/dashboard/?period=week"))
         self.assertEqual(res.status_code, 200, res.data)
         self.assertEqual(res.data["kpi_summary"]["actual_objects"], 0)
 
-    def test_annotator_personal_analytics_p2_and_private_ranking(self):
+    def test_annotator_personal_analytics_p2_and_private_ranking(self) -> None:
         self.assertEqual(self.qc1.get(self.f.url("annotator/analytics/")).status_code, 403)
 
         j1 = self.f.job(status=JobStatus.PENDING_ANNOTATION, annotator=self.f.ann1, object_count=600)
@@ -63,18 +65,18 @@ class AnnotatorAndQc1AnalyticsTests(TestCase):
         res = self.ann1.get(self.f.url("annotator/analytics/?range=7d"))
         self.assertEqual(res.status_code, 200, res.data)
         self.assertEqual(res.data["avg_productivity"]["total_objects"], 600)
-        # KPI10: ann2 = 1000 > ann1 = 600 → ann1 hạng 2/2, không lộ tên hay điểm của ann2
         self.assertEqual(res.data["ranking"]["rank"], 2)
         self.assertEqual(res.data["ranking"]["total_annotators"], 2)
         self.assertNotIn("leaderboard", res.data["ranking"])
         self.assertEqual(len(res.data["daily_productivity"]), 7)
         self.assertEqual(len(res.data["weekly_forecast_series"]), 7)
 
-    def test_qc1_summary_metrics_trend_and_escape_errors(self):
+    def test_qc1_summary_metrics_trend_escape_errors_and_on_time(self) -> None:
         self.assertEqual(self.ann1.get(self.f.url("qc1-summary/")).status_code, 403)
 
-        j_pass = self.f.job(status=JobStatus.PENDING_QC1, annotator=self.f.ann1)
-        j_rej = self.f.job(status=JobStatus.PENDING_QC1, annotator=self.f.ann2)
+        now = timezone.now()
+        j_pass = self.f.job(status=JobStatus.PENDING_QC1, annotator=self.f.ann1, deadline=now + timedelta(hours=2))
+        j_rej = self.f.job(status=JobStatus.PENDING_QC1, annotator=self.f.ann2, deadline=now - timedelta(hours=1))
 
         self.qc1.post(self.f.url(f"qc1/jobs/{j_pass.id}/pass/"), {}, format="json")
         self.qc1.post(
@@ -82,9 +84,22 @@ class AnnotatorAndQc1AnalyticsTests(TestCase):
             {"errors": [{"category": self.f.category.id, "description": "thieu"}]},
             format="json",
         )
-        # Giả lập QC2 bắt được 1 lỗi sót trên job đã qua QC1
+        # QC2 bắt được 1 lỗi FAIL và 1 lỗi EDGE (EDGE không tính là escape)
         ReviewError.objects.create(
-            job=j_pass, stage=ReviewStage.QC2, rework_round=0, category=self.f.category, severity="major"
+            job=j_pass,
+            stage=ReviewStage.QC2,
+            rework_round=0,
+            category=self.f.category,
+            severity=Severity.MAJOR,
+            verdict=ErrorVerdict.FAIL,
+        )
+        ReviewError.objects.create(
+            job=j_pass,
+            stage=ReviewStage.QC2,
+            rework_round=0,
+            category=self.f.category,
+            severity=Severity.MINOR,
+            verdict=ErrorVerdict.EDGE,
         )
 
         res = self.qc1.get(self.f.url("qc1-summary/?period=week"))
@@ -93,13 +108,14 @@ class AnnotatorAndQc1AnalyticsTests(TestCase):
         self.assertEqual(res.data["stats"]["passed"], 1)
         self.assertEqual(res.data["stats"]["rejected"], 1)
         self.assertEqual(res.data["pass_rate"], 50.0)
+        self.assertEqual(res.data["on_time_pct"], 50.0)
         self.assertEqual(res.data["kpi"]["current"]["reviewed"], 2)
         self.assertEqual(res.data["kpi"]["current"]["errors"], 1)
         self.assertEqual(res.data["qc2_escape_errors"], 1)
+        self.assertEqual(res.data["escaped_jobs"], 1)
         self.assertEqual(len(res.data["trend"]), 7)
         self.assertEqual(res.data["trend"][-1]["reviewed"], 2)
 
-        # PM xem scope=project được
         pm_res = self.pm.get(self.f.url("qc1-summary/?period=week"))
         self.assertEqual(pm_res.status_code, 200, pm_res.data)
         self.assertEqual(pm_res.data["scope"], "project")
@@ -107,9 +123,9 @@ class AnnotatorAndQc1AnalyticsTests(TestCase):
 
 
 class FormulaAndDailyOutputTests(TestCase):
-    """Kiểm thử đầy đủ công thức đã chốt: SL01–SL06, KPI02–KPI09, NS03, CL01–CL11, RW02/RW04, TD05–TD13."""
+    """Kiểm thử các công thức chốt Stage 2 + Hybrid QC2 theo frame."""
 
-    def setUp(self):
+    def setUp(self) -> None:
         self.f = ProjectFixture()
         self.f.project.kpi_annotation_target = 100
         self.f.project.kpi_qc1_target = 5
@@ -121,46 +137,45 @@ class FormulaAndDailyOutputTests(TestCase):
         self.qc1 = self.f.client(self.f.qc1)
         self.qc2 = self.f.client(self.f.qc2)
 
-    def test_daily_output_counts_before_qc_and_unchanged_after_qc_pass_and_partial_vs_full_rework(self):
-        self.f.batch.cvat_task_id = 900
-        self.f.batch.save(update_fields=["cvat_task_id"])
-        job = self.f.job(status=JobStatus.ANNOTATING, annotator=self.f.ann1, cvat_job_id=901, object_count=0)
+    def test_daily_output_separates_submit_vs_cvat_sync_and_partial_rework(self) -> None:
+        job = self.f.job(status=JobStatus.ANNOTATING, annotator=self.f.ann1, object_count=80, last_counted_objects=80)
+        record_daily_output(
+            job=job,
+            user=self.f.ann1,
+            object_count=80,
+            is_rework=False,
+            rework_round=0,
+            source=DailyOutputRecord.Source.CVAT_SYNC,
+        )
 
-        class SyncClient:
-            def __init__(self, cnt):
-                self.cnt = cnt
-
-            def list_task_jobs(self, task_id):
-                return [{"id": 901, "type": "annotation", "stage": "annotation", "state": "in progress"}]
-
-            def count_job_objects(self, job_id):
-                return self.cnt
-
-        # 1. Trước khi QC: đồng bộ thấy 80 cuboid → tính ngay 80 vào sản lượng hôm nay
-        sync_batch(self.f.batch, self.f.pm, client=SyncClient(80), count_objects=True)
+        # 1. Trước khi nộp: 80 cuboid từ CVAT_SYNC được tách rõ vào unsubmitted_cvat_objects
         d1 = self.ann1.get(self.f.url("annotator/dashboard/")).data
         self.assertEqual(d1["kpi_summary"]["actual_objects"], 80)
+        self.assertEqual(d1["kpi_summary"]["today_submitted_objects"], 0)
+        self.assertEqual(d1["kpi_summary"]["today_unsubmitted_cvat_objects"], 80)
         self.assertEqual(d1["kpi_summary"]["shortfall"], 20)
         self.assertEqual(d1["kpi_summary"]["surplus"], 0)
         self.assertEqual(d1["daily_results"][-1]["first_pass_objects"], 80)
+        self.assertEqual(d1["daily_results"][-1]["unsubmitted_cvat_objects"], 80)
 
-        # 2. Nộp bài với 120 cuboid → chỉ cộng thêm delta +40 (tổng 120, surplus=20, không cộng đúp 80)
+        # 2. Nộp bài với 120 cuboid → cộng delta +40 (SUBMIT), tổng 120, surplus=20
         self.assertEqual(
             self.ann1.post(self.f.url(f"annotator/jobs/{job.id}/submit/"), {"object_count": 120}, format="json").status_code,
             200,
         )
         d2 = self.ann1.get(self.f.url("annotator/dashboard/")).data
         self.assertEqual(d2["kpi_summary"]["actual_objects"], 120)
+        self.assertEqual(d2["kpi_summary"]["today_submitted_objects"], 40)
+        self.assertEqual(d2["kpi_summary"]["today_unsubmitted_cvat_objects"], 80)
         self.assertEqual(d2["kpi_summary"]["achievement_pct"], 120.0)
-        self.assertEqual(d2["kpi_summary"]["shortfall"], 0)
         self.assertEqual(d2["kpi_summary"]["surplus"], 20)
 
-        # 3. Sau khi QC1 Pass → sản lượng hôm nay giữ nguyên 120 (không cộng đúp, không mất)
+        # 3. Sau khi QC1 Pass → sản lượng hôm nay giữ nguyên 120
         self.assertEqual(self.qc1.post(self.f.url(f"qc1/jobs/{job.id}/pass/"), {}, format="json").status_code, 200)
         d3 = self.ann1.get(self.f.url("annotator/dashboard/")).data
         self.assertEqual(d3["kpi_summary"]["actual_objects"], 120)
 
-        # 4. Partial rework trên job 120 cuboid có 2 lỗi duy nhất → nộp lại KHÔNG cộng lại 120, chỉ cộng +2 rework
+        # 4. Partial rework trên job 100 cuboid có 2 lỗi duy nhất → cộng +2 rework
         job_rw = self.f.job(status=JobStatus.PENDING_ANNOTATION, annotator=self.f.ann1, object_count=0)
         self.ann1.post(self.f.url(f"annotator/jobs/{job_rw.id}/start/"), {}, format="json")
         self.ann1.post(self.f.url(f"annotator/jobs/{job_rw.id}/submit/"), {"object_count": 100}, format="json")
@@ -170,7 +185,7 @@ class FormulaAndDailyOutputTests(TestCase):
                 "rework_scope": ReworkScope.PARTIAL,
                 "errors": [
                     {"category": self.f.category.id, "frame_number": 1, "cvat_object_id": 10},
-                    {"category": self.f.category.id, "frame_number": 1, "cvat_object_id": 10},  # trùng cuboid
+                    {"category": self.f.category.id, "frame_number": 1, "cvat_object_id": 10},
                     {"category": self.f.category.id, "frame_number": 2, "cvat_object_id": 11},
                 ],
             },
@@ -179,28 +194,26 @@ class FormulaAndDailyOutputTests(TestCase):
         self.ann1.post(self.f.url(f"annotator/jobs/{job_rw.id}/start/"), {}, format="json")
         self.ann1.post(self.f.url(f"annotator/jobs/{job_rw.id}/submit/"), {"object_count": 100}, format="json")
         d4 = self.ann1.get(self.f.url("annotator/dashboard/")).data
-        self.assertEqual(d4["daily_results"][-1]["first_pass_objects"], 220)  # 120 + 100
-        self.assertEqual(d4["daily_results"][-1]["rework_objects"], 2)  # chỉ 2 cuboid lỗi duy nhất!
+        self.assertEqual(d4["daily_results"][-1]["first_pass_objects"], 220)
+        self.assertEqual(d4["daily_results"][-1]["rework_objects"], 2)
         self.assertEqual(d4["kpi_summary"]["actual_objects"], 222)
 
-    def test_fpy_cl01_uses_immutable_first_qc1_result_across_rework_qc2_and_resolve_escalation(self):
+    def test_fpy_cl01_immutable_and_safe_fallback_for_legacy_qc2_reject(self) -> None:
         j1 = self.f.job(status=JobStatus.PENDING_QC1, annotator=self.f.ann1)
         j2 = self.f.job(status=JobStatus.PENDING_QC1, annotator=self.f.ann1)
 
-        # j1 Pass QC1 lần đầu → sau đó bị QC2 Reject → vẫn là FPY Pass tại QC1
+        # j1 Pass QC1 lần đầu → QC2 Reject → vẫn là FPY Pass tại QC1
         self.assertEqual(self.qc1.post(self.f.url(f"qc1/jobs/{j1.id}/pass/"), {}, format="json").status_code, 200)
         Job.objects.filter(pk=j1.pk).update(status=JobStatus.PENDING_QC2)
-        audit = self.pm.post(
-            self.f.url("audits/"), {"batch": self.f.batch.id, "sampling_rate": 100, "auditors": [self.f.qc2.id]}, format="json"
-        ).data
-        sample = Audit.objects.get(pk=audit["id"]).samples.get(job=j1)
+        sample1 = ensure_qc2_sample(Job.objects.get(pk=j1.pk))
+        assert sample1 is not None
         self.qc2.post(
-            self.f.url(f"audit-samples/{sample.id}/reject/"),
+            self.f.url(f"audit-samples/{sample1.id}/reject/"),
             {"errors": [{"category": self.f.category.id}]},
             format="json",
         )
 
-        # j2 trượt QC1 lần đầu, đang nằm ở REWORK (chưa từng tới QC2) và bị escalate rồi PM gỡ escalation
+        # j2 trượt QC1 lần đầu → escalate → PM gỡ escalation
         self.assertEqual(
             self.qc1.post(
                 self.f.url(f"qc1/jobs/{j2.id}/reject/"),
@@ -212,12 +225,11 @@ class FormulaAndDailyOutputTests(TestCase):
         Job.objects.filter(pk=j2.pk).update(is_escalated=True, rework_round=3)
         self.pm.post(self.f.url(f"jobs/{j2.id}/resolve-escalation/"), {}, format="json")
 
-        # FPY = 1 pass (j1) / 2 (j1 + j2) = 50.0% trên cả Overview, Annotator và QC1!
+        # FPY = 1 pass (j1) / 2 = 50.0%
         ov = self.pm.get(self.f.url("overview/")).data
         self.assertEqual(ov["metrics"]["first_pass_yield"]["value"], 50.0)
         self.assertEqual(ov["metrics"]["first_pass_yield"]["passed"], 1)
         self.assertEqual(ov["metrics"]["first_pass_yield"]["total"], 2)
-        # RW02: cả j1 (bị QC2 reject) và j2 (dù rework_round bị reset = 0) vẫn có total_rework_rounds > 0 => 100%
         self.assertEqual(ov["metrics"]["rework_rate"]["value"], 100.0)
 
         ann_dash = self.ann1.get(self.f.url("annotator/dashboard/")).data
@@ -225,83 +237,190 @@ class FormulaAndDailyOutputTests(TestCase):
         qc1_sum = self.qc1.get(self.f.url("qc1-summary/")).data
         self.assertEqual(qc1_sum["first_pass_yield"]["value"], 50.0)
         self.assertEqual(qc1_sum["qc1_escape_job_rate"], 100.0)
+        self.assertEqual(qc1_sum["escaped_jobs"], 1)
 
-    def test_quality_cl11_defect_cl02_cl05_edge_verdict_missing_objects_and_dispute_voiding_cl09(self):
-        job = self.f.job(status=JobStatus.QC1_PASSED, annotator=self.f.ann1, object_count=100, first_qc1_result="pass")
-        # 2 lỗi trên cùng cuboid (1, 10) [minor + critical] => khử trùng thành 1 fail critical
-        e_dup1 = ReviewError.objects.create(
-            job=job, stage=ReviewStage.QC1, rework_round=0, category=self.f.category,
-            severity=Severity.MINOR, verdict=ErrorVerdict.FAIL, frame_number=1, cvat_object_id=10,
+        # Legacy job (first_qc1_result="") qua QC1 vòng 0 rồi bị QC2 reject vòng 0 → KHÔNG đếm oan thành trượt QC1!
+        j_legacy_qc2 = self.f.job(
+            status=JobStatus.PENDING_QC2,
+            annotator=self.f.ann1,
+            first_qc1_result="",
+            rework_round=0,
+            total_rework_rounds=0,
+        )
+        sample_leg = ensure_qc2_sample(j_legacy_qc2)
+        assert sample_leg is not None
+        self.qc2.post(
+            self.f.url(f"audit-samples/{sample_leg.id}/reject/"),
+            {"errors": [{"category": self.f.category.id}]},
+            format="json",
+        )
+        ov2 = self.pm.get(self.f.url("overview/")).data
+        # 2 pass (j1 + j_legacy_qc2) / 3 = 66.7%
+        self.assertEqual(ov2["metrics"]["first_pass_yield"]["passed"], 2)
+        self.assertEqual(ov2["metrics"]["first_pass_yield"]["total"], 3)
+        self.assertEqual(ov2["metrics"]["first_pass_yield"]["value"], 66.7)
+
+    def test_cl02_cl05_cl11_are_pending_definition_and_voided_errors_excluded(self) -> None:
+        job = self.f.job(status=JobStatus.REWORK, annotator=self.f.ann1, rework_round=1, total_rework_rounds=1, object_count=100)
+        e_active = ReviewError.objects.create(
+            job=job,
+            stage=ReviewStage.QC1,
+            rework_round=0,
+            category=self.f.category,
+            severity=Severity.CRITICAL,
+            verdict=ErrorVerdict.FAIL,
+            frame_number=1,
+            cvat_object_id=10,
         )
         ReviewError.objects.create(
-            job=job, stage=ReviewStage.QC1, rework_round=0, category=self.f.category,
-            severity=Severity.CRITICAL, verdict=ErrorVerdict.FAIL, frame_number=1, cvat_object_id=10,
-        )
-        # 1 cuboid Edge => tính vào Pass+Edge của CL11, không tính vào Fail của CL02
-        ReviewError.objects.create(
-            job=job, stage=ReviewStage.QC1, rework_round=0, category=self.f.category,
-            severity=Severity.MINOR, verdict=ErrorVerdict.EDGE, frame_number=2, cvat_object_id=11,
-        )
-        # 1 lỗi thiếu đối tượng tường minh (is_missing_object=True) => cộng +1 vào mẫu số (101)
-        ReviewError.objects.create(
-            job=job, stage=ReviewStage.QC1, rework_round=0, category=self.f.category,
-            severity=Severity.MAJOR, verdict=ErrorVerdict.FAIL, frame_number=5, cvat_object_id=None,
-            is_missing_object=True,
-        )
-        # 1 lỗi trùng (frame=5, category) cũng is_missing_object=True => khử trùng, không cộng thành 2
-        ReviewError.objects.create(
-            job=job, stage=ReviewStage.QC2, rework_round=0, category=self.f.category,
-            severity=Severity.MAJOR, verdict=ErrorVerdict.FAIL, frame_number=5, cvat_object_id=None,
-            is_missing_object=True,
+            job=job,
+            stage=ReviewStage.QC1,
+            rework_round=0,
+            category=self.f.category,
+            severity=Severity.MINOR,
+            verdict=ErrorVerdict.FAIL,
+            is_voided=True,
         )
 
         ov = self.pm.get(self.f.url("overview/")).data
-        # fail=2 / (100 + 1) = 1.98%, quality_cl = 98.02%
-        self.assertEqual(ov["metrics"]["defect_error_rate"]["value"], 1.98)
-        self.assertEqual(ov["metrics"]["quality_cl"]["value"], 98.02)
-        self.assertEqual(ov["metrics"]["quality_cl"]["edge_objects"], 1)
-        self.assertEqual(ov["metrics"]["defect_rate_by_severity"]["value"][Severity.CRITICAL], 0.99)
-        self.assertEqual(ov["metrics"]["defect_rate_by_severity"]["value"][Severity.MAJOR], 0.99)
+        for key in ("defect_error_rate", "defect_rate_by_severity", "quality_cl"):
+            self.assertEqual(ov["metrics"][key]["status"], "pending_definition")
+            self.assertIsNone(ov["metrics"][key]["value"])
+        # Lỗi is_voided=True bị loại khỏi errors_by_severity & errors_by_category
         self.assertEqual(ov["errors_by_severity"][Severity.CRITICAL], 1)
+        self.assertEqual(ov["errors_by_severity"][Severity.MINOR], 0)
 
-        # Tạo 2 khiếu nại lỗi: 1 resolved (hủy e_dup1) + 1 rejected => CL09 = 50.0%
-        d1 = self.ann1.post(
-            self.f.url("annotator/requests/"),
-            {"job": job.id, "review_error": e_dup1.id, "request_type": "error_dispute", "reason": "Không sai"},
-            format="json",
-        ).data
-        d2 = self.ann1.post(
-            self.f.url("annotator/requests/"),
-            {"job": job.id, "request_type": "error_dispute", "reason": "Kiểm lại giúp"},
-            format="json",
-        ).data
-        self.pm.post(self.f.url(f"annotator/requests/{d1['id']}/resolve/"), {"status": "resolved"}, format="json")
-        self.pm.post(self.f.url(f"annotator/requests/{d2['id']}/resolve/"), {"status": "rejected"}, format="json")
+        qc2_sum = self.pm.get(self.f.url("qc2-summary/")).data
+        for key in ("error_percent_in_job", "defect_error_rate", "defect_rate_by_severity", "quality_cl"):
+            self.assertEqual(qc2_sum[key]["status"], "pending_definition")
+            self.assertIsNone(qc2_sum[key]["value"])
 
+        # Khi void luôn lỗi cuối cùng của vòng hiện tại (round 1), KHÔNG hồi sinh lỗi vòng 0 cũ!
+        Job.objects.filter(pk=job.pk).update(rework_round=2, total_rework_rounds=2)
+        e_round1 = ReviewError.objects.create(
+            job=job,
+            stage=ReviewStage.QC1,
+            rework_round=1,
+            category=self.f.category,
+            severity=Severity.MAJOR,
+            is_voided=True,
+        )
+        self.assertTrue(e_round1.is_voided)
+        self.assertFalse(e_active.is_voided)
+        dash = self.ann1.get(self.f.url("annotator/dashboard/")).data
+        self.assertEqual(dash["kpi_summary"]["pending_rework_errors"], 0)
+        self.assertEqual(dash["rework_focus"]["error_count"], 0)
+
+    def test_overview_ready_batches_with_open_audit_and_zero_pending_samples(self) -> None:
+        # Batch có Audit IN_PROGRESS nhưng 0 mẫu pending và 100% job APPROVED, không khoá → ready_batches=1!
+        j1 = self.f.job(status=JobStatus.PENDING_QC2, frame_count=10)
+        sample = ensure_qc2_sample(j1)
+        assert sample is not None
+        self.assertEqual(self.qc2.post(self.f.url(f"audit-samples/{sample.id}/pass/"), {}, format="json").status_code, 200)
+
+        # Batch 2 sẵn sàng confirm-qc2 (100% QC1_PASSED)
+        batch2 = Batch.objects.create(project=self.f.project, dataset=self.f.dataset, name="B2")
+        self.f.job(batch=batch2, status=JobStatus.QC1_PASSED)
+
+        ov = self.pm.get(self.f.url("overview/")).data
+        self.assertEqual(ov["counts"]["ready_batches"], 1)
+        self.assertEqual(ov["pending_decisions"]["batches_ready_for_qc2_confirm"], 1)
+        self.assertEqual(ov["pending_decisions"]["pending_qc2_samples"], 0)
+        self.assertNotIn("audits_ready_to_complete", ov["pending_decisions"])
+
+        # Khoá j1 → ready_batches giảm về 0
+        Job.objects.filter(pk=j1.pk).update(is_locked=True)
         ov2 = self.pm.get(self.f.url("overview/")).data
-        self.assertEqual(ov2["metrics"]["dispute_overturn_rate"]["value"], 50.0)
-        self.assertEqual(ov2["errors_by_severity"][Severity.MINOR], 1)  # e_dup1 (minor) đã bị void
+        self.assertEqual(ov2["counts"]["ready_batches"], 0)
 
-    def test_qc2_summary_no_cover_double_count_batch_id_grouping_and_kpis(self):
-        other_qc2 = make_user("qc2_cover", Role.QC2, project=self.f.project)
-        ds2 = Dataset.objects.create(project=self.f.project, name="D2")
-        batch_same_name = Batch.objects.create(dataset=ds2, name=self.f.batch.name)
-        j1 = self.f.job(status=JobStatus.PENDING_QC2, object_count=50)
-        j2 = Job.objects.create(
-            project=self.f.project, batch=batch_same_name, name="J-D2",
-            status=JobStatus.PENDING_QC2, annotator=self.f.ann2, object_count=50,
+    def test_qc1_escape_anchored_on_sample_created_at_and_includes_cvat_synced_escapes(self) -> None:
+        qc1_b = make_user("qc1_second", Role.QC1, project=self.f.project)
+        qc1_b_client = self.f.client(qc1_b)
+        self.f.batch.qc2_confirmed_by = self.f.pm
+        self.f.batch.qc2_confirmed_at = timezone.now()
+        self.f.batch.save(update_fields=["qc2_confirmed_by", "qc2_confirmed_at"])
+
+        # Vòng 1: qc1 pass → sample1 (t1) Pass (0 lỗi)
+        job = self.f.job(status=JobStatus.PENDING_QC1, annotator=self.f.ann1, frame_count=10)
+        self.assertEqual(self.qc1.post(self.f.url(f"qc1/jobs/{job.id}/pass/"), {}, format="json").status_code, 200)
+        s1 = AuditSample.objects.get(job=job, result=AuditSample.Result.PENDING)
+        self.assertEqual(self.qc2.post(self.f.url(f"audit-samples/{s1.id}/pass/"), {}, format="json").status_code, 200)
+
+        # Vòng 2 trong CÙNG 1 Audit: đổi sang qc1_b → qc1_b pass → sample2 (t2 > t1) Reject với 2 lỗi FAIL + 1 EDGE
+        Job.objects.filter(pk=job.pk).update(status=JobStatus.PENDING_QC1, qc1_reviewer=qc1_b, rework_round=1, total_rework_rounds=1)
+        self.assertEqual(qc1_b_client.post(self.f.url(f"qc1/jobs/{job.id}/pass/"), {}, format="json").status_code, 200)
+        s2 = AuditSample.objects.get(job=job, result=AuditSample.Result.PENDING)
+        self.assertEqual(s1.audit_id, s2.audit_id)  # Cùng 1 Audit của batch!
+        self.assertEqual(
+            self.qc2.post(
+                self.f.url(f"audit-samples/{s2.id}/reject/"),
+                {
+                    "errors": [
+                        {"category": self.f.category.id, "frame_number": 1, "cvat_object_id": 1, "verdict": "fail"},
+                        {"category": self.f.category.id, "frame_number": 2, "cvat_object_id": 2, "verdict": "fail"},
+                        {"category": self.f.category.id, "frame_number": 3, "cvat_object_id": 3, "verdict": "edge"},
+                    ]
+                },
+                format="json",
+            ).status_code,
+            200,
         )
 
-        a1 = self.pm.post(
-            self.f.url("audits/"), {"batch": self.f.batch.id, "sampling_rate": 100, "auditors": [self.f.qc2.id]}, format="json"
-        ).data
-        a2 = self.pm.post(
-            self.f.url("audits/"), {"batch": batch_same_name.id, "sampling_rate": 100, "auditors": [other_qc2.id]}, format="json"
-        ).data
-        s1 = Audit.objects.get(pk=a1["id"]).samples.get(job=j1)
-        s2 = Audit.objects.get(pk=a2["id"]).samples.get(job=j2)
+        # Neo theo AuditSample.created_at: KHÔNG đổ lỗi cho qc1 (vòng 1), chỉ tính 2 FAIL cho qc1_b (vòng 2)!
+        qc1_a_sum = self.qc1.get(self.f.url("qc1-summary/?scope=mine")).data
+        qc1_b_sum = qc1_b_client.get(self.f.url("qc1-summary/?scope=mine")).data
+        self.assertEqual(qc1_a_sum["qc2_escape_errors"], 0)
+        self.assertEqual(qc1_a_sum["escaped_jobs"], 0)
+        self.assertEqual(qc1_a_sum["qc1_escape_job_rate"], 0.0)
+        self.assertEqual(qc1_b_sum["qc2_escape_errors"], 2)
+        self.assertEqual(qc1_b_sum["escaped_jobs"], 1)
+        self.assertEqual(qc1_b_sum["qc1_escape_job_rate"], 100.0)
 
-        # PM chấm hộ mẫu s1 vốn giao cho self.f.qc2 → KHÔNG cộng sản lượng cho self.f.qc2 (không cover hộ)
+        # Job đồng bộ CVAT sang QC1_PASSED (chỉ có job.status, không có qc1.pass) bị QC2 bắt lỗi cũng được tính!
+        cvat_job = self.f.job(status=JobStatus.PENDING_QC2, annotator=self.f.ann2, qc1_reviewer=self.f.qc1, frame_count=10)
+        ActivityLog.record(
+            project=self.f.project,
+            actor=self.f.pm,
+            action="job.status",
+            target=cvat_job,
+            job=cvat_job,
+            before={"status": JobStatus.QC1_REVIEWING},
+            after={"status": JobStatus.QC1_PASSED},
+            note="Đồng bộ từ CVAT",
+        )
+        s_cvat = ensure_qc2_sample(cvat_job)
+        assert s_cvat is not None
+        self.qc2.post(
+            self.f.url(f"audit-samples/{s_cvat.id}/reject/"),
+            {"errors": [{"category": self.f.category.id, "verdict": "fail"}]},
+            format="json",
+        )
+        qc1_a_after = self.qc1.get(self.f.url("qc1-summary/?scope=mine")).data
+        self.assertEqual(qc1_a_after["qc2_escape_errors"], 1)
+        self.assertEqual(qc1_a_after["escaped_jobs"], 1)
+
+    def test_qc2_summary_no_cover_double_count_and_batch_id_grouping(self) -> None:
+        other_qc2 = make_user("qc2_cover", Role.QC2, project=self.f.project)
+        ds2 = Dataset.objects.create(project=self.f.project, name="D2")
+        batch_same_name = Batch.objects.create(project=self.f.project, dataset=ds2, name=self.f.batch.name)
+        j1 = self.f.job(status=JobStatus.PENDING_QC2, object_count=50, frame_count=10)
+        j2 = Job.objects.create(
+            project=self.f.project,
+            dataset=ds2,
+            batch=batch_same_name,
+            name="J-D2",
+            status=JobStatus.PENDING_QC2,
+            annotator=self.f.ann2,
+            object_count=50,
+            frame_count=10,
+        )
+        s1 = ensure_qc2_sample(j1)
+        s2 = ensure_qc2_sample(j2)
+        assert s1 is not None and s2 is not None
+        AuditSample.objects.filter(pk=s1.pk).update(auditor=self.f.qc2)
+        AuditSample.objects.filter(pk=s2.pk).update(auditor=other_qc2)
+
+        # PM chấm hộ s1 vốn giao cho self.f.qc2 → KHÔNG đếm trùng cho self.f.qc2
         self.assertEqual(self.pm.post(self.f.url(f"audit-samples/{s1.id}/pass/"), {}, format="json").status_code, 200)
         self.assertEqual(
             self.f.client(other_qc2).post(self.f.url(f"audit-samples/{s2.id}/pass/"), {}, format="json").status_code, 200
@@ -316,20 +435,18 @@ class FormulaAndDailyOutputTests(TestCase):
         self.assertEqual(pm_mine["kpi_target"], 2)
         self.assertEqual(pm_mine["kpi_summary"]["achievement_pct"], 50.0)
         self.assertEqual(pm_mine["kpi"]["comparison"]["audited"]["delta"], 1)
-        self.assertIsNone(pm_mine["kpi"]["comparison"]["audited"]["pct_change"])  # kỳ trước = 0
+        self.assertIsNone(pm_mine["kpi"]["comparison"]["audited"]["pct_change"])
 
-        # Hai batch trùng tên ở 2 dataset khác nhau phải tách riêng trong progress_by_batch
         pm_proj = self.pm.get(self.f.url("qc2-summary/")).data
         self.assertEqual(len(pm_proj["progress_by_batch"]), 2)
         self.assertEqual({r["dataset_name"] for r in pm_proj["progress_by_batch"]}, {"D1", "D2"})
 
-    def test_annotator_analytics_no_lifetime_fallback_split_hours_and_reassignment_attribution(self):
-        # Không có DailyOutputRecord trong kỳ dù có job APPROVED cũ → phải trả 0 (không fallback lifetime)
+    def test_annotator_analytics_split_hours_merged_wip_and_reassignment_attribution(self) -> None:
         self.f.job(status=JobStatus.APPROVED, annotator=self.f.ann1, object_count=999)
         empty_res = self.ann1.get(self.f.url("annotator/analytics/?range=7d")).data
         self.assertEqual(empty_res["avg_productivity"]["total_objects"], 0)
+        self.assertIsNone(empty_res["ranking"]["previous_rank"])
 
-        # Tách riêng giờ làm đầu (2h cho 200 cuboid = 100/h) và giờ rework (1h cho 10 cuboid = 10/h)
         now = timezone.now()
         j_fp = self.f.job(status=JobStatus.PENDING_ANNOTATION, annotator=self.f.ann1, object_count=0)
         self.ann1.post(self.f.url(f"annotator/jobs/{j_fp.id}/start/"), {}, format="json")
@@ -338,14 +455,21 @@ class FormulaAndDailyOutputTests(TestCase):
         ActivityLog.objects.filter(pk=start_fp.pk).update(created_at=now - timedelta(hours=2))
         self.ann1.post(self.f.url(f"annotator/jobs/{j_fp.id}/submit/"), {"object_count": 200}, format="json")
 
-        j_rw = self.f.job(status=JobStatus.REWORK, annotator=self.f.ann1, rework_round=1, total_rework_rounds=1, rework_scope=ReworkScope.FULL, object_count=10)
+        j_rw = self.f.job(
+            status=JobStatus.REWORK,
+            annotator=self.f.ann1,
+            rework_round=1,
+            total_rework_rounds=1,
+            rework_scope=ReworkScope.FULL,
+            object_count=10,
+        )
         self.ann1.post(self.f.url(f"annotator/jobs/{j_rw.id}/start/"), {}, format="json")
         start_rw = ActivityLog.objects.filter(job=j_rw, action="job.status", after__status=JobStatus.ANNOTATING).first()
         assert start_rw is not None
         ActivityLog.objects.filter(pk=start_rw.pk).update(created_at=now - timedelta(hours=1))
         self.ann1.post(self.f.url(f"annotator/jobs/{j_rw.id}/submit/"), {"object_count": 10}, format="json")
 
-        # Giao lại j_fp cho ann2 → sản lượng 200 cuboid vẫn giữ nguyên cho ann1 (SL04)
+        # Giao lại j_fp cho ann2 → sản lượng 200 cuboid vẫn giữ nguyên cho ann1
         self.pm.post(self.f.url(f"jobs/{j_fp.id}/assign/"), {"annotator": self.f.ann2.id}, format="json")
 
         analytics = self.ann1.get(self.f.url("annotator/analytics/?range=7d")).data
@@ -359,32 +483,74 @@ class FormulaAndDailyOutputTests(TestCase):
         self.assertEqual(perf[self.f.ann1.id]["total_objects"], 210)
         self.assertEqual(perf[self.f.ann2.id]["total_objects"], 0)
 
-    def test_overview_active_members_unions_all_roles_and_stage_progress_and_pending_decisions(self):
-        # 1 job annotating (ann1), 1 job pending_qc1 (qc1), 1 job pending_qc2 in open audit (qc2)
-        j_anno = self.f.job(status=JobStatus.ANNOTATING, annotator=self.f.ann1)
-        Job.objects.filter(pk=j_anno.pk).update(qc1_reviewer=None)
-        self.f.job(status=JobStatus.PENDING_QC1, annotator=self.f.ann2)
-        j_qc2 = self.f.job(status=JobStatus.PENDING_QC2, annotator=self.f.ann2)
-        self.pm.post(
-            self.f.url("audits/"), {"batch": self.f.batch.id, "sampling_rate": 100, "auditors": [self.f.qc2.id]}, format="json"
+    def test_dh06_deadline_snapshot_and_ns03_mixed_sync_submit_day(self) -> None:
+        now = timezone.now()
+        j_late = self.f.job(
+            status=JobStatus.PENDING_ANNOTATION,
+            annotator=self.f.ann1,
+            deadline=now - timedelta(hours=2),
+            object_count=0,
         )
-        self.assertEqual(j_qc2.status, JobStatus.PENDING_QC2)
+        self.ann1.post(self.f.url(f"annotator/jobs/{j_late.id}/start/"), {}, format="json")
+        self.ann1.post(self.f.url(f"annotator/jobs/{j_late.id}/submit/"), {"object_count": 20}, format="json")
+        self.pm.post(
+            self.f.url(f"jobs/{j_late.id}/deadline/"),
+            {"deadline": (now + timedelta(days=2)).isoformat().replace("+00:00", "Z"), "note": "gia han"},
+            format="json",
+        )
+        dash = self.ann1.get(self.f.url("annotator/dashboard/")).data
+        self.assertEqual(dash["kpi_summary"]["on_time_pct"], 0.0)
 
-        ov = self.pm.get(self.f.url("overview/")).data
-        # ann1 (Anno) + qc1 (QC1) + qc2 (QC2) = 3 người duy nhất (ann2 không đang giữ job ở active anno!)
-        self.assertEqual(ov["metrics"]["active_members"]["value"], 3)
-        self.assertEqual(ov["counts"]["remaining_jobs"], 3)
-        self.assertEqual(ov["stage_progress"]["annotation_passed"], 66.7)
-        self.assertEqual(ov["stage_progress"]["qc1_passed"], 33.3)
-        self.assertEqual(ov["stage_progress"]["qc2_approved"], 0.0)
-        self.assertIn("pending_decisions", ov)
+        # NS03: tách riêng CVAT_SYNC chưa nộp (100) với SUBMIT rework (10+20) trên 2 job chạy song song 1h
+        j_uncheck = self.f.job(status=JobStatus.ANNOTATING, annotator=self.f.ann2, object_count=0)
+        record_daily_output(
+            job=j_uncheck,
+            user=self.f.ann2,
+            object_count=100,
+            is_rework=False,
+            rework_round=0,
+            source=DailyOutputRecord.Source.CVAT_SYNC,
+        )
+        j_rw2 = self.f.job(
+            status=JobStatus.REWORK,
+            annotator=self.f.ann2,
+            rework_round=1,
+            total_rework_rounds=1,
+            rework_scope=ReworkScope.FULL,
+            object_count=10,
+        )
+        j_rw3 = self.f.job(
+            status=JobStatus.REWORK,
+            annotator=self.f.ann2,
+            rework_round=1,
+            total_rework_rounds=1,
+            rework_scope=ReworkScope.FULL,
+            object_count=20,
+        )
+        for j_r, cnt in ((j_rw2, 10), (j_rw3, 20)):
+            self.ann2.post(self.f.url(f"annotator/jobs/{j_r.id}/start/"), {}, format="json")
+            st = ActivityLog.objects.filter(job=j_r, action="job.status", after__status=JobStatus.ANNOTATING).first()
+            assert st is not None
+            ActivityLog.objects.filter(pk=st.pk).update(created_at=now - timedelta(hours=1))
+            self.ann2.post(self.f.url(f"annotator/jobs/{j_r.id}/submit/"), {"object_count": cnt}, format="json")
 
-    def test_post_escalation_partial_rework_missing_and_bonus_cuboids_accuracy(self):
-        # 1. Job trải qua escalation + resolve-escalation (rework_round reset -> 0), rồi bị reject lại 1 lỗi mới
+        ann2_ana = self.ann2.get(self.f.url("annotator/analytics/?range=7d")).data
+        today_row = ann2_ana["daily_productivity"][-1]
+        self.assertEqual(today_row["first_pass_objects"], 100)
+        self.assertEqual(today_row["submitted_objects"], 30)
+        self.assertEqual(today_row["unsubmitted_cvat_objects"], 100)
+        self.assertEqual(today_row["first_pass_per_hour"], 0)
+        self.assertAlmostEqual(today_row["rework_per_hour"], 30.0, delta=1.5)
+        self.assertAlmostEqual(today_row["hours"], 1.0, delta=0.1)
+        self.assertEqual(ann2_ana["avg_productivity"]["total_objects"], 130)
+        self.assertEqual(ann2_ana["avg_productivity"]["submitted_objects"], 30)
+        self.assertEqual(ann2_ana["avg_productivity"]["unsubmitted_cvat_objects"], 100)
+        self.assertAlmostEqual(ann2_ana["avg_productivity"]["objects_per_hour"], 30, delta=2)
+
+    def test_post_escalation_partial_rework_focus(self) -> None:
         job = self.f.job(status=JobStatus.PENDING_ANNOTATION, annotator=self.f.ann1, object_count=0)
         self.ann1.post(self.f.url(f"annotator/jobs/{job.id}/start/"), {}, format="json")
         self.ann1.post(self.f.url(f"annotator/jobs/{job.id}/submit/"), {"object_count": 50}, format="json")
-        # 3 lỗi vòng 0 -> vòng 1 -> giả lập escalate ở vòng 3
         self.qc1.post(
             self.f.url(f"qc1/jobs/{job.id}/reject/"),
             {
@@ -392,14 +558,12 @@ class FormulaAndDailyOutputTests(TestCase):
                 "errors": [
                     {"category": self.f.category.id, "frame_number": 1, "cvat_object_id": 1},
                     {"category": self.f.category.id, "frame_number": 2, "cvat_object_id": 2},
-                    {"category": self.f.category.id, "frame_number": 3, "cvat_object_id": 3},
                 ],
             },
             format="json",
         )
         Job.objects.filter(pk=job.pk).update(rework_round=3, total_rework_rounds=3, is_escalated=True)
         self.pm.post(self.f.url(f"jobs/{job.id}/resolve-escalation/"), {}, format="json")
-        # Nộp lại vòng hậu escalation rồi QC1 reject mới với 2 lỗi có sẵn + 1 lỗi thiếu
         self.ann1.post(self.f.url(f"annotator/jobs/{job.id}/start/"), {}, format="json")
         self.ann1.post(self.f.url(f"annotator/jobs/{job.id}/submit/"), {"object_count": 50}, format="json")
         self.qc1.post(
@@ -419,137 +583,259 @@ class FormulaAndDailyOutputTests(TestCase):
             },
             format="json",
         )
-        # Kiểm tra ReviewError mới có rework_round = 3 (> 0 cũ), nên rework_focus chỉ hiển thị 3 lỗi mới
         dash_before = self.ann1.get(self.f.url("annotator/dashboard/")).data
         self.assertEqual(dash_before["rework_focus"]["error_count"], 3)
         self.assertEqual(dash_before["rework_focus"]["pending_object_frames"], 3)
 
-        # Annotator sửa 2 cuboid có sẵn + vẽ thêm 3 cuboid mới (gồm 1 missing + 2 bonus): 50 -> 53
-        # Công thức chính xác: existing(2) + max(missing(1), added(3)) = 5!
-        self.ann1.post(self.f.url(f"annotator/jobs/{job.id}/start/"), {}, format="json")
-        sub = self.ann1.post(self.f.url(f"annotator/jobs/{job.id}/submit/"), {"object_count": 53}, format="json").data
-        self.assertEqual(sub["timeline"][-1]["after"]["credited_objects"], 5)
 
-    def test_multi_audit_qc2_quality_cl_and_qc1_escape_no_double_blame_and_reassigned_done_no_double_count(self):
-        qc1_b = make_user("qc1_second", Role.QC1, project=self.f.project)
-        qc1_b_client = self.f.client(qc1_b)
+class AnalyticsBugFixTests(TestCase):
+    """Kiểm thử hồi quy P1 cho analytics: múi giờ VN UTC+7, ?period=day 00:00 +07:00, FPY, QC1/QC2 scope."""
 
-        # 1. Job 100 cuboid do ann1 làm, nộp, QC1-A duyệt pass → Audit #1 Pass (0 lỗi)
-        job = self.f.job(status=JobStatus.PENDING_ANNOTATION, annotator=self.f.ann1, object_count=0)
-        self.ann1.post(self.f.url(f"annotator/jobs/{job.id}/start/"), {}, format="json")
-        self.ann1.post(self.f.url(f"annotator/jobs/{job.id}/submit/"), {"object_count": 100}, format="json")
-        self.qc1.post(self.f.url(f"qc1/jobs/{job.id}/pass/"), {}, format="json")
-        self.pm.post(self.f.url(f"batches/{self.f.batch.id}/confirm-qc2/"), {}, format="json")
-        a1 = self.pm.post(
-            self.f.url("audits/"), {"batch": self.f.batch.id, "sampling_rate": 100, "auditors": [self.f.qc2.id]}, format="json"
-        ).data
-        s1 = Audit.objects.get(pk=a1["id"]).samples.get(job=job)
-        self.qc2.post(self.f.url(f"audit-samples/{s1.id}/pass/"), {}, format="json")
-        # PM trả cả batch để chạy vòng 2
-        self.pm.post(self.f.url(f"audits/{a1['id']}/complete/"), {"decision": "reject", "reason": "chạy lại"}, format="json")
+    def setUp(self) -> None:
+        self.f = ProjectFixture()
+        self.f.project.kpi_annotation_target = 1000
+        self.f.project.save(update_fields=["kpi_annotation_target"])
+        self.ann1 = self.f.client(self.f.ann1)
+        self.ann2 = self.f.client(self.f.ann2)
+        self.qc1 = self.f.client(self.f.qc1)
+        self.qc2 = self.f.client(self.f.qc2)
+        self.pm = self.f.client(self.f.pm)
 
-        # 2. Vòng 2 đổi QC1 sang qc1_b → qc1_b duyệt pass → Audit #2 Reject với 4 lỗi
-        self.pm.post(self.f.url(f"jobs/{job.id}/assign/"), {"qc1_reviewer": qc1_b.id}, format="json")
-        # Thay đổi object_count sau khi Audit #1 đã chấm (100 -> 150) không được làm méo snapshot của Audit #1 (100 + 150 = 250)
-        Job.objects.filter(pk=job.pk).update(object_count=150)
-        self.ann1.post(self.f.url(f"annotator/jobs/{job.id}/start/"), {}, format="json")
-        self.ann1.post(self.f.url(f"annotator/jobs/{job.id}/submit/"), {"object_count": 150}, format="json")
-        qc1_b_client.post(self.f.url(f"qc1/jobs/{job.id}/pass/"), {}, format="json")
-        self.pm.post(self.f.url(f"batches/{self.f.batch.id}/confirm-qc2/"), {}, format="json")
-        a2 = self.pm.post(
-            self.f.url("audits/"), {"batch": self.f.batch.id, "sampling_rate": 100, "auditors": [self.f.qc2.id]}, format="json"
-        ).data
-        s2 = Audit.objects.get(pk=a2["id"]).samples.get(job=job)
-        self.qc2.post(
-            self.f.url(f"audit-samples/{s2.id}/reject/"),
-            {
-                "errors": [
-                    {"category": self.f.category.id, "frame_number": i, "cvat_object_id": i + 1}
-                    for i in range(5)
-                ]
-            },
-            format="json",
+    def test_vietnam_timezone_cutoff_for_daily_buckets_period_day_and_alert_formatting(self) -> None:
+        # 2026-11-26 18:00 UTC == 2026-11-27 01:00 Asia/Ho_Chi_Minh (qua ngày mới ở VN, 00:00 +07 == 17:00 UTC)
+        fixed_now = datetime(2026, 11, 26, 18, 0, tzinfo=UTC)
+        yesterday_vn = datetime(2026, 11, 26, 16, 30, tzinfo=UTC)  # 26/11 23:30 VN (trước mốc 00:00 +07)
+        today_vn = datetime(2026, 11, 26, 17, 30, tzinfo=UTC)  # 27/11 00:30 VN (sau mốc 00:00 +07)
+
+        job = self.f.job(
+            status=JobStatus.PENDING_QC2,
+            annotator=self.f.ann1,
+            object_count=250,
+            deadline=today_vn,
         )
+        record_daily_output(
+            job=job,
+            user=self.f.ann1,
+            object_count=250,
+            is_rework=False,
+            rework_round=0,
+            source=DailyOutputRecord.Source.SUBMIT,
+            at=fixed_now,
+        )
+        ev_old = ActivityLog.record(
+            project=self.f.project,
+            actor=self.f.ann1,
+            action="job.status",
+            target=job,
+            job=job,
+            after={"status": JobStatus.PENDING_QC1, "event": "annotator.submit", "rework_round": 0, "object_count": 100},
+        )
+        ActivityLog.objects.filter(pk=ev_old.pk).update(created_at=yesterday_vn)
+        ev_new = ActivityLog.record(
+            project=self.f.project,
+            actor=self.f.ann1,
+            action="job.status",
+            target=job,
+            job=job,
+            after={"status": JobStatus.PENDING_QC1, "event": "annotator.submit", "rework_round": 0, "object_count": 250},
+        )
+        ActivityLog.objects.filter(pk=ev_new.pk).update(created_at=today_vn)
 
-        # Qc2Summary: Audit #1 (snapshot 100) + Audit #2 (snapshot 150) = 250 checked cuboids, 5 fail => 2.0%, 98.0%!
-        qc2_sum = self.qc2.get(self.f.url("qc2-summary/?scope=mine")).data
-        self.assertEqual(qc2_sum["error_percent_in_job"]["checked_objects"], 250)
-        self.assertEqual(qc2_sum["error_percent_in_job"]["value"], 2.0)
-        self.assertEqual(qc2_sum["quality_cl"]["value"], 98.0)
+        qc1_ev = ActivityLog.record(
+            project=self.f.project,
+            actor=self.f.qc1,
+            action="qc1.pass",
+            target=job,
+            job=job,
+            after={"status": JobStatus.PENDING_QC2, "rework_round": 0},
+        )
+        ActivityLog.objects.filter(pk=qc1_ev.pk).update(created_at=fixed_now)
 
-        # Qc1Summary: KHÔNG đổ lỗi kép cho QC1-A (Audit #1 đạt 0 lỗi), chỉ tính lỗi sót cho QC1-B (Audit #2)
-        qc1_a_sum = self.qc1.get(self.f.url("qc1-summary/?scope=mine")).data
-        qc1_b_sum = qc1_b_client.get(self.f.url("qc1-summary/?scope=mine")).data
-        self.assertEqual(qc1_a_sum["qc2_escape_errors"], 0)
-        self.assertEqual(qc1_a_sum["qc1_escape_job_rate"], 0.0)
-        self.assertEqual(qc1_b_sum["qc2_escape_errors"], 5)
-        self.assertEqual(qc1_b_sum["qc1_escape_job_rate"], 100.0)
+        sample = ensure_qc2_sample(job)
+        assert sample is not None
+        sample.result = sample.Result.PASS
+        sample.reviewed_by = self.f.qc2
+        sample.reviewed_at = fixed_now
+        sample.save(update_fields=["result", "reviewed_by", "reviewed_at"])
 
-        # Đổi annotator của job đã APPROVED sang ann2 → MemberPerformance không được cộng đúp cho ann2
-        Job.objects.filter(pk=job.pk).update(status=JobStatus.APPROVED, annotator=self.f.ann2)
-        perf = {r["user"]["id"]: r for r in self.pm.get(self.f.url("member-performance/")).data}
-        self.assertEqual(perf[self.f.ann1.id]["objects_done"], 250)  # 100 fp + 150 full rw
-        self.assertEqual(perf[self.f.ann2.id]["objects_done"], 0)
+        with patch("django.utils.timezone.now", return_value=fixed_now):
+            # ?period=day cắt đúng 00:00:00 +07:00 → chỉ tính ev_new (17:30 UTC), loại ev_old (16:30 UTC)!
+            dash = self.ann1.get(self.f.url("annotator/dashboard/?period=day")).data
+            self.assertEqual(dash["submitted_in_period"]["value"], 1)
+            self.assertEqual(dash["daily_results"][-1]["date"], "2026-11-27")
+            self.assertEqual(dash["daily_results"][-1]["first_pass_objects"], 250)
+            self.assertEqual(dash["kpi_summary"]["actual_objects"], 250)
 
-    def test_dh06_deadline_snapshot_and_ns03_mixed_sync_submit_day_and_unchecked_error_exclusion(self):
+            ana = self.ann1.get(self.f.url("annotator/analytics/?range=7d")).data
+            self.assertEqual(ana["daily_productivity"][-1]["date"], "2026-11-27")
+            self.assertEqual(ana["daily_productivity"][-1]["first_pass_objects"], 250)
+
+            qc1_sum = self.qc1.get(self.f.url("qc1-summary/?period=week")).data
+            self.assertEqual(qc1_sum["trend"][-1]["date"], "2026-11-27")
+            self.assertEqual(qc1_sum["trend"][-1]["reviewed"], 1)
+
+            qc2_sum = self.qc2.get(self.f.url("qc2-summary/?period=week")).data
+            self.assertEqual(qc2_sum["trend"][-1]["date"], "2026-11-27")
+            self.assertEqual(qc2_sum["trend"][-1]["audited"], 1)
+
+            overview = self.pm.get(self.f.url("overview/?period=day")).data
+            self.assertEqual(overview["metrics"]["submitted_in_period"]["value"], 1)
+            overdue_alerts = [a for a in overview["alerts"] if a["type"] == "overdue"]
+            self.assertEqual(len(overdue_alerts), 1)
+            self.assertIn("27/11 00:30", overdue_alerts[0]["message"])
+
+    def test_annotator_dashboard_zero_today_active_counts_and_rework_focus_beyond_top_10(self) -> None:
         now = timezone.now()
-        # 1. DH06: nộp TRỄ hạn gốc, sau đó PM gia hạn deadline mới -> vẫn phải tính là trễ (0%)
-        j_late = self.f.job(
-            status=JobStatus.PENDING_ANNOTATION,
+        self.f.project.cvat_synced_at = now - timedelta(minutes=5)
+        self.f.project.save(update_fields=["cvat_synced_at"])
+
+        self.f.job(
+            status=JobStatus.APPROVED,
+            annotator=self.f.ann1,
+            object_count=500,
+            deadline=now + timedelta(days=1),
+            submitted_at=now - timedelta(days=2),
+        )
+        self.f.job(
+            status=JobStatus.ANNOTATING,
             annotator=self.f.ann1,
             deadline=now - timedelta(hours=2),
-            object_count=0,
+            target_object_count=100,
         )
-        self.ann1.post(self.f.url(f"annotator/jobs/{j_late.id}/start/"), {}, format="json")
-        self.ann1.post(self.f.url(f"annotator/jobs/{j_late.id}/submit/"), {"object_count": 20}, format="json")
-        # PM gia hạn thêm 2 ngày sau khi đã nộp trễ
-        self.pm.post(
-            self.f.url(f"jobs/{j_late.id}/deadline/"),
-            {"deadline": (now + timedelta(days=2)).isoformat().replace("+00:00", "Z"), "note": "gia han"},
-            format="json",
+        self.f.job(
+            status=JobStatus.PENDING_ANNOTATION,
+            annotator=self.f.ann1,
+            deadline=now + timedelta(hours=6),
+            target_object_count=200,
         )
+        self.f.job(
+            status=JobStatus.PENDING_QC1,
+            annotator=self.f.ann1,
+            deadline=now - timedelta(hours=3),
+            submitted_at=now - timedelta(hours=4),
+        )
+
         dash = self.ann1.get(self.f.url("annotator/dashboard/")).data
-        self.assertEqual(dash["kpi_summary"]["on_time_pct"], 0.0)
+        self.assertEqual(dash["kpi_summary"]["actual_objects"], 0)
+        self.assertEqual(dash["kpi_summary"]["achievement_pct"], 0.0)
+        self.assertEqual(dash["kpi_summary"]["shortfall"], 1000)
+        self.assertEqual(dash["counts"]["overdue"], 1)
+        self.assertEqual(dash["counts"]["due_soon"], 1)
+        self.assertEqual(dash["kpi_summary"]["on_time_count"], 2)
+        self.assertEqual(dash["kpi_summary"]["submitted_total"], 3)
+        self.assertEqual(dash["kpi_summary"]["on_time_pct"], 66.7)
+        self.assertIsNotNone(dash["meta"]["last_cvat_sync_at"])
 
-        # 2. Lỗi nằm trên job chưa qua QC (ANNOTATING, first_qc1_result="") không được rò vào CL02/CL11
-        j_uncheck = self.f.job(status=JobStatus.ANNOTATING, annotator=self.f.ann2, object_count=0)
-        ReviewError.objects.create(
-            job=j_uncheck, stage=ReviewStage.QC1, rework_round=0, category=self.f.category,
-            severity=Severity.CRITICAL, frame_number=1, cvat_object_id=None,
+        for idx in range(11):
+            self.f.job(
+                status=JobStatus.PENDING_ANNOTATION,
+                annotator=self.f.ann1,
+                deadline=now + timedelta(hours=1 + idx),
+                target_object_count=50,
+            )
+        rw_job = self.f.job(
+            status=JobStatus.REWORK,
+            annotator=self.f.ann1,
+            rework_round=2,
+            total_rework_rounds=2,
+            deadline=now + timedelta(days=5),
+            target_object_count=80,
         )
+        ReviewError.objects.create(job=rw_job, stage=ReviewStage.QC1, rework_round=0, category=self.f.category, severity="minor")
+        ReviewError.objects.create(job=rw_job, stage=ReviewStage.QC1, rework_round=0, category=self.f.category, severity="minor")
+        ReviewError.objects.create(job=rw_job, stage=ReviewStage.QC1, rework_round=1, category=self.f.category, severity="major")
+
+        dash3 = self.ann1.get(self.f.url("annotator/dashboard/")).data
+        self.assertEqual(dash3["meta"]["active_jobs_count"], 14)
+        self.assertEqual(dash3["meta"]["active_object_frames"], 100 + 200 + 11 * 50 + 80)
+        self.assertEqual(dash3["kpi_summary"]["max_rework_round_active"], 2)
+        self.assertIsNotNone(dash3["rework_focus"])
+        self.assertEqual(dash3["rework_focus"]["job_id"], rw_job.id)
+        self.assertEqual(dash3["rework_focus"]["error_count"], 1)
+        self.assertEqual(len(dash3["next_jobs"]), 10)
+
+    def test_first_pass_yield_includes_rework_jobs_and_survives_escalation_reset(self) -> None:
+        self.f.job(status=JobStatus.APPROVED, annotator=self.f.ann1, rework_round=0, total_rework_rounds=0)
+        for _ in range(9):
+            self.f.job(status=JobStatus.REWORK, annotator=self.f.ann1, rework_round=1, total_rework_rounds=1)
+
         ov = self.pm.get(self.f.url("overview/")).data
-        self.assertIsNone(ov["metrics"]["defect_error_rate"]["value"])
-        self.assertIsNone(ov["metrics"]["quality_cl"]["value"])
+        self.assertEqual(ov["metrics"]["first_pass_yield"]["value"], 10.0)
+        self.assertEqual(ov["metrics"]["rework_rate"]["value"], 90.0)
 
-        # 3. NS03: không bịa 7.5h cho ngày đồng bộ trước QC và hợp nhất giờ song song khi WIP=2
-        from jobs.models import DailyOutputRecord, record_daily_output
+        dash = self.ann1.get(self.f.url("annotator/dashboard/")).data
+        self.assertEqual(dash["first_pass_yield"]["value"], 10.0)
+        self.assertEqual(dash["kpi_summary"]["fpy_passed"], 1)
+        self.assertEqual(dash["kpi_summary"]["fpy_total"], 10)
 
-        record_daily_output(
-            job=j_uncheck, user=self.f.ann2, object_count=100, is_rework=False,
-            rework_round=0, source=DailyOutputRecord.Source.CVAT_SYNC,
-        )
-        # Hai job rework chạy song song cùng 1 khung giờ [now-1h, now] -> hợp nhất chỉ tính 1.0h (không phải 2.0h!)
-        j_rw2 = self.f.job(
-            status=JobStatus.REWORK, annotator=self.f.ann2,
-            rework_round=1, total_rework_rounds=1, rework_scope=ReworkScope.FULL, object_count=10,
-        )
-        j_rw3 = self.f.job(
-            status=JobStatus.REWORK, annotator=self.f.ann2,
-            rework_round=1, total_rework_rounds=1, rework_scope=ReworkScope.FULL, object_count=20,
-        )
-        for j_r, cnt in ((j_rw2, 10), (j_rw3, 20)):
-            self.ann2.post(self.f.url(f"annotator/jobs/{j_r.id}/start/"), {}, format="json")
-            st = ActivityLog.objects.filter(job=j_r, action="job.status", after__status=JobStatus.ANNOTATING).first()
-            assert st is not None
-            ActivityLog.objects.filter(pk=st.pk).update(created_at=now - timedelta(hours=1))
-            self.ann2.post(self.f.url(f"annotator/jobs/{j_r.id}/submit/"), {"object_count": cnt}, format="json")
+        self.f.job(status=JobStatus.APPROVED, annotator=self.f.ann1, rework_round=0, total_rework_rounds=3)
+        ov2 = self.pm.get(self.f.url("overview/")).data
+        self.assertEqual(ov2["metrics"]["first_pass_yield"]["value"], 9.1)
+        self.assertEqual(ov2["metrics"]["rework_rate"]["value"], 90.9)
 
-        ann2_ana = self.ann2.get(self.f.url("annotator/analytics/?range=7d")).data
-        today_row = ann2_ana["daily_productivity"][-1]
-        self.assertEqual(today_row["first_pass_objects"], 100)
-        self.assertEqual(today_row["first_pass_per_hour"], 0)  # không bịa giờ cho nhánh chưa có phiên đo
-        self.assertAlmostEqual(today_row["rework_per_hour"], 30.0, delta=1.5)  # 30 cuboid / 1.0h hợp nhất
-        self.assertAlmostEqual(today_row["hours"], 1.0, delta=0.1)  # không cộng đúp thành 2.0h và không bịa 7.5h
-        # avg_productivity chỉ chia measured_objects (30) / 1.0h = 30 (không chia nhầm 130 / 1.0h!)
-        self.assertEqual(ann2_ana["avg_productivity"]["total_objects"], 130)
-        self.assertAlmostEqual(ann2_ana["avg_productivity"]["objects_per_hour"], 30, delta=2)
+        mp = self.pm.get(self.f.url("member-performance/")).data
+        ann1_row = next(r for r in mp if r["user"]["id"] == self.f.ann1.id)
+        self.assertEqual(ann1_row["rework_rate"], 90.9)
+
+    def test_qc1_summary_mine_sees_pool_restricts_assigned_and_attributes_escapes_by_actor_and_period(self) -> None:
+        other_qc1 = make_user("qc1_b", Role.QC1, project=self.f.project)
+
+        pool_job = self.f.job(status=JobStatus.PENDING_QC1, annotator=self.f.ann1)
+        Job.objects.filter(pk=pool_job.pk).update(qc1_reviewer=None)
+        locked_batch = Batch.objects.create(
+            project=self.f.project, dataset=self.f.dataset, name="B_LOCK", status=DataStatus.LOCKED
+        )
+        locked_pool_job = self.f.job(status=JobStatus.PENDING_QC1, annotator=self.f.ann1, batch=locked_batch)
+        Job.objects.filter(pk=locked_pool_job.pk).update(qc1_reviewer=None)
+
+        passed_job = self.f.job(status=JobStatus.PENDING_QC1, annotator=self.f.ann2)
+        self.assertEqual(self.qc1.post(self.f.url(f"qc1/jobs/{passed_job.id}/pass/"), {}, format="json").status_code, 200)
+        Job.objects.filter(pk=passed_job.pk).update(qc1_reviewer=other_qc1)
+
+        ReviewError.objects.create(
+            job=passed_job, stage=ReviewStage.QC2, rework_round=0, category=self.f.category, severity="major"
+        )
+        old_err = ReviewError.objects.create(
+            job=passed_job, stage=ReviewStage.QC2, rework_round=0, category=self.f.category, severity="minor"
+        )
+        ReviewError.objects.filter(pk=old_err.pk).update(created_at=timezone.now() - timedelta(days=20))
+
+        qc1_mine = self.qc1.get(self.f.url("qc1-summary/?period=week")).data
+        other_mine = self.f.client(other_qc1).get(self.f.url("qc1-summary/?period=week")).data
+
+        self.assertEqual(qc1_mine["stats"]["assigned"], 0)
+        self.assertEqual(qc1_mine["stats"]["pool_pending"], 1)
+        self.assertEqual(qc1_mine["stats"]["pending"], 1)
+        self.assertEqual(qc1_mine["qc2_escape_errors"], 1)
+        self.assertEqual(qc1_mine["escaped_jobs"], 1)
+        self.assertEqual(other_mine["qc2_escape_errors"], 0)
+        self.assertEqual(other_mine["escaped_jobs"], 0)
+
+    def test_team_ranking_ranks_zero_output_below_real_output_and_excludes_voided_errors(self) -> None:
+        t_zero = Team.objects.create(project=self.f.project, name="Team Zero")
+        t_real = Team.objects.create(project=self.f.project, name="Team Real")
+        TeamMember.objects.create(team=t_zero, user=self.f.ann1)
+        TeamMember.objects.create(team=t_real, user=self.f.ann2)
+
+        done_job = self.f.job(
+            status=JobStatus.APPROVED, annotator=self.f.ann2, object_count=200, rework_round=1, total_rework_rounds=1
+        )
+        self.f.job(status=JobStatus.PENDING_ANNOTATION, annotator=self.f.ann2, object_count=100)
+        ReviewError.objects.create(
+            job=done_job, stage=ReviewStage.QC2, rework_round=0, category=self.f.category, severity="minor", is_voided=True
+        )
+
+        res = self.pm.get(self.f.url("team-ranking/"))
+        self.assertEqual(res.status_code, 200, res.data)
+        rows = res.data["rows"]
+        self.assertEqual([r["team"]["name"] for r in rows], ["Team Real", "Team Zero"])
+        self.assertEqual([r["rank"] for r in rows], [1, 2])
+        self.assertEqual(rows[0]["rework_rate"], 50.0)
+        self.assertEqual(rows[0]["qc2_errors"], 0)
+
+    def test_invalid_date_range_query_returns_400(self) -> None:
+        self.assertEqual(self.pm.get(self.f.url("overview/?date_from=invalid")).status_code, 400)
+        self.assertEqual(
+            self.pm.get(self.f.url("overview/?date_from=2026-11-27&date_to=2026-11-20")).status_code,
+            400,
+        )

@@ -1,4 +1,4 @@
-"""Phân quyền theo dự án (Multi-Role RBAC + Scope).
+"""Phân quyền theo organization (Multi-Role RBAC + Scope).
 
 Ý tưởng: thay vì kiểm tra "có phải PM không" rải rác trong từng view, mỗi thao tác
 được gắn với một *capability* (quyền nghiệp vụ). Bảng CAPABILITY_ROLES bên dưới chính
@@ -18,12 +18,7 @@ from rest_framework.views import APIView
 
 from .models import Role, RoleAssignment, expand_roles
 
-ALL_PROJECT_ROLES = {
-    Role.PROJECT_MANAGER,
-    Role.QC2,
-    Role.QC1,
-    Role.ANNOTATOR,
-}
+ALL_PROJECT_ROLES = set(Role)
 
 
 class Cap:
@@ -32,11 +27,11 @@ class Cap:
     VIEW_PROJECT = "view_project"
     VIEW_DASHBOARD = "view_dashboard"
     VIEW_JOBS = "view_jobs"
-    MANAGE_DATA = "manage_data"  # Dataset, Batch, nhập Job từ CVAT, khoá
+    MANAGE_DATA = "manage_data"  # Project (Dataset), Task (Batch), đồng bộ CVAT, khoá
     MANAGE_JOBS = "manage_jobs"  # giao lại, deadline, khoá job, xử lý escalation
-    MANAGE_TEAM = "manage_team"  # team, roster, điều chuyển
+    MANAGE_TEAM = "manage_team"  # team, roster, điều chuyển, tạo thành viên
     MANAGE_SETTINGS = "manage_settings"  # rework, sampling, ngưỡng KPI
-    MANAGE_AUDITS = "manage_audits"  # tạo audit, phân auditor, chốt audit
+    MANAGE_AUDITS = "manage_audits"  # quản lý audit QC2, phân auditor
     PERFORM_AUDIT = "perform_audit"  # QC2 Pass / Reject, ghi lỗi
     MANAGE_QUALITY_CATALOG = "manage_quality_catalog"  # danh mục lỗi, guideline
     VIEW_GUIDELINES = "view_guidelines"
@@ -78,23 +73,37 @@ def get_project_capabilities(user, project):
     return capabilities_for_roles(roles)
 
 
+class HasProjectCapability(BasePermission):
+    """Permission class của DRF: chặn với 403 nếu thiếu capability cần cho thao tác."""
+
+    message = "Bạn không có quyền thực hiện thao tác này trong organization."
+
+    def has_permission(self, request: Request, view: APIView) -> Any:
+        if not request.user or not request.user.is_authenticated:
+            return False
+        scoped_view: Any = view
+        scoped_view.get_project()
+        required = scoped_view.get_required_capability()
+        if required is None:
+            return True
+        if isinstance(required, (list, tuple, set)):  # chỉ cần một trong các capability
+            return any(cap in scoped_view.capabilities for cap in required)
+        return required in scoped_view.capabilities
+
+
 class ProjectScopedViewMixin:
     """Dùng cho mọi view nằm dưới /api/projects/<project_id>/...
 
-    - self.project: dự án lấy từ URL (404 nếu user không thuộc dự án).
-    - self.capabilities: các capability của user trong dự án.
+    - self.project: organization lấy từ URL (404 nếu user không thuộc organization).
+    - self.capabilities: các capability của user trong organization.
     - required_capabilities: {action hoặc HTTP method: capability}. Khoá "*" là mặc định.
     """
 
     kwargs: dict[str, Any]
     request: Any
-    action: str | None
     capabilities: set[str]
+    permission_classes: Any = [HasProjectCapability]
     required_capabilities: dict[str, Any] = {"*": Cap.VIEW_PROJECT}
-
-    @property
-    def permission_classes(self):
-        return [HasProjectCapability]
 
     def get_serializer_context(self) -> dict[str, Any]:
         parent_fn = getattr(super(), "get_serializer_context", None)
@@ -109,7 +118,7 @@ class ProjectScopedViewMixin:
             self._project = get_object_or_404(Project, pk=self.kwargs["project_id"])
             self.capabilities = get_project_capabilities(self.request.user, self._project)
             if not self.capabilities:
-                raise NotFound()  # Không tiết lộ dự án có tồn tại hay không.
+                raise NotFound()  # Không tiết lộ organization có tồn tại hay không.
         return self._project
 
     @property
@@ -124,21 +133,3 @@ class ProjectScopedViewMixin:
     def has_cap(self, capability):
         self.get_project()
         return capability in self.capabilities
-
-
-class HasProjectCapability(BasePermission):
-    """Permission class của DRF: chặn với 403 nếu thiếu capability cần cho thao tác."""
-
-    message = "Bạn không có quyền thực hiện thao tác này trong dự án."
-
-    def has_permission(self, request: Request, view: APIView) -> Any:
-        if not request.user or not request.user.is_authenticated:
-            return False
-        scoped_view: Any = view
-        scoped_view.get_project()
-        required = scoped_view.get_required_capability()
-        if required is None:
-            return True
-        if isinstance(required, (list, tuple, set)):  # chỉ cần một trong các capability
-            return any(cap in scoped_view.capabilities for cap in required)
-        return required in scoped_view.capabilities

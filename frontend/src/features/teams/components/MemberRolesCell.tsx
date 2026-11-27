@@ -1,40 +1,78 @@
-import { Plus } from '@untitledui/icons'
+import { Minus, Plus } from '@untitledui/icons'
 import { useState } from 'react'
 import { Button as AriaButton, Dialog as AriaDialog, DialogTrigger, Popover } from 'react-aria-components'
-import RoleBadges from '../../../shared/components/RoleBadges'
+import { RoleBadge } from '../../../shared/components/RoleBadges'
 import { useAction } from '../../../shared/hooks/useAction'
-import { GRANTABLE_ROLES, ROLE_LABELS, type Role } from '../../../shared/types/roles'
-import { addMemberRole } from '../../projects/api'
+import { GRANTABLE_ROLES, ROLE_LABELS, ROLE_ORDER, type Role } from '../../../shared/types/roles'
+import { addMemberRole, removeMemberRole } from '../../projects/api'
+import type { RoleState } from '../hooks/useTeamData'
 import { cx } from '@/utils/cx'
 
-interface Props {
+interface Props extends RoleState {
   projectId: number
   userId: number
   userName: string
-  roles: Role[]
-  /** Gọi với danh sách vai trò mới (backend trả về) sau khi gán thành công. */
-  onChange: (roles: Role[]) => void
+  /** Gọi với vai trò mới (backend trả về) sau khi gán / gỡ thành công. */
+  onChange: (state: RoleState) => void
 }
 
 /**
  * Ô "Vai trò": các badge + nút "+" mở popup nhỏ.
- * Bấm một vai trò trong popup → gán cho người này; vai trò đó hiện vào hàng và biến khỏi popup.
+ * - Bấm một vai trò trong popup → gán cho người này; vai trò đó hiện vào hàng và biến khỏi popup.
+ * - Rê chuột vào một badge → hiện nút "−" đỏ ở góc trên bên phải để gỡ vai trò đó.
+ *   Vai trò đi kèm (QC2 của PM) và vai trò PM không có nút gỡ. Backend vẫn kiểm tra lại
+ *   (không gỡ vai trò cuối cùng, không gỡ khi người đó đang giữ việc của vai trò ấy).
  */
-export default function MemberRolesCell({ projectId, userId, userName, roles, onChange }: Props) {
+export default function MemberRolesCell({ projectId, userId, userName, roles, direct_roles, onChange }: Props) {
   const { run } = useAction()
-  const [adding, setAdding] = useState<Role | null>(null)
+  const [busy, setBusy] = useState<Role | null>(null)
   const available = GRANTABLE_ROLES.filter((role) => !roles.includes(role))
 
   async function add(role: Role) {
-    setAdding(role)
+    setBusy(role)
     const result = await run(() => addMemberRole(projectId, userId, role), `Đã gán ${ROLE_LABELS[role]}`)
-    setAdding(null)
-    if (result) onChange(result.roles)
+    setBusy(null)
+    if (result) onChange(result)
   }
+
+  async function remove(role: Role) {
+    setBusy(role)
+    const result = await run(() => removeMemberRole(projectId, userId, role), `Đã gỡ ${ROLE_LABELS[role]} của ${userName}`)
+    setBusy(null)
+    if (result) onChange(result)
+  }
+
+  const shown = ROLE_ORDER.filter((role) => roles.includes(role))
+  const adding = busy !== null && !roles.includes(busy) ? busy : null
 
   return (
     <div className="flex flex-wrap items-center gap-1">
-      <RoleBadges roles={roles} short />
+      {shown.length === 0 && <span className="text-sm text-quaternary">Không có vai trò</span>}
+      {shown.map((role) => {
+        const implied = !direct_roles.includes(role)
+        const removable = GRANTABLE_ROLES.includes(role) && !implied
+        return (
+          <span key={role} className={cx('group/role relative inline-flex', busy === role && 'opacity-50')}
+            title={implied ? 'Đi kèm vai trò PM — không gỡ riêng được' : undefined}>
+            <RoleBadge role={role} short />
+            {removable && (
+              <button
+                type="button"
+                aria-label={`Gỡ vai trò ${ROLE_LABELS[role]} của ${userName}`}
+                title={`Gỡ ${ROLE_LABELS[role]}`}
+                disabled={busy !== null}
+                onClick={(event) => {
+                  event.stopPropagation()
+                  remove(role)
+                }}
+                className="absolute -top-1.5 -right-1.5 flex size-4 cursor-pointer items-center justify-center rounded-full bg-error-solid text-white opacity-0 shadow-xs outline-focus-ring transition-opacity duration-100 group-hover/role:opacity-100 hover:bg-error-solid_hover focus-visible:opacity-100 focus-visible:outline-2 disabled:cursor-wait"
+              >
+                <Minus className="size-3" strokeWidth={3} />
+              </button>
+            )}
+          </span>
+        )
+      })}
       {available.length > 0 && (
         <DialogTrigger>
           <AriaButton

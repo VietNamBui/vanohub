@@ -41,7 +41,7 @@ export default function Qc1WorkPage() {
   const [page, setPage] = useState(1)
   const [version, setVersion] = useState(0)
   const [selectedId, setSelectedId] = useState<number | null>(null)
-  const { run } = useAction()
+  const { run, pending } = useAction()
 
   const jobs = useRequest(`qc1-jobs:${projectId}:${scope}:${tab}:${query}:${page}:${version}`, () =>
     listQc1Jobs(projectId, { scope, tab, search: query || undefined, page }),
@@ -97,7 +97,7 @@ export default function Qc1WorkPage() {
                 </Tabs.List>
               </Tabs>
               <form className="min-w-48 flex-1" onSubmit={(e) => { e.preventDefault(); reset(() => setQuery(search.trim())) }}>
-                <Input size="sm" icon={SearchLg} aria-label="Tìm kiếm" placeholder="Tìm job, batch, annotator… (Enter)" value={search} onChange={setSearch} />
+                <Input size="sm" icon={SearchLg} aria-label="Tìm kiếm" placeholder="Tìm job, task, annotator… (Enter)" value={search} onChange={setSearch} />
               </form>
             </div>
 
@@ -136,9 +136,9 @@ export default function Qc1WorkPage() {
                         {reviewable ? (
                           <div className="flex gap-1.5">
                             {job.status === 'pending_qc1' && (
-                              <Button size="xs" color="secondary" onPress={() => quickStart(job)}>Nhận</Button>
+                              <Button size="xs" color="secondary" isDisabled={pending} onPress={() => quickStart(job)}>Nhận</Button>
                             )}
-                            <Button size="xs" color="secondary" onPress={() => quickPass(job)}>Pass</Button>
+                            <Button size="xs" color="secondary" isDisabled={pending} onPress={() => quickPass(job)}>Pass</Button>
                             <Button size="xs" color="secondary-destructive" onPress={() => setSelectedId(job.id)}>Reject</Button>
                           </div>
                         ) : (

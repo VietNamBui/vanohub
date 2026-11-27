@@ -56,8 +56,6 @@ export const bulkAssign = async (projectId: number, ids: number[], data: AssignI
   (await apiClient.post<{ updated: number }>(p(projectId, 'jobs/bulk-assign/'), { ids, ...data })).data
 export const bulkDeadline = async (projectId: number, ids: number[], deadline: string | null, note = '') =>
   (await apiClient.post<{ updated: number }>(p(projectId, 'jobs/bulk-deadline/'), { ids, deadline, note })).data
-export const bulkMoveBatch = async (projectId: number, ids: number[], batch: number, note = '') =>
-  (await apiClient.post<{ updated: number; batch: number; batch_name: string }>(p(projectId, 'jobs/bulk-move-batch/'), { ids, batch, note })).data
 
 export const getJobQueue = async (projectId: number, batch?: number) =>
   (
@@ -69,16 +67,17 @@ export const getJobQueue = async (projectId: number, batch?: number) =>
 // --- Không gian làm việc Annotator ---
 export const listAnnotatorJobs = async (
   projectId: number,
-  params: { tab?: AnnotatorJobTab; search?: string; page?: number; overdue?: boolean; include_errors?: boolean } = {},
+  params: { tab?: AnnotatorJobTab; search?: string; page?: number; page_size?: number; overdue?: boolean; due_soon?: boolean } = {},
 ) =>
   (
-    await apiClient.get<Paginated<Job | JobDetail>>(p(projectId, 'annotator/jobs/'), {
+    await apiClient.get<Paginated<Job>>(p(projectId, 'annotator/jobs/'), {
       params: cleanParams({
         tab: params.tab === 'all' ? undefined : params.tab,
         search: params.search,
         page: params.page,
+        page_size: params.page_size,
         overdue: params.overdue ? 1 : undefined,
-        include_errors: params.include_errors ? 1 : undefined,
+        due_soon: params.due_soon ? 1 : undefined,
       }),
     })
   ).data
@@ -124,7 +123,7 @@ export const createAnnotatorRequest = async (
 export const resolveAnnotatorRequest = async (
   projectId: number,
   requestId: number,
-  payload: { status: 'pending_pm' | 'resolved' | 'rejected'; progress_note?: string; resolution_note?: string },
+  payload: { status: 'resolved' | 'rejected'; resolution_note: string },
 ) => (await apiClient.post<AnnotatorRequest>(p(projectId, `annotator/requests/${requestId}/resolve/`), payload)).data
 
 export const quickSearchAnnotator = async (projectId: number, q: string) =>

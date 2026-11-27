@@ -6,7 +6,8 @@ from django.db import models
 
 
 class Role(models.TextChoices):
-    """Bốn vai trò nghiệp vụ. Giá trị (vế trái) được lưu trong DB, nhãn (vế phải) để hiển thị."""
+    """Bốn vai trò nghiệp vụ (chốt 2026-11-26: bỏ Director và Team Leader — PM quản lý tất cả).
+    Giá trị (vế trái) được lưu trong DB, nhãn (vế phải) để hiển thị."""
 
     PROJECT_MANAGER = "project_manager", "Project Manager"
     QC2 = "qc2", "QC2 Auditor"
@@ -42,26 +43,30 @@ class User(AbstractUser):
         qc1_jobs: Any
         team_memberships: Any
         notifications: Any
+        cvat_account: Any
+        audit_samples: Any
 
     avatar_url = models.TextField(blank=True, default="")
-    cvat_username = models.CharField(max_length=150, blank=True, default="")
     timezone_name = models.CharField(max_length=64, default="Asia/Ho_Chi_Minh")
     notify_rework = models.BooleanField(default=True)
     notify_deadline = models.BooleanField(default=True)
     notify_request_updates = models.BooleanField(default=True)
     notify_qc_pass = models.BooleanField(default=True)
+    # Mật khẩu tạm do hệ thống sinh khi PM tạo tài khoản, lưu MÃ HOÁ (accounts/credentials.py) để PM
+    # xem lại trong bảng thành viên. Xoá ngay khi người dùng tự đổi mật khẩu.
+    initial_password_encrypted = models.TextField(blank=True, default="")
 
     def is_pm(self):
         return self.is_superuser or self.role_assignments.filter(role=Role.PROJECT_MANAGER).exists()
 
     def get_project_roles(self, project):
-        """Vai trò có hiệu lực của user trong một dự án (đã tính vai trò kéo theo)."""
+        """Vai trò có hiệu lực của user trong một organization (đã tính vai trò kéo theo)."""
         direct = self.role_assignments.filter(project=project).values_list("role", flat=True)
         return expand_roles(direct)
 
 
 class RoleAssignment(models.Model):
-    """Gán một vai trò cho một user trong một dự án.
+    """Gán một vai trò cho một user trong một organization (model Project).
 
     Một user có nhiều vai trò thì có nhiều dòng RoleAssignment.
     Chỉ lưu vai trò gán trực tiếp; vai trò kéo theo (PM → QC2) được tính trong code,
@@ -90,11 +95,8 @@ class RoleAssignment(models.Model):
 
     class Meta:
         constraints = [
-            # Không gán trùng cùng một vai trò trong cùng một dự án.
-            models.UniqueConstraint(
-                fields=["user", "role", "project"],
-                name="unique_role_per_scope",
-            ),
+            # Không gán trùng cùng một vai trò trong cùng một organization.
+            models.UniqueConstraint(fields=["user", "role", "project"], name="unique_role_per_project"),
         ]
 
     if TYPE_CHECKING:

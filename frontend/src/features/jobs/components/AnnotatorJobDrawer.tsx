@@ -3,6 +3,7 @@ import { useEffect } from 'react'
 import { Link } from 'react-router'
 import { Badge, BadgeWithDot } from '@/components/base/badges/badges'
 import { Button } from '@/components/base/buttons/button'
+import { ProgressBarBase } from '@/components/base/progress-indicators/progress-indicators'
 import { getErrorMessage } from '../../../shared/api/errors'
 import PageState from '../../../shared/components/ui/PageState'
 import { useRequest } from '../../../shared/hooks/useRequest'
@@ -10,6 +11,7 @@ import { formatDateTime, formatNumber } from '../../../shared/utils/format'
 import { getAnnotatorJob } from '../api'
 import { ACTION_LABELS, formatDeadlineCountdown, JOB_STATUS_LABELS } from '../constants'
 import type { JobStatus } from '../types'
+import JobStatusBadge from './JobStatusBadge'
 
 interface Props {
   projectId: number
@@ -23,7 +25,7 @@ const SEVERITY_COLOR: Record<string, 'gray' | 'warning' | 'error'> = {
   critical: 'error',
 }
 
-/** Drawer trượt phải 560px xem nhanh chi tiết job (L13 lịch sử xử lý, L7 lỗi theo object-frame, Mở trên CVAT). */
+/** Drawer trượt phải xem nhanh chi tiết job: tiến độ, lịch sử xử lý, lỗi theo object-frame và liên kết CVAT. */
 export default function AnnotatorJobDrawer({ projectId, jobId, onClose }: Props) {
   const { data: job, error, isLoading, retry } = useRequest(
     jobId ? `annotator-job-drawer:${projectId}:${jobId}` : 'annotator-job-drawer:none',
@@ -43,22 +45,24 @@ export default function AnnotatorJobDrawer({ projectId, jobId, onClose }: Props)
 
   const countdown = formatDeadlineCountdown(job?.hours_remaining)
   const volume = job ? job.target_object_count || job.object_count : 0
-  const statusColor =
-    job?.status === 'rework' ? 'warning' : job?.status === 'annotating' ? 'blue' : job?.status === 'approved' || job?.status === 'delivered' ? 'success' : 'gray'
+  const progressPct = job?.progress_percent ?? 0
 
   return (
     <div className="fixed inset-0 z-50 flex justify-end" role="dialog" aria-modal="true" aria-label={job?.name ?? 'Chi tiết Job'}>
-      <div className="fixed inset-0 bg-[#0C111D]/70 backdrop-blur-[2px]" onClick={onClose} />
+      <div className="fixed inset-0 bg-overlay/70 backdrop-blur-[2px]" onClick={onClose} />
 
-      <aside className="relative z-10 flex h-full w-full max-w-[560px] flex-col border-l border-[#EAECF0] bg-white shadow-2xl">
-        <div className="flex items-center justify-between border-b border-[#EAECF0] px-6 py-5">
+      <aside className="relative z-10 flex h-full w-full max-w-[560px] flex-col border-l border-secondary bg-primary shadow-2xl">
+        <div className="flex items-center justify-between gap-3 border-b border-secondary px-6 py-5">
           <div className="flex flex-wrap items-center gap-2.5">
-            <h2 className="text-xl font-bold text-[#101828]">{job?.name ?? 'Chi tiết job'}</h2>
+            <h2 className="text-lg font-semibold text-primary">{job?.name ?? 'Chi tiết job'}</h2>
             {job && (
               <>
-                <BadgeWithDot size="sm" type="pill-color" color={statusColor}>
-                  {job.status === 'rework' ? 'Cần sửa' : job.status === 'annotating' ? 'Đang làm' : JOB_STATUS_LABELS[job.status]}
-                </BadgeWithDot>
+                <JobStatusBadge
+                  status={job.status}
+                  escalated={job.is_escalated}
+                  overdue={job.is_overdue}
+                  locked={job.is_locked}
+                />
                 {job.rework_round > 0 && (
                   <Badge size="sm" type="pill-color" color="warning">
                     Vòng sửa {job.rework_round}/{job.max_rework_rounds}
@@ -67,14 +71,7 @@ export default function AnnotatorJobDrawer({ projectId, jobId, onClose }: Props)
               </>
             )}
           </div>
-          <button
-            type="button"
-            onClick={onClose}
-            aria-label="Đóng"
-            className="flex size-8 cursor-pointer items-center justify-center rounded-lg text-[#98A2B3] hover:bg-[#F9FAFB] hover:text-[#475467]"
-          >
-            <XClose className="size-5" />
-          </button>
+          <Button color="tertiary" size="sm" iconLeading={XClose} aria-label="Đóng" onPress={onClose} />
         </div>
 
         <div className="flex-1 overflow-y-auto px-6 py-5">
@@ -85,8 +82,8 @@ export default function AnnotatorJobDrawer({ projectId, jobId, onClose }: Props)
           ) : job ? (
             <div className="flex flex-col gap-6">
               <dl className="grid grid-cols-2 gap-x-6 gap-y-4">
-                <MetaField label="Dataset" value={job.dataset_name} />
-                <MetaField label="Batch" value={job.batch_name} />
+                <MetaField label="Project" value={job.dataset_name} />
+                <MetaField label="Task" value={job.batch_name ?? '—'} />
                 <MetaField label="Người đang giữ" value={job.annotator ? `${job.annotator.full_name} (Annotator)` : 'Chưa giao'} />
                 <MetaField
                   label="Deadline"
@@ -97,13 +94,19 @@ export default function AnnotatorJobDrawer({ projectId, jobId, onClose }: Props)
                   }
                 />
                 <MetaField label="Khối lượng" value={`${formatNumber(volume)} object-frame`} />
-                <MetaField label="Tiến độ Anno (TD03)" value={`${job.progress_percent ?? 0}%`} />
+                <div>
+                  <dt className="text-xs text-tertiary">Tiến độ gán nhãn</dt>
+                  <dd className="mt-1 flex items-center gap-2.5">
+                    <ProgressBarBase value={progressPct} />
+                    <span className="shrink-0 text-xs font-semibold text-secondary tabular-nums">{progressPct}%</span>
+                  </dd>
+                </div>
               </dl>
 
-              <section className="border-t border-[#EAECF0] pt-5">
-                <h3 className="text-sm font-bold text-[#101828]">Lịch sử xử lý (L13)</h3>
+              <section className="border-t border-secondary pt-5">
+                <h3 className="text-sm font-semibold text-primary">Lịch sử xử lý</h3>
                 {job.timeline.length === 0 ? (
-                  <p className="mt-2 text-sm text-[#667085]">Chưa có lịch sử xử lý.</p>
+                  <p className="mt-2 text-sm text-tertiary">Chưa có lịch sử xử lý.</p>
                 ) : (
                   <ol className="mt-4 flex flex-col">
                     {job.timeline.map((ev, i) => {
@@ -112,22 +115,22 @@ export default function AnnotatorJobDrawer({ projectId, jobId, onClose }: Props)
                       return (
                         <li key={ev.id} className="relative flex gap-3 pb-5 last:pb-0">
                           {i < job.timeline.length - 1 && (
-                            <span className="absolute top-3.5 bottom-0 left-[6px] w-px bg-[#EAECF0]" />
+                            <span className="absolute top-3.5 bottom-0 left-[6px] w-px bg-border-secondary" />
                           )}
                           <span
                             className={`mt-1 size-3.5 shrink-0 rounded-full ${
-                              isLatest ? 'border border-[#D0D5DD] bg-white' : 'bg-[#7F56D9]'
+                              isLatest ? 'border border-primary bg-primary' : 'bg-brand-solid'
                             }`}
                           />
                           <div className="min-w-0">
-                            <p className="text-sm font-medium text-[#101828]">
+                            <p className="text-sm font-medium text-primary">
                               {ACTION_LABELS[ev.action] ?? ev.action}
                               {nextStatus ? ` → ${JOB_STATUS_LABELS[nextStatus] ?? nextStatus}` : ''}
                             </p>
-                            <p className="text-xs text-[#667085]">
+                            <p className="text-xs text-tertiary">
                               {ev.actor?.full_name ?? 'Hệ thống'} · {formatDateTime(ev.created_at)}
                             </p>
-                            {ev.note && <p className="mt-0.5 text-xs text-[#475467]">{ev.note}</p>}
+                            {ev.note && <p className="mt-0.5 text-xs text-secondary">{ev.note}</p>}
                           </div>
                         </li>
                       )
@@ -136,10 +139,10 @@ export default function AnnotatorJobDrawer({ projectId, jobId, onClose }: Props)
                 )}
               </section>
 
-              <section className="border-t border-[#EAECF0] pt-5">
-                <h3 className="text-sm font-bold text-[#101828]">Lỗi đã ghi theo object-frame (L7)</h3>
+              <section className="border-t border-secondary pt-5">
+                <h3 className="text-sm font-semibold text-primary">Lỗi đã ghi theo object-frame</h3>
                 {job.errors.length === 0 ? (
-                  <p className="mt-2 text-sm text-[#667085]">Chưa có lỗi nào được ghi nhận.</p>
+                  <p className="mt-2 text-sm text-tertiary">Chưa có lỗi nào được ghi nhận.</p>
                 ) : (
                   <ul className="mt-3 flex flex-col gap-2.5">
                     {job.errors.map((e) => (
@@ -147,21 +150,21 @@ export default function AnnotatorJobDrawer({ projectId, jobId, onClose }: Props)
                         <BadgeWithDot size="sm" type="pill-color" color={SEVERITY_COLOR[e.severity] ?? 'warning'}>
                           {e.category}
                         </BadgeWithDot>
-                        <span className="text-xs text-[#667085]">{e.location || `Vòng ${e.rework_round}`}</span>
+                        <span className="text-xs text-tertiary">{e.location || `Vòng ${e.rework_round}`}</span>
                       </li>
                     ))}
                   </ul>
                 )}
               </section>
 
-              <p className="text-xs text-[#667085]">
-                Phạm vi xem theo vai trò (PQ01) · thao tác trên CVAT được ghi log.
+              <p className="text-xs text-tertiary">
+                Phạm vi xem theo vai trò · thao tác trên CVAT được ghi log.
               </p>
             </div>
           ) : null}
         </div>
 
-        <footer className="flex items-center justify-between gap-3 border-t border-[#EAECF0] px-6 py-4">
+        <footer className="flex items-center justify-between gap-3 border-t border-secondary px-6 py-4">
           <div className="flex items-center gap-2">
             <Button color="secondary" size="md" onPress={onClose}>
               Đóng
@@ -170,7 +173,7 @@ export default function AnnotatorJobDrawer({ projectId, jobId, onClose }: Props)
               <Link
                 to={`/projects/${projectId}/annotator/jobs/${job.id}`}
                 onClick={onClose}
-                className="inline-flex items-center rounded-lg px-3 py-2 text-sm font-semibold text-[#6941C6] hover:bg-[#F9F5FF]"
+                className="inline-flex items-center rounded-lg px-3 py-2 text-sm font-semibold text-brand-secondary transition hover:bg-brand-primary"
               >
                 Mở trang chi tiết
               </Link>
@@ -201,8 +204,8 @@ export default function AnnotatorJobDrawer({ projectId, jobId, onClose }: Props)
 function MetaField({ label, value }: { label: string; value: string }) {
   return (
     <div>
-      <dt className="text-xs text-[#667085]">{label}</dt>
-      <dd className="mt-0.5 text-sm text-[#101828]">{value}</dd>
+      <dt className="text-xs text-tertiary">{label}</dt>
+      <dd className="mt-0.5 text-sm font-medium text-primary">{value}</dd>
     </div>
   )
 }

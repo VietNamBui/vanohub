@@ -1,50 +1,55 @@
-import type { ReactNode } from 'react'
+import { Suspense, type ReactNode } from 'react'
 import { createBrowserRouter } from 'react-router'
-import AccountSettingsPage from '../features/accounts/AccountSettingsPage'
-import AnnotatorAnalyticsPage from '../features/analytics/AnnotatorAnalyticsPage'
-import LoginPage from '../features/auth/LoginPage'
 import RequireAuth from '../features/auth/RequireAuth'
-import CvatLinkPage from '../features/cvat/pages/CvatLinkPage'
-import AnnotatorDashboardPage from '../features/jobs/pages/AnnotatorDashboardPage'
-import AnnotatorJobDetailPage from '../features/jobs/pages/AnnotatorJobDetailPage'
-import AnnotatorJobsPage from '../features/jobs/pages/AnnotatorJobsPage'
-import AnnotatorRequestsPage from '../features/jobs/pages/AnnotatorRequestsPage'
-import AnnotatorReworkPage from '../features/jobs/pages/AnnotatorReworkPage'
-import JobsPage from '../features/jobs/pages/JobsPage'
-import QueuePage from '../features/jobs/pages/QueuePage'
 import HomeRedirect from '../features/projects/HomeRedirect'
-import AnnouncementsPage from '../features/projects/pages/AnnouncementsPage'
-import BatchesPage from '../features/projects/pages/BatchesPage'
-import DatasetsPage from '../features/projects/pages/DatasetsPage'
-import DeliveryPage from '../features/projects/pages/DeliveryPage'
-import GuidelinesPage from '../features/projects/pages/GuidelinesPage'
-import OverviewPage from '../features/projects/pages/OverviewPage'
-import ProjectListPage from '../features/projects/pages/ProjectListPage'
-import TeamRankingPage from '../features/projects/pages/TeamRankingPage'
 import ProjectLayout from '../features/projects/ProjectLayout'
 import { ProjectIndexRedirect, RequireCap } from '../features/projects/RequireCap'
-import ErrorCategoriesPage from '../features/quality/pages/ErrorCategoriesPage'
-import Qc1DashboardPage from '../features/quality/qc1/Qc1DashboardPage'
-import Qc1WorkPage from '../features/quality/qc1/Qc1WorkPage'
-import AuditsPage from '../features/quality/qc2/AuditsPage'
-import AuditStrategyPage from '../features/quality/qc2/AuditStrategyPage'
-import AuditWorkPage from '../features/quality/qc2/AuditWorkPage'
-import Qc2DashboardPage from '../features/quality/qc2/Qc2DashboardPage'
-import TeamDetailPage from '../features/teams/pages/TeamDetailPage'
-import TeamsPage from '../features/teams/pages/TeamsPage'
-import WorkloadPage from '../features/teams/pages/WorkloadPage'
 import MainLayout from '../layouts/MainLayout'
 import StateView from '../shared/components/StateView'
+import PageState from '../shared/components/ui/PageState'
 import type { Capability } from '../shared/types/capabilities'
+import {
+  AccountSettingsPage,
+  AnnouncementsPage,
+  AnnotatorAnalyticsPage,
+  AnnotatorDashboardPage,
+  AnnotatorJobDetailPage,
+  AnnotatorJobsPage,
+  AnnotatorRequestsPage,
+  AnnotatorReworkPage,
+  AuditsPage,
+  AuditStrategyPage,
+  AuditWorkPage,
+  BatchesPage,
+  CvatLinkPage,
+  DatasetsPage,
+  DeliveryPage,
+  ErrorCategoriesPage,
+  GuidelinesPage,
+  JobsPage,
+  LoginPage,
+  OverviewPage,
+  ProjectListPage,
+  Qc1DashboardPage,
+  Qc1WorkPage,
+  Qc2DashboardPage,
+  QueuePage,
+  TeamDetailPage,
+  TeamRankingPage,
+  TeamsPage,
+  WorkloadPage,
+} from './lazyPages'
 
-/** Route trong dự án, kèm capability cần có (khớp với capability backend kiểm tra ở API tương ứng). */
+const page = (element: ReactNode) => <Suspense fallback={<PageState kind="loading" />}>{element}</Suspense>
+
+/** Route trong organization, kèm capability cần có (khớp với capability backend kiểm tra ở API tương ứng). */
 const guarded = (path: string, cap: Capability | Capability[], element: ReactNode) => ({
   path,
-  element: <RequireCap cap={cap}>{element}</RequireCap>,
+  element: <RequireCap cap={cap}>{page(element)}</RequireCap>,
 })
 
 export const router = createBrowserRouter([
-  { path: '/login', element: <LoginPage /> },
+  { path: '/login', element: page(<LoginPage />) },
   {
     element: <RequireAuth />,
     children: [
@@ -53,8 +58,9 @@ export const router = createBrowserRouter([
         element: <MainLayout />,
         children: [
           { index: true, element: <HomeRedirect /> },
-          { path: 'projects', element: <ProjectListPage /> },
-          { path: 'account/settings', element: <AccountSettingsPage /> },
+          { path: 'projects', element: page(<ProjectListPage />) },
+          { path: 'cvat-link', element: page(<CvatLinkPage />) },
+          { path: 'account/settings', element: page(<AccountSettingsPage />) },
           {
             path: 'projects/:projectId',
             element: <ProjectLayout />,
@@ -82,8 +88,8 @@ export const router = createBrowserRouter([
               guarded('annotator/rework', 'annotate_jobs', <AnnotatorReworkPage />),
               guarded('annotator/requests', ['annotate_jobs', 'manage_jobs'], <AnnotatorRequestsPage />),
               guarded('error-categories', 'manage_quality_catalog', <ErrorCategoriesPage />),
-              guarded('guidelines', 'view_guidelines', <GuidelinesPage />),
               guarded('delivery', 'manage_delivery', <DeliveryPage />),
+              guarded('guidelines', 'view_guidelines', <GuidelinesPage />),
               guarded('cvat-link', 'view_project', <CvatLinkPage />),
               guarded('announcements', 'view_project', <AnnouncementsPage />),
               guarded('account/settings', 'view_project', <AccountSettingsPage />),

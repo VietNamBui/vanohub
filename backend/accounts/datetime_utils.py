@@ -1,4 +1,4 @@
-"""Tiện ích chuẩn hóa ngày giờ lấy backend/config/settings.py làm gốc.
+"""Tiện ích chuẩn hóa ngày giờ (Asia/Ho_Chi_Minh + RFC 3339 UTC) và kiểm tra tham số số nguyên.
 
 - Lưu trữ DB theo UTC (TIME_ZONE='UTC', USE_TZ=True), đồng nhất với PostgreSQL & ClickHouse của CVAT.
 - Đầu vào/đầu ra API datetime tuân thủ chặt RFC 3339 (ISO 8601 kèm múi giờ Z hoặc ±HH:MM).
@@ -18,6 +18,8 @@ from django.utils import timezone
 from rest_framework import serializers
 from rest_framework.exceptions import ValidationError
 
+PG_INT32_MAX = 2_147_483_647
+
 # RFC 3339 Section 5.6 (strict): YYYY-MM-DDTHH:MM:SS[.fraction](Z|±HH:MM)
 RFC3339_DATETIME_RE = re.compile(
     r"^\d{4}-\d{2}-\d{2}[Tt]\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?(?:[Zz]|[+-]\d{2}:\d{2})$"
@@ -33,6 +35,39 @@ def app_timezone_name() -> str:
 def app_timezone() -> ZoneInfo:
     """Múi giờ nghiệp vụ cố định của hệ thống (Asia/Ho_Chi_Minh)."""
     return ZoneInfo(app_timezone_name())
+
+
+def local_now() -> datetime:
+    return timezone.localtime(timezone.now(), app_timezone())
+
+
+def local_datetime(value: datetime) -> datetime:
+    if timezone.is_naive(value):
+        value = timezone.make_aware(value, app_timezone())
+    return timezone.localtime(value, app_timezone())
+
+
+def local_date(value: datetime | None = None) -> date:
+    return local_datetime(value or timezone.now()).date()
+
+
+def format_local_datetime(value: datetime | None, fmt: str = "%d/%m %H:%M") -> str:
+    if value is None:
+        return ""
+    return local_datetime(value).strftime(fmt)
+
+
+def parse_int_param(raw: Any, field_name: str, *, min_value: int = 1, max_value: int = PG_INT32_MAX) -> int:
+    """Parse tham số số nguyên an toàn; trả 400 ValidationError thay vì 500 ValueError/DataError."""
+    if isinstance(raw, bool):
+        raise ValidationError({field_name: "Giá trị phải là số nguyên hợp lệ."})
+    try:
+        value = int(str(raw).strip())
+    except (TypeError, ValueError) as exc:
+        raise ValidationError({field_name: "Giá trị phải là số nguyên hợp lệ."}) from exc
+    if value < min_value or value > max_value:
+        raise ValidationError({field_name: f"Giá trị phải nằm trong khoảng {min_value}..{max_value}."})
+    return value
 
 
 def format_rfc3339_utc(value: datetime | None) -> str | None:

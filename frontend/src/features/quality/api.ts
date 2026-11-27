@@ -3,9 +3,6 @@ import { cleanParams, type Paginated } from '../../shared/api/types'
 import type { Job, JobDetail, ReworkScope } from '../jobs/types'
 import type {
   Audit,
-  AuditCompleteInput,
-  AuditInput,
-  AuditPreview,
   AuditSample,
   AuditStrategy,
   ErrorCategory,
@@ -18,23 +15,36 @@ import type {
 
 const p = (projectId: number, path: string) => `/projects/${projectId}/${path}`
 
-// --- Danh mục lỗi ---
+function serializeErrorInput(error: ErrorInput): ErrorInput {
+  const isMissingObject = Boolean(error.is_missing_object)
+  return {
+    category: error.category,
+    severity: error.severity,
+    verdict: isMissingObject ? 'fail' : (error.verdict ?? 'fail'),
+    frame_number: error.frame_number ?? null,
+    cvat_object_id: isMissingObject ? null : (error.cvat_object_id ?? null),
+    is_missing_object: isMissingObject,
+    location: error.location ?? '',
+    description: error.description ?? '',
+  }
+}
+
+// --- Danh mục lỗi (QC1 & QC2 chọn khi Reject; giữ CRUD trong Hybrid để kiểm tra) ---
 export const listErrorCategories = async (projectId: number, stage?: 'qc1' | 'qc2') =>
   (await apiClient.get<ErrorCategory[]>(p(projectId, 'error-categories/'), { params: cleanParams({ stage }) })).data
-export const createErrorCategory = async (projectId: number, data: Partial<ErrorCategory>) =>
-  (await apiClient.post<ErrorCategory>(p(projectId, 'error-categories/'), data)).data
-export const updateErrorCategory = async (projectId: number, id: number, data: Partial<ErrorCategory>) =>
-  (await apiClient.patch<ErrorCategory>(p(projectId, `error-categories/${id}/`), data)).data
+export const createErrorCategory = async (
+  projectId: number,
+  data: Partial<ErrorCategory>,
+) => (await apiClient.post<ErrorCategory>(p(projectId, 'error-categories/'), data)).data
+export const updateErrorCategory = async (
+  projectId: number,
+  categoryId: number,
+  data: Partial<ErrorCategory>,
+) => (await apiClient.patch<ErrorCategory>(p(projectId, `error-categories/${categoryId}/`), data)).data
 
 // --- Audit (quản lý) ---
 export const listAudits = async (projectId: number, params: { status?: string; batch?: number } = {}) =>
   (await apiClient.get<Audit[]>(p(projectId, 'audits/'), { params: cleanParams(params) })).data
-export const previewAudit = async (projectId: number, data: AuditInput) =>
-  (await apiClient.post<AuditPreview>(p(projectId, 'audits/preview/'), data)).data
-export const createAudit = async (projectId: number, data: AuditInput) =>
-  (await apiClient.post<Audit>(p(projectId, 'audits/'), data)).data
-export const completeAudit = async (projectId: number, auditId: number, payload: AuditCompleteInput = { decision: 'accept' }) =>
-  (await apiClient.post<Audit>(p(projectId, `audits/${auditId}/complete/`), payload)).data
 
 // --- Mẫu audit (thực hiện QC2) ---
 export const listAuditSamples = async (
@@ -48,8 +58,21 @@ export const listAuditSamples = async (
   ).data
 export const passSample = async (projectId: number, sampleId: number, comment = '') =>
   (await apiClient.post<AuditSample>(p(projectId, `audit-samples/${sampleId}/pass/`), { comment })).data
-export const rejectSample = async (projectId: number, sampleId: number, errors: ErrorInput[], comment = '') =>
-  (await apiClient.post<AuditSample>(p(projectId, `audit-samples/${sampleId}/reject/`), { errors, comment })).data
+export const rejectSample = async (
+  projectId: number,
+  sampleId: number,
+  errors: ErrorInput[],
+  comment = '',
+  rework_scope: ReworkScope = 'partial',
+) =>
+  (
+    await apiClient.post<AuditSample>(p(projectId, `audit-samples/${sampleId}/reject/`), {
+      errors: errors.map(serializeErrorInput),
+      comment,
+      rework_scope,
+    })
+  ).data
+export const rejectAuditSample = rejectSample
 export const assignSampleAuditor = async (projectId: number, sampleId: number, auditor: number) =>
   (await apiClient.post<AuditSample>(p(projectId, `audit-samples/${sampleId}/assign/`), { auditor })).data
 
@@ -62,7 +85,7 @@ export const getAuditStrategy = async (projectId: number) =>
 // --- Level 1 QC (QC1) ---
 export const listQc1Jobs = async (
   projectId: number,
-  params: { scope?: Qc1Scope; tab?: Qc1JobTab; search?: string; page?: number; overdue?: boolean; due_soon?: boolean } = {},
+  params: { scope?: Qc1Scope; tab?: Qc1JobTab; search?: string; page?: number; page_size?: number; overdue?: boolean } = {},
 ) =>
   (
     await apiClient.get<Paginated<Job>>(p(projectId, 'qc1/jobs/'), {
@@ -71,8 +94,8 @@ export const listQc1Jobs = async (
         tab: params.tab === 'all' ? undefined : params.tab,
         search: params.search,
         page: params.page,
+        page_size: params.page_size,
         overdue: params.overdue ? 1 : undefined,
-        due_soon: params.due_soon ? 1 : undefined,
       }),
     })
   ).data
@@ -91,13 +114,13 @@ export const rejectQc1Job = async (
   jobId: number,
   errors: ErrorInput[],
   comment = '',
-  reworkScope: ReworkScope = 'partial',
+  rework_scope: ReworkScope = 'partial',
 ) =>
   (
     await apiClient.post<JobDetail>(p(projectId, `qc1/jobs/${jobId}/reject/`), {
-      errors,
+      errors: errors.map(serializeErrorInput),
       comment,
-      rework_scope: reworkScope,
+      rework_scope,
     })
   ).data
 

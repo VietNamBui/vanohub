@@ -1,9 +1,7 @@
-import { AlertTriangle, XClose } from '@untitledui/icons'
 import { useState } from 'react'
-import { Dialog, Modal, ModalOverlay } from '@/components/application/modals/modal'
-import { Button } from '@/components/base/buttons/button'
 import { Input } from '@/components/base/input/input'
 import { TextArea } from '@/components/base/textarea/textarea'
+import FormDialog from '../../../shared/components/ui/FormDialog'
 import { useAction } from '../../../shared/hooks/useAction'
 import { createAnnotatorRequest } from '../api'
 
@@ -16,27 +14,19 @@ interface Props {
   onSubmitted?: () => void
 }
 
-/** Modal "Báo vấn đề dữ liệu" (Dữ liệu bị chặn — gửi PM xử lý và theo dõi ở Yêu cầu của tôi / TD13). */
+/** Hộp thoại báo vấn đề dữ liệu — gửi tới Project Manager xử lý và theo dõi ở Yêu cầu của tôi. */
 export default function ReportDataIssueModal(props: Props) {
-  return (
-    <ModalOverlay isOpen={props.isOpen} onOpenChange={(open) => !open && props.onClose()} isDismissable>
-      <Modal className="max-w-[564px]">
-        <Dialog aria-label="Báo vấn đề dữ liệu">
-          {props.isOpen && <ReportDataIssueForm key={props.jobId} {...props} />}
-        </Dialog>
-      </Modal>
-    </ModalOverlay>
-  )
+  if (!props.isOpen) return null
+  return <ReportDataIssueForm key={props.jobId} {...props} />
 }
 
-function ReportDataIssueForm({ projectId, jobId, jobName, onClose, onSubmitted }: Props) {
+function ReportDataIssueForm({ isOpen, projectId, jobId, jobName, onClose, onSubmitted }: Props) {
   const { run, pending } = useAction()
   const [title, setTitle] = useState('')
   const [reason, setReason] = useState('')
   const [validationError, setValidationError] = useState<string | null>(null)
 
-  async function handleSubmit(e: React.FormEvent) {
-    e.preventDefault()
+  async function handleSubmit() {
     if (reason.trim().length < 3) {
       setValidationError('Vui lòng mô tả chi tiết sự cố dữ liệu và các frame bị ảnh hưởng.')
       return
@@ -50,7 +40,7 @@ function ReportDataIssueForm({ projectId, jobId, jobName, onClose, onSubmitted }
           title: title.trim() || reason.trim().slice(0, 120),
           reason: reason.trim(),
         }),
-      'Đã gửi báo cáo vấn đề dữ liệu tới PM',
+      'Đã gửi báo cáo vấn đề dữ liệu tới Project Manager',
     )
     if (ok) {
       onSubmitted?.()
@@ -59,30 +49,15 @@ function ReportDataIssueForm({ projectId, jobId, jobName, onClose, onSubmitted }
   }
 
   return (
-    <form onSubmit={handleSubmit} className="flex flex-col gap-5 p-6">
-      <div className="flex items-start justify-between">
-        <span className="flex size-12 items-center justify-center rounded-full bg-[#FFFAEB]">
-          <span className="flex size-9 items-center justify-center rounded-full bg-[#FEDF89] text-[#B54708]">
-            <AlertTriangle className="size-5" />
-          </span>
-        </span>
-        <button
-          type="button"
-          onClick={onClose}
-          aria-label="Đóng"
-          className="flex size-8 cursor-pointer items-center justify-center rounded-lg text-[#98A2B3] hover:bg-[#F9FAFB] hover:text-[#475467]"
-        >
-          <XClose className="size-5" />
-        </button>
-      </div>
-
-      <div>
-        <h2 className="text-lg font-bold text-[#101828]">Báo vấn đề dữ liệu</h2>
-        <p className="mt-1 text-sm text-[#475467]">
-          {jobName} · Báo cáo dữ liệu hỏng / mờ point cloud sẽ được chuyển tới PM để kiểm tra và thay thế.
-        </p>
-      </div>
-
+    <FormDialog
+      isOpen={isOpen}
+      onClose={onClose}
+      title="Báo vấn đề dữ liệu"
+      description={`${jobName} · Báo cáo dữ liệu hỏng / mờ point cloud sẽ được chuyển tới Project Manager để kiểm tra và thay thế.`}
+      submitLabel="Gửi báo cáo"
+      onSubmit={handleSubmit}
+      pending={pending}
+    >
       <div className="flex flex-col gap-4">
         <Input
           label="Tóm tắt vấn đề *"
@@ -104,15 +79,6 @@ function ReportDataIssueForm({ projectId, jobId, jobName, onClose, onSubmitted }
           hint={validationError ?? undefined}
         />
       </div>
-
-      <div className="flex items-center justify-end gap-3 pt-1">
-        <Button color="secondary" size="md" onPress={onClose}>
-          Hủy
-        </Button>
-        <Button type="submit" color="primary" size="md" isLoading={pending}>
-          Gửi báo cáo
-        </Button>
-      </div>
-    </form>
+    </FormDialog>
   )
 }

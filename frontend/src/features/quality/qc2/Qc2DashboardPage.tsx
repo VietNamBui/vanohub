@@ -27,7 +27,7 @@ const KPI_ROWS: { key: keyof Qc2Window; label: string; format?: (v: number | nul
 ]
 
 /**
- * QC2-01 Tổng quan QC2. QC2 chuyên trách xem số liệu của mình; PM (kiêm QC2) chọn được "Toàn dự án".
+ * Tổng quan QC2. QC2 chuyên trách xem số liệu của mình; PM (kiêm QC2) chọn được "Toàn organization".
  * "Lỗi QC1 bỏ sót" = mọi lỗi QC2 ghi nhận (job đã qua QC1). % lỗi trong job, tốc độ audit: chưa chốt công thức.
  */
 export default function Qc2DashboardPage() {
@@ -45,14 +45,14 @@ export default function Qc2DashboardPage() {
         <div>
           <h1 className="text-display-xs font-semibold text-primary">Tổng quan QC2</h1>
           <p className="mt-1 text-sm text-tertiary">
-            {scope === 'mine' ? 'Số liệu audit của bạn' : 'Số liệu audit toàn dự án'} · {project.name}
+            {scope === 'mine' ? 'Số liệu audit của bạn' : 'Số liệu audit toàn organization'} · {project.name}
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-3">
           {isManager && (
             <Tabs selectedKey={scope} onSelectionChange={(k) => setScope(k as typeof scope)} className="w-auto">
               <Tabs.List type="button-border" size="sm" aria-label="Phạm vi">
-                <Tabs.Item id="project" label="Toàn dự án" />
+                <Tabs.Item id="project" label="Toàn organization" />
                 <Tabs.Item id="mine" label="Của tôi" />
               </Tabs.List>
             </Tabs>
@@ -113,15 +113,17 @@ export default function Qc2DashboardPage() {
           </SectionCard>
 
           <div className="grid gap-5 lg:grid-cols-2">
-            <SectionCard title="Tiến độ job audit theo batch" description="Mẫu đã có kết quả / tổng mẫu được giao.">
+            <SectionCard title="Tiến độ QC2 theo task" description="Mẫu đã có kết quả / tổng mẫu được giao.">
               {data.progress_by_batch.length === 0 ? (
                 <PageState kind="empty" title="Chưa có mẫu audit" />
               ) : (
                 <ul className="flex flex-col gap-4">
-                  {data.progress_by_batch.map((b) => (
-                    <li key={b.batch}>
+                  {data.progress_by_batch.map((b, idx) => (
+                    <li key={b.batch_id ?? `${b.batch}-${idx}`}>
                       <div className="mb-1.5 flex justify-between text-sm">
-                        <span className="font-medium text-secondary">{b.batch}</span>
+                        <span className="font-medium text-secondary">
+                          {b.dataset_name ? `${b.dataset_name} / ${b.batch}` : b.batch}
+                        </span>
                         <span className="text-tertiary tabular-nums">{b.done}/{b.total} mẫu</span>
                       </div>
                       <ProgressBar value={b.total ? (b.done * 100) / b.total : 0} />
@@ -135,7 +137,7 @@ export default function Qc2DashboardPage() {
               <div className="grid grid-cols-2 gap-3">
                 <StatCard value={data.reworked_after_audit} label="Số job trả rework" />
                 <StatCard value={data.qc1_missed_errors} label="Lỗi QC1 bỏ sót (phát hiện ở QC2)" />
-                <MetricCard metric={data.error_percent_in_job} label="% lỗi trong job" />
+                <MetricCard metric={data.error_percent_in_job} label="% lỗi trong job" suffix="%" />
                 <MetricCard metric={data.audit_speed} label="Tốc độ audit (job / giờ)" />
               </div>
             </SectionCard>
@@ -205,7 +207,7 @@ function exportCsv(data: Qc2Summary, projectName: string, periodLabel: string) {
     ['Ngày', 'Đã audit', 'Reject', 'Lỗi ghi nhận'],
     ...data.trend.map((d) => [d.date, d.audited, d.rejected, d.errors]),
     [],
-    ['Batch', 'Mẫu đã có kết quả', 'Tổng mẫu'],
+    ['Task', 'Lượt đã có kết quả', 'Tổng lượt QC2'],
     ...data.progress_by_batch.map((b) => [b.batch, b.done, b.total]),
   ]
   const csv = rows.map((r) => r.map((c) => `"${String(c).replace(/"/g, '""')}"`).join(',')).join('\r\n')

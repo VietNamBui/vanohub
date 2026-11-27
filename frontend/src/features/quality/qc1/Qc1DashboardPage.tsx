@@ -40,14 +40,14 @@ export default function Qc1DashboardPage() {
         <div>
           <h1 className="text-display-xs font-semibold text-primary">Tổng quan QC1</h1>
           <p className="mt-1 text-sm text-tertiary">
-            {scope === 'mine' ? 'Số liệu kiểm tra QC1 của bạn' : 'Số liệu kiểm tra QC1 toàn dự án'} · {project.name}
+            {scope === 'mine' ? 'Số liệu kiểm tra QC1 của bạn' : 'Số liệu kiểm tra QC1 toàn organization'} · {project.name}
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-3">
           {canViewProject && (
             <Tabs selectedKey={scope} onSelectionChange={(k) => setScope(k as typeof scope)} className="w-auto">
               <Tabs.List type="button-border" size="sm" aria-label="Phạm vi">
-                <Tabs.Item id="project" label="Toàn dự án" />
+                <Tabs.Item id="project" label="Toàn organization" />
                 <Tabs.Item id="mine" label="Của tôi" />
               </Tabs.List>
             </Tabs>

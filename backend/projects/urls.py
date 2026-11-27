@@ -18,6 +18,13 @@ router.register(f"{P}/guidelines", views.GuidelineViewSet, basename="guideline")
 urlpatterns = [
     path("projects/<int:project_id>/settings/", views.ProjectSettingsView.as_view(), name="project-settings"),
     path("projects/<int:project_id>/members/", views.ProjectMembersView.as_view(), name="project-members"),
+    path("projects/<int:project_id>/cvat-sync/", views.ProjectCvatSyncView.as_view(), name="project-cvat-sync"),
+    path("projects/<int:project_id>/members/<int:user_id>/credential/", views.MemberCredentialView.as_view(),
+         name="project-member-credential"),
+    path("projects/<int:project_id>/members/<int:user_id>/reset-password/", views.MemberResetPasswordView.as_view(),
+         name="project-member-reset-password"),
+    path("projects/<int:project_id>/members/<int:user_id>/roles/<str:role>/", views.ProjectMemberRoleDetailView.as_view(),
+         name="project-member-role-detail"),
     path("projects/<int:project_id>/members/<int:user_id>/roles/", views.ProjectMemberRolesView.as_view(),
          name="project-member-roles"),
     path("projects/<int:project_id>/permission-matrix/", views.PermissionMatrixView.as_view(),

@@ -1,20 +1,19 @@
 from rest_framework import serializers
 
-from accounts.datetime_utils import RFC3339DateTimeField
+from accounts.datetime_utils import PG_INT32_MAX, RFC3339DateTimeField
 from accounts.models import Role, User
-from accounts.serializers import UserBriefSerializer
+from accounts.serializers import ModelMetaBase, UserBriefSerializer
 from projects.serializers import ActivityLogSerializer
 from quality.models import ReviewError
 
-from .models import AnnotatorRequest, Job
+from .models import AnnotatorRequest, Job, JobStatus
 
 
 class JobSerializer(serializers.ModelSerializer):
     status_label = serializers.CharField(source="get_status_display", read_only=True)
     stage = serializers.CharField(read_only=True)
     batch_name = serializers.CharField(source="batch.name", read_only=True)
-    dataset = serializers.IntegerField(source="batch.dataset_id", read_only=True)
-    dataset_name = serializers.CharField(source="batch.dataset.name", read_only=True)
+    dataset_name = serializers.CharField(source="dataset.name", read_only=True)
     annotator = UserBriefSerializer(read_only=True)
     qc1_reviewer = UserBriefSerializer(read_only=True)
     deadline = RFC3339DateTimeField(read_only=True)
@@ -34,7 +33,7 @@ class JobSerializer(serializers.ModelSerializer):
     cvat_url = serializers.CharField(read_only=True)
     qc2 = serializers.SerializerMethodField()
 
-    class Meta:
+    class Meta(ModelMetaBase):
         model = Job
         fields = [
             "id",
@@ -66,6 +65,8 @@ class JobSerializer(serializers.ModelSerializer):
             "is_locked",
             "frame_count",
             "object_count",
+            "last_counted_objects",
+            "round_credited_objects",
             "target_object_count",
             "progress_percent",
             "open_error_count",
@@ -94,20 +95,32 @@ class JobSerializer(serializers.ModelSerializer):
         }
 
     def get_open_error_count(self, job):
-        annotated = getattr(job, "_open_error_count", None)
+        if job.rework_round <= 0 or job.status not in (JobStatus.REWORK, JobStatus.ANNOTATING):
+            return 0
+        annotated = getattr(job, "_active_rework_error_count", None)
         if annotated is not None:
             return annotated
+        target_round = job.rework_round - 1
         if hasattr(job, "_prefetched_objects_cache") and "review_errors" in job._prefetched_objects_cache:
-            return sum(1 for e in job._prefetched_objects_cache["review_errors"] if not e.is_voided)
-        return job.review_errors.filter(is_voided=False).count()
+            return sum(
+                1
+                for e in job._prefetched_objects_cache["review_errors"]
+                if e.rework_round == target_round and not e.is_voided
+            )
+        return job.review_errors.filter(rework_round=target_round, is_voided=False).count()
 
 
 def _open_sample(job):
-    """Mẫu QC2 của job trong đợt audit đang mở (None nếu job không được lấy mẫu)."""
+    """Mẫu QC2 hiện hành của job trong đợt audit đang mở (ưu tiên mẫu PENDING mới nhất theo id)."""
     samples = getattr(job, "open_samples", None)
     if samples is None:  # chưa prefetch (vd. trang chi tiết) → truy vấn trực tiếp
-        samples = list(job.audit_samples.filter(audit__status="in_progress").select_related("auditor"))
-    return samples[0] if samples else None
+        samples = list(
+            job.audit_samples.filter(audit__status="in_progress").select_related("auditor").order_by("id")
+        )
+    if not samples:
+        return None
+    pending = [s for s in samples if s.result == "pending"]
+    return pending[-1] if pending else samples[-1]
 
 
 class ReviewErrorBriefSerializer(serializers.Serializer):
@@ -128,34 +141,33 @@ class ReviewErrorBriefSerializer(serializers.Serializer):
 
 
 class JobWithErrorsSerializer(JobSerializer):
-    errors = serializers.SerializerMethodField()  # type: ignore[assignment, override]
+    """Mở rộng JobSerializer với danh sách lỗi QC (chèn ở to_representation để không đè thuộc tính Serializer.errors)."""
 
-    class Meta(JobSerializer.Meta):
-        fields = JobSerializer.Meta.fields + ["errors"]
-        read_only_fields = fields
-
-    def get_errors(self, job):
-        if hasattr(job, "_prefetched_objects_cache") and "review_errors" in job._prefetched_objects_cache:
-            errors = job._prefetched_objects_cache["review_errors"]
+    def to_representation(self, instance):
+        data = super().to_representation(instance)
+        if hasattr(instance, "_prefetched_objects_cache") and "review_errors" in instance._prefetched_objects_cache:
+            review_errors = instance._prefetched_objects_cache["review_errors"]
         else:
-            errors = job.review_errors.select_related("category", "reported_by")
-        return ReviewErrorBriefSerializer(errors, many=True).data
+            review_errors = instance.review_errors.select_related("category", "reported_by")
+        data["errors"] = ReviewErrorBriefSerializer(review_errors, many=True).data
+        return data
 
 
 class JobDetailSerializer(JobSerializer):
     timeline = serializers.SerializerMethodField()
-    errors = serializers.SerializerMethodField()  # type: ignore[assignment, override]
 
     class Meta(JobSerializer.Meta):
-        fields = JobSerializer.Meta.fields + ["timeline", "errors"]
+        fields = JobSerializer.Meta.fields + ["timeline"]
         read_only_fields = fields
 
     def get_timeline(self, job):
         return ActivityLogSerializer(job.events.select_related("actor").order_by("created_at", "id"), many=True).data
 
-    def get_errors(self, job):
-        errors = job.review_errors.select_related("category", "reported_by")
-        return ReviewErrorBriefSerializer(errors, many=True).data
+    def to_representation(self, instance):
+        data = super().to_representation(instance)
+        review_errors = instance.review_errors.select_related("category", "reported_by")
+        data["errors"] = ReviewErrorBriefSerializer(review_errors, many=True).data
+        return data
 
 
 def _member_with_role(project, user_id, role, label):
@@ -163,16 +175,16 @@ def _member_with_role(project, user_id, role, label):
         return None
     user = User.objects.filter(pk=user_id).first()
     if not user or role not in user.get_project_roles(project):
-        raise serializers.ValidationError(f"{label} phải là người có vai trò {Role(role).label} trong dự án.")
+        raise serializers.ValidationError(f"{label} phải là người có vai trò {Role(role).label} trong organization.")
     return user
 
 
 class AssignSerializer(serializers.Serializer):
     """Giao lại job. Gửi field nào thì đổi field đó; gửi null để bỏ người phụ trách."""
 
-    annotator = serializers.IntegerField(allow_null=True, required=False)
-    qc1_reviewer = serializers.IntegerField(allow_null=True, required=False)
-    note = serializers.CharField(allow_blank=True, required=False, default="")
+    annotator = serializers.IntegerField(min_value=1, max_value=PG_INT32_MAX, allow_null=True, required=False)
+    qc1_reviewer = serializers.IntegerField(min_value=1, max_value=PG_INT32_MAX, allow_null=True, required=False)
+    note = serializers.CharField(allow_blank=True, required=False, default="", max_length=2000)
 
     def validate(self, attrs):
         project = self.context["project"]
@@ -187,7 +199,15 @@ class AssignSerializer(serializers.Serializer):
 
 class DeadlineSerializer(serializers.Serializer):
     deadline = RFC3339DateTimeField(allow_null=True)
-    note = serializers.CharField(allow_blank=True, required=False, default="")
+    note = serializers.CharField(allow_blank=True, required=False, default="", max_length=2000)
+
+
+class BulkDeadlineSerializer(DeadlineSerializer):
+    ids = serializers.ListField(
+        child=serializers.IntegerField(min_value=1, max_value=PG_INT32_MAX),
+        min_length=1,
+        max_length=500,
+    )
 
 
 class JobNoteSerializer(serializers.Serializer):
@@ -195,38 +215,46 @@ class JobNoteSerializer(serializers.Serializer):
 
 
 class ResolveEscalationSerializer(serializers.Serializer):
-    annotator = serializers.IntegerField(required=False, allow_null=True, min_value=1)
+    annotator = serializers.IntegerField(required=False, allow_null=True, min_value=1, max_value=PG_INT32_MAX)
     note = serializers.CharField(allow_blank=True, required=False, default="", max_length=2000)
 
 
 class BulkSerializer(serializers.Serializer):
-    ids = serializers.ListField(child=serializers.IntegerField(), min_length=1, max_length=500)
+    ids = serializers.ListField(
+        child=serializers.IntegerField(min_value=1, max_value=PG_INT32_MAX),
+        min_length=1,
+        max_length=500,
+    )
 
 
 class BulkMoveBatchSerializer(serializers.Serializer):
-    ids = serializers.ListField(child=serializers.IntegerField(), min_length=1, max_length=500)
-    batch = serializers.IntegerField()
-    note = serializers.CharField(allow_blank=True, required=False, default="")
+    ids = serializers.ListField(
+        child=serializers.IntegerField(min_value=1, max_value=PG_INT32_MAX),
+        min_length=1,
+        max_length=500,
+    )
+    batch = serializers.IntegerField(min_value=1, max_value=PG_INT32_MAX)
+    note = serializers.CharField(allow_blank=True, required=False, default="", max_length=2000)
 
     def validate_batch(self, batch_id):
         from projects.models import Batch, DataStatus
 
         project = self.context["project"]
-        batch = Batch.objects.select_related("dataset").filter(pk=batch_id, dataset__project=project).first()
+        batch = Batch.objects.select_related("dataset").filter(pk=batch_id, project=project).first()
         if not batch:
-            raise serializers.ValidationError("Batch đích không thuộc dự án này.")
+            raise serializers.ValidationError("Task đích không thuộc organization này.")
         if batch.status != DataStatus.ACTIVE or batch.dataset.status != DataStatus.ACTIVE:
-            raise serializers.ValidationError("Batch hoặc Dataset đích đã khoá hoặc đã bàn giao.")
+            raise serializers.ValidationError("Task hoặc Project đích đã khoá hoặc đã bàn giao.")
         return batch
 
 
 class AnnotatorStartSerializer(serializers.Serializer):
-    note = serializers.CharField(allow_blank=True, required=False, default="")
+    note = serializers.CharField(allow_blank=True, required=False, default="", max_length=2000)
 
 
 class AnnotatorSubmitSerializer(serializers.Serializer):
-    note = serializers.CharField(allow_blank=True, required=False, default="")
-    object_count = serializers.IntegerField(min_value=0, required=False, allow_null=True)
+    note = serializers.CharField(allow_blank=True, required=False, default="", max_length=2000)
+    object_count = serializers.IntegerField(min_value=0, max_value=PG_INT32_MAX, required=False, allow_null=True)
 
 
 class AnnotatorRequestSerializer(serializers.ModelSerializer):
@@ -242,7 +270,7 @@ class AnnotatorRequestSerializer(serializers.ModelSerializer):
     updated_at = RFC3339DateTimeField(read_only=True)
     resolved_at = RFC3339DateTimeField(read_only=True)
 
-    class Meta:
+    class Meta(ModelMetaBase):
         model = AnnotatorRequest
         fields = [
             "id",
@@ -271,8 +299,8 @@ class AnnotatorRequestSerializer(serializers.ModelSerializer):
 
 
 class AnnotatorRequestCreateSerializer(serializers.Serializer):
-    job = serializers.IntegerField()
-    review_error = serializers.IntegerField(required=False, allow_null=True)
+    job = serializers.IntegerField(min_value=1, max_value=PG_INT32_MAX)
+    review_error = serializers.IntegerField(min_value=1, max_value=PG_INT32_MAX, required=False, allow_null=True)
     request_type = serializers.ChoiceField(choices=AnnotatorRequest.RequestType.choices)
     title = serializers.CharField(max_length=255, required=False, allow_blank=True, default="")
     reason = serializers.CharField(min_length=3, max_length=2000)
@@ -282,9 +310,11 @@ class AnnotatorRequestCreateSerializer(serializers.Serializer):
         user = self.context["request"].user
         job = Job.objects.select_related("batch").filter(pk=attrs["job"], project=project).first()
         if not job:
-            raise serializers.ValidationError({"job": "Không tìm thấy job trong dự án."})
+            raise serializers.ValidationError({"job": "Không tìm thấy job trong organization."})
         if job.annotator_id != user.id:
             raise serializers.ValidationError({"job": "Bạn chỉ có thể gửi yêu cầu trên job được giao cho mình."})
+        if job.status in (JobStatus.APPROVED, JobStatus.DELIVERED):
+            raise serializers.ValidationError({"job": "Không thể gửi yêu cầu trên job đã duyệt hoặc đã bàn giao."})
         attrs["job_obj"] = job
 
         error_id = attrs.get("review_error")
@@ -293,13 +323,40 @@ class AnnotatorRequestCreateSerializer(serializers.Serializer):
             review_error = ReviewError.objects.select_related("category").filter(pk=error_id, job=job).first()
             if not review_error:
                 raise serializers.ValidationError({"review_error": "Lỗi không thuộc job này."})
+            if review_error.is_voided:
+                raise serializers.ValidationError({"review_error": "Lỗi này đã được gỡ bỏ, không thể phản hồi lại."})
         attrs["review_error_obj"] = review_error
+
+        req_type = attrs["request_type"]
+        if req_type == AnnotatorRequest.RequestType.ERROR_DISPUTE:
+            dup_qs = AnnotatorRequest.objects.filter(
+                project=project,
+                job=job,
+                request_type=req_type,
+                status=AnnotatorRequest.Status.PENDING_PM,
+            )
+            if review_error is not None:
+                dup_qs = dup_qs.filter(review_error=review_error)
+            else:
+                dup_qs = dup_qs.filter(review_error__isnull=True)
+            if dup_qs.exists():
+                raise serializers.ValidationError("Đã có yêu cầu phản hồi lỗi đang chờ PM xử lý cho mục này.")
+        elif (
+            req_type == AnnotatorRequest.RequestType.DATA_ISSUE
+            and AnnotatorRequest.objects.filter(
+                project=project,
+                job=job,
+                request_type=req_type,
+                status=AnnotatorRequest.Status.PENDING_PM,
+            ).exists()
+        ):
+            raise serializers.ValidationError("Đã có báo cáo dữ liệu bị chặn đang chờ PM xử lý cho job này.")
 
         if not attrs.get("title"):
             if review_error:
                 loc = f" {review_error.location}" if review_error.location else ""
                 attrs["title"] = f"Không đồng ý lỗi '{review_error.category.name}'{loc}"[:255]
-            elif attrs["request_type"] == AnnotatorRequest.RequestType.ERROR_DISPUTE:
+            elif req_type == AnnotatorRequest.RequestType.ERROR_DISPUTE:
                 attrs["title"] = f"Phản hồi lỗi QC1 · {job.name}"
             else:
                 attrs["title"] = attrs["reason"].strip().splitlines()[0][:255]
@@ -309,10 +366,9 @@ class AnnotatorRequestCreateSerializer(serializers.Serializer):
 class AnnotatorRequestResolveSerializer(serializers.Serializer):
     status = serializers.ChoiceField(
         choices=[
-            AnnotatorRequest.Status.PENDING_PM,
             AnnotatorRequest.Status.RESOLVED,
             AnnotatorRequest.Status.REJECTED,
         ]
     )
-    progress_note = serializers.CharField(required=False, allow_blank=True, default="")
-    resolution_note = serializers.CharField(required=False, allow_blank=True, default="")
+    progress_note = serializers.CharField(required=False, allow_blank=True, default="", max_length=2000)
+    resolution_note = serializers.CharField(required=False, allow_blank=True, default="", max_length=2000)

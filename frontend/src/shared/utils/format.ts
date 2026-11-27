@@ -1,6 +1,8 @@
 export const APP_TIME_ZONE = 'Asia/Ho_Chi_Minh'
+export const VN_TIME_ZONE = APP_TIME_ZONE
 
 const ISO_DATE_RE = /^(\d{4})-(\d{2})-(\d{2})$/
+const LOCAL_DATETIME_RE = /^(\d{4}-\d{2}-\d{2})[T ](\d{2}:\d{2})(?::(\d{2}))?$/
 const RELATIVE_TIME_FORMAT = new Intl.RelativeTimeFormat('vi', { numeric: 'auto' })
 const WALL_CLOCK_FORMAT = new Intl.DateTimeFormat('en-CA', {
   timeZone: APP_TIME_ZONE,
@@ -35,8 +37,9 @@ function parseIsoDateOnly(value: string): { year: string; month: string; day: st
   return { year, month, day }
 }
 
-function parseTimestamp(value?: string | null): Date | null {
+function parseTimestamp(value?: string | Date | null): Date | null {
   if (!value) return null
+  if (value instanceof Date) return Number.isNaN(value.getTime()) ? null : value
   const text = value.trim()
   if (!text) return null
   const parsed = new Date(text)
@@ -61,6 +64,7 @@ export function getCurrentHourVN(at: Date = new Date()): number {
   return Number(getVnParts(at).hour)
 }
 
+/** DD/MM/YYYY HH:mm (cố định múi giờ Việt Nam UTC+7). */
 export function formatDateTime(value?: string | null): string {
   const date = parseTimestamp(value)
   if (!date) return '—'
@@ -68,6 +72,33 @@ export function formatDateTime(value?: string | null): string {
   return `${p.day}/${p.month}/${p.year} ${p.hour}:${p.minute}`
 }
 
+/** DD/MM/YYYY (cố định múi giờ Việt Nam UTC+7). */
+export function formatDate(value?: string | null): string {
+  if (!value) return '—'
+  if (ISO_DATE_RE.test(value.trim())) {
+    const dateOnly = parseIsoDateOnly(value)
+    return dateOnly ? `${dateOnly.day}/${dateOnly.month}/${dateOnly.year}` : '—'
+  }
+  const date = parseTimestamp(value)
+  if (!date) return '—'
+  const p = getVnParts(date)
+  return `${p.day}/${p.month}/${p.year}`
+}
+
+/** DD/MM (cố định múi giờ Việt Nam UTC+7). */
+export function formatShortDate(value?: string | null): string {
+  if (!value) return '—'
+  if (ISO_DATE_RE.test(value.trim())) {
+    const dateOnly = parseIsoDateOnly(value)
+    return dateOnly ? `${dateOnly.day}/${dateOnly.month}` : '—'
+  }
+  const date = parseTimestamp(value)
+  if (!date) return '—'
+  const p = getVnParts(date)
+  return `${p.day}/${p.month}`
+}
+
+/** DD/MM HH:mm (cố định múi giờ Việt Nam UTC+7). */
 export function formatShortDateTime(value?: string | null): string {
   const date = parseTimestamp(value)
   if (!date) return '—'
@@ -75,6 +106,7 @@ export function formatShortDateTime(value?: string | null): string {
   return `${p.day}/${p.month} ${p.hour}:${p.minute}`
 }
 
+/** HH:mm · DD/MM/YYYY (cố định múi giờ Việt Nam UTC+7). */
 export function formatTimeFirstDateTime(value?: string | null): string {
   const date = parseTimestamp(value)
   if (!date) return '—'
@@ -82,24 +114,24 @@ export function formatTimeFirstDateTime(value?: string | null): string {
   return `${p.hour}:${p.minute} · ${p.day}/${p.month}/${p.year}`
 }
 
-export function formatDate(value?: string | null): string {
-  if (!value) return '—'
-  const dateOnly = parseIsoDateOnly(value)
-  if (dateOnly) return `${dateOnly.day}/${dateOnly.month}/${dateOnly.year}`
-  const date = parseTimestamp(value)
-  if (!date) return '—'
+/** Xuất chuỗi YYYY-MM-DDTHH:mm theo giờ Việt Nam (UTC+7) cho input datetime-local. */
+export function formatDateTimeLocalVN(iso?: string | null): string {
+  const date = parseTimestamp(iso)
+  if (!date) return ''
   const p = getVnParts(date)
-  return `${p.day}/${p.month}/${p.year}`
+  return `${p.year}-${p.month}-${p.day}T${p.hour}:${p.minute}`
 }
 
-export function formatShortDate(value?: string | null): string {
-  if (!value) return '—'
-  const dateOnly = parseIsoDateOnly(value)
-  if (dateOnly) return `${dateOnly.day}/${dateOnly.month}`
-  const date = parseTimestamp(value)
-  if (!date) return '—'
-  const p = getVnParts(date)
-  return `${p.day}/${p.month}`
+/** Diễn giải chuỗi YYYY-MM-DDTHH:mm là giờ Việt Nam (+07:00) và trả về UTC ISO string. */
+export function parseDateTimeLocalVN(localStr?: string | null): string | null {
+  if (!localStr) return null
+  const trimmed = localStr.trim()
+  if (!trimmed) return null
+  const match = LOCAL_DATETIME_RE.exec(trimmed)
+  if (!match) return null
+  const seconds = match[3] ?? '00'
+  const date = new Date(`${match[1]}T${match[2]}:${seconds}+07:00`)
+  return Number.isNaN(date.getTime()) ? null : date.toISOString()
 }
 
 export function formatCsvTimestamp(at: Date = new Date()): string {

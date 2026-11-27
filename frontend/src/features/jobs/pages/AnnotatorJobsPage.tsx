@@ -1,13 +1,14 @@
 import { ArrowRight, Plus, SearchLg } from '@untitledui/icons'
 import { useState } from 'react'
-import { useNavigate } from 'react-router'
+import { useNavigate, useSearchParams } from 'react-router'
 import { Tabs } from '@/components/application/tabs/tabs'
-import { Badge, BadgeWithDot } from '@/components/base/badges/badges'
+import { Badge, BadgeWithButton, BadgeWithDot } from '@/components/base/badges/badges'
 import { Button } from '@/components/base/buttons/button'
 import { Input } from '@/components/base/input/input'
 import { ProgressBarBase } from '@/components/base/progress-indicators/progress-indicators'
 import { getErrorMessage } from '../../../shared/api/errors'
 import PageState from '../../../shared/components/ui/PageState'
+import SectionCard from '../../../shared/components/ui/SectionCard'
 import { useAction } from '../../../shared/hooks/useAction'
 import { useRequest } from '../../../shared/hooks/useRequest'
 import { formatNumber, formatShortDateTime } from '../../../shared/utils/format'
@@ -15,7 +16,8 @@ import { useProject } from '../../projects/projectContext'
 import { claimAnnotatorJob, getAnnotatorDashboard, listAnnotatorJobs } from '../api'
 import AnnotatorBreadcrumb from '../components/AnnotatorBreadcrumb'
 import AnnotatorJobDrawer from '../components/AnnotatorJobDrawer'
-import { formatDeadlineCountdown, JOB_STATUS_LABELS } from '../constants'
+import JobStatusBadge from '../components/JobStatusBadge'
+import { formatDeadlineCountdown } from '../constants'
 import type { AnnotatorJobTab } from '../types'
 
 const TABS: { id: AnnotatorJobTab; label: string }[] = [
@@ -26,10 +28,13 @@ const TABS: { id: AnnotatorJobTab; label: string }[] = [
   { id: 'all', label: 'Tất cả' },
 ]
 
-/** Trang "Job của tôi": hàng đợi ưu tiên DB06, nhận job mới (GV02), tiến độ TD03 và drawer xem nhanh. */
+/** Trang "Job của tôi": hàng đợi ưu tiên theo hạn, nhận job mới, theo dõi tiến độ và drawer xem nhanh. */
 export default function AnnotatorJobsPage() {
   const { projectId, project } = useProject()
   const navigate = useNavigate()
+  const [searchParams, setSearchParams] = useSearchParams()
+  const dueSoon = searchParams.get('due_soon') === '1'
+  const overdue = searchParams.get('overdue') === '1'
   const [tab, setTab] = useState<AnnotatorJobTab>('active')
   const [search, setSearch] = useState('')
   const [query, setQuery] = useState('')
@@ -38,14 +43,32 @@ export default function AnnotatorJobsPage() {
   const [drawerJobId, setDrawerJobId] = useState<number | null>(null)
   const { run, pending } = useAction()
 
-  const jobs = useRequest(`annotator-jobs:${projectId}:${tab}:${query}:${page}:${version}`, () =>
-    listAnnotatorJobs(projectId, { tab, search: query || undefined, page }),
+  const jobs = useRequest(
+    `annotator-jobs:${projectId}:${tab}:${query}:${page}:${dueSoon ? 1 : 0}:${overdue ? 1 : 0}:${version}`,
+    () =>
+      listAnnotatorJobs(projectId, {
+        tab,
+        search: query || undefined,
+        page,
+        due_soon: dueSoon || undefined,
+        overdue: overdue || undefined,
+      }),
   )
+
+  function clearParam(key: 'due_soon' | 'overdue') {
+    const next = new URLSearchParams(searchParams)
+    next.delete(key)
+    setSearchParams(next, { replace: true })
+    setPage(1)
+  }
+
   const dash = useRequest(`annotator-wip:${projectId}:${version}`, () => getAnnotatorDashboard(projectId, 'week'))
 
   const rows = jobs.data?.results ?? []
-  const activeCount = dash.data?.meta?.active_jobs_count ?? rows.filter((j) => ['pending_annotation', 'annotating', 'rework'].includes(j.status)).length
-  const wipLimit = dash.data?.meta?.wip_limit ?? 2
+  const activeCount =
+    dash.data?.meta?.active_jobs_count ??
+    rows.filter((j) => ['pending_annotation', 'annotating', 'rework'].includes(j.status)).length
+  const wipLimit = dash.data?.meta?.wip_limit ?? project.annotator_wip_limit ?? 2
   const reload = () => setVersion((v) => v + 1)
 
   async function handleClaimNewJob() {
@@ -58,13 +81,13 @@ export default function AnnotatorJobsPage() {
   }
 
   return (
-    <div className="mx-auto flex max-w-[1160px] flex-col gap-6 px-6 py-7">
+    <div className="mx-auto flex max-w-6xl flex-col gap-5 p-4 md:p-6">
       <AnnotatorBreadcrumb projectId={projectId} items={[{ label: 'Job của tôi' }]} />
 
       <header className="flex flex-wrap items-start justify-between gap-4">
         <div>
-          <h1 className="text-[30px] leading-tight font-bold text-[#101828]">Job của tôi</h1>
-          <p className="mt-1 text-base text-[#475467]">
+          <h1 className="text-display-xs font-semibold text-primary">Job của tôi</h1>
+          <p className="mt-1 text-sm text-tertiary">
             {project.name} · Đang giữ {activeCount}/{wipLimit} job
           </p>
         </div>
@@ -80,12 +103,10 @@ export default function AnnotatorJobsPage() {
         </Button>
       </header>
 
-      <section className="overflow-hidden rounded-xl border border-[#EAECF0] bg-white">
-        <div className="flex flex-wrap items-center justify-between gap-4 border-b border-[#EAECF0] px-6 py-5">
-          <div>
-            <h2 className="text-lg font-bold text-[#101828]">Hàng đợi của tôi</h2>
-            <p className="mt-0.5 text-sm text-[#475467]">Quá hạn → sắp hạn → còn lại · DB06</p>
-          </div>
+      <SectionCard
+        title="Hàng đợi của tôi"
+        description="Ưu tiên: quá hạn → sắp hạn → còn lại"
+        actions={
           <div className="flex flex-wrap items-center gap-3">
             <Tabs
               selectedKey={tab}
@@ -113,88 +134,100 @@ export default function AnnotatorJobsPage() {
                 size="sm"
                 icon={SearchLg}
                 aria-label="Tìm job"
-                placeholder="Tìm mã job, batch…"
+                placeholder="Tìm mã job, task…"
                 value={search}
                 onChange={setSearch}
               />
             </form>
+            {dueSoon && (
+              <BadgeWithButton
+                size="sm"
+                type="pill-color"
+                color="warning"
+                buttonLabel="Bỏ lọc sắp / quá hạn"
+                onButtonClick={() => clearParam('due_soon')}
+              >
+                Sắp / quá hạn
+              </BadgeWithButton>
+            )}
+            {overdue && (
+              <BadgeWithButton
+                size="sm"
+                type="pill-color"
+                color="error"
+                buttonLabel="Bỏ lọc quá hạn"
+                onButtonClick={() => clearParam('overdue')}
+              >
+                Quá hạn
+              </BadgeWithButton>
+            )}
           </div>
-        </div>
-
+        }
+        bodyClassName="p-0"
+      >
         {jobs.error != null ? (
-          <div className="p-6">
-            <PageState kind="error" description={getErrorMessage(jobs.error)} onRetry={jobs.retry} />
-          </div>
+          <PageState kind="error" description={getErrorMessage(jobs.error)} onRetry={jobs.retry} />
         ) : jobs.isLoading ? (
-          <div className="p-6">
-            <PageState kind="loading" />
-          </div>
+          <PageState kind="loading" />
         ) : rows.length === 0 ? (
-          <div className="p-8">
-            <PageState
-              kind="empty"
-              title="Chưa có job nào trong mục này"
-              description='Bạn có thể đổi bộ lọc hoặc bấm "Nhận job mới" để nhận việc từ hàng chờ dự án.'
-            />
-          </div>
+          <PageState
+            kind="empty"
+            title="Chưa có job nào trong mục này"
+            description='Bạn có thể đổi bộ lọc hoặc bấm "Nhận job mới" để nhận việc từ hàng chờ.'
+          />
         ) : (
           <div className="overflow-x-auto">
-            <table className="w-full min-w-[820px] text-left">
-              <thead className="border-b border-[#EAECF0] bg-[#F9FAFB] text-xs font-medium text-[#475467]">
+            <table className="w-full min-w-[820px] text-left text-sm">
+              <thead className="bg-secondary text-xs font-semibold text-quaternary">
                 <tr>
-                  <th className="px-6 py-3">Job</th>
+                  <th className="px-5 py-3">Job</th>
                   <th className="px-4 py-3">Trạng thái</th>
-                  <th className="px-4 py-3">Tiến độ · TD03</th>
-                  <th className="px-4 py-3">Hạn · DH02/DH04</th>
-                  <th className="px-4 py-3">Vòng sửa · RW01</th>
-                  <th className="px-6 py-3 text-right">Thao tác</th>
+                  <th className="px-4 py-3">Tiến độ</th>
+                  <th className="px-4 py-3">Hạn</th>
+                  <th className="px-4 py-3">Vòng sửa</th>
+                  <th className="px-5 py-3 text-right">Thao tác</th>
                 </tr>
               </thead>
-              <tbody className="divide-y divide-[#EAECF0]">
+              <tbody className="divide-y divide-secondary">
                 {rows.map((job) => {
                   const target = job.target_object_count || job.object_count
                   const pct = job.progress_percent ?? 0
                   const countdown = formatDeadlineCountdown(job.hours_remaining)
-                  const isRework = job.status === 'rework'
-                  const statusColor =
-                    isRework
-                      ? 'warning'
-                      : job.status === 'annotating'
-                        ? 'blue'
-                        : job.status === 'approved' || job.status === 'delivered'
-                          ? 'success'
-                          : 'gray'
+                  const isWarnOnlyEscalated =
+                    job.is_escalated && (job.escalation_policy ?? project.escalation_policy ?? 'block') === 'warn_only'
 
                   return (
                     <tr
                       key={job.id}
                       onClick={() => setDrawerJobId(job.id)}
-                      className="cursor-pointer transition hover:bg-[#F9FAFB]"
+                      className="cursor-pointer transition hover:bg-primary_hover"
                     >
-                      <td className="px-6 py-4">
-                        <div className="text-sm font-bold text-[#101828]">{job.name}</div>
-                        <div className="mt-0.5 text-xs text-[#475467]">{job.batch_name}</div>
+                      <td className="px-5 py-3.5">
+                        <div className="font-semibold text-primary">{job.name}</div>
+                        <div className="mt-0.5 text-xs text-tertiary">{job.batch_name}</div>
                       </td>
-                      <td className="px-4 py-4">
-                        <div className="flex flex-wrap gap-1.5">
-                          <BadgeWithDot size="sm" type="pill-color" color={statusColor}>
-                            {isRework ? 'Cần sửa' : job.status === 'annotating' ? 'Đang làm' : JOB_STATUS_LABELS[job.status]}
-                          </BadgeWithDot>
-                          {job.is_escalated && (
-                            <Badge size="sm" type="pill-color" color="error">
-                              Cảnh báo vòng {job.rework_round}
-                            </Badge>
-                          )}
-                        </div>
+                      <td className="px-4 py-3.5">
+                        <JobStatusBadge
+                          status={job.status}
+                          escalated={job.is_escalated}
+                          overdue={job.is_overdue}
+                          locked={job.is_locked}
+                          sourceMissing={job.source_missing}
+                        />
+                        {isWarnOnlyEscalated && (
+                          <div className="mt-1 text-xs text-warning-primary">
+                            Chế độ cảnh báo — vẫn có thể tiếp tục sửa
+                          </div>
+                        )}
                       </td>
-                      <td className="w-60 px-4 py-4">
-                        <div className="mb-1.5 text-xs text-[#344054] tabular-nums">
+                      <td className="w-60 px-4 py-3.5">
+                        <div className="mb-1.5 text-xs text-secondary tabular-nums">
                           {pct}% · {formatNumber(job.object_count)}/{formatNumber(target)} object-frame
                         </div>
-                        <ProgressBarBase value={pct} className="bg-[#EAECF0]" progressClassName="bg-[#7F56D9]" />
+                        <ProgressBarBase value={pct} />
                       </td>
-                      <td className="px-4 py-4">
-                        <div className="text-xs font-medium text-[#344054]">
+                      <td className="px-4 py-3.5">
+                        <div className="text-xs font-medium text-secondary">
                           {job.deadline ? formatShortDateTime(job.deadline) : 'Chưa đặt'}
                         </div>
                         {countdown && (
@@ -205,20 +238,20 @@ export default function AnnotatorJobsPage() {
                           </div>
                         )}
                       </td>
-                      <td className="px-4 py-4">
+                      <td className="px-4 py-3.5">
                         <BadgeWithDot size="sm" type="pill-color" color={job.rework_round > 0 ? 'warning' : 'gray'}>
                           {job.rework_round}/{job.max_rework_rounds}
                         </BadgeWithDot>
                       </td>
-                      <td className="px-6 py-4 text-right" onClick={(e) => e.stopPropagation()}>
-                        <button
-                          type="button"
-                          onClick={() => navigate(`/projects/${projectId}/annotator/jobs/${job.id}`)}
-                          className="inline-flex cursor-pointer items-center gap-2 rounded-lg border border-[#E9D7FE] bg-[#F9F5FF] px-3.5 py-2 text-sm font-semibold text-[#6941C6] transition hover:bg-[#F4EBFF]"
+                      <td className="px-5 py-3.5 text-right" onClick={(e) => e.stopPropagation()}>
+                        <Button
+                          size="sm"
+                          color="secondary"
+                          iconTrailing={ArrowRight}
+                          onPress={() => navigate(`/projects/${projectId}/annotator/jobs/${job.id}`)}
                         >
                           Tiếp tục làm
-                          <ArrowRight className="size-4" />
-                        </button>
+                        </Button>
                       </td>
                     </tr>
                   )
@@ -229,7 +262,7 @@ export default function AnnotatorJobsPage() {
         )}
 
         {jobs.data && jobs.data.count > rows.length && (
-          <div className="flex items-center justify-between border-t border-[#EAECF0] px-6 py-3.5 text-sm text-[#475467]">
+          <div className="flex items-center justify-between border-t border-secondary px-5 py-3.5 text-sm text-tertiary">
             <span>
               Trang {page} · {jobs.data.count} job
             </span>
@@ -243,7 +276,7 @@ export default function AnnotatorJobsPage() {
             </div>
           </div>
         )}
-      </section>
+      </SectionCard>
 
       <AnnotatorJobDrawer projectId={projectId} jobId={drawerJobId} onClose={() => setDrawerJobId(null)} />
     </div>

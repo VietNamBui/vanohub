@@ -1,6 +1,7 @@
 import { ExportOutlined } from '@ant-design/icons'
 import { Alert, Button, Descriptions, Drawer, Empty, Form, Input, Modal, Space, Table, Tag, Timeline, Typography } from 'antd'
 import { useState } from 'react'
+import { Badge } from '@/components/base/badges/badges'
 import { getErrorMessage } from '../../../shared/api/errors'
 import StateView from '../../../shared/components/StateView'
 import UserName from '../../../shared/components/UserName'
@@ -11,10 +12,10 @@ import MemberSelect from '../../projects/components/MemberSelect'
 import { useProject } from '../../projects/projectContext'
 import { assignJob, getJob, resolveEscalation, setJobDeadline, setJobLock } from '../api'
 import { ACTION_LABELS, JOB_STATUS_LABELS } from '../constants'
-import type { JobDetail, JobStatus } from '../types'
+import type { JobDetail, JobErrorBrief, JobStatus } from '../types'
 import AssignModal from './AssignModal'
 import DeadlineModal from './DeadlineModal'
-import JobStatusTag from './JobStatusTag'
+import JobStatusBadge from './JobStatusBadge'
 
 interface Props {
   jobId: number | null
@@ -36,9 +37,9 @@ function describeEvent(event: JobDetail['timeline'][number]) {
   return ''
 }
 
-/** Chi tiết Job (CMN-01): thông tin, dòng thời gian, lỗi đã ghi, lịch sử deadline, thao tác theo quyền. */
+/** Chi tiết Job: thông tin, dòng thời gian, lỗi đã ghi, lịch sử deadline, thao tác theo quyền. */
 export default function JobDetailDrawer({ jobId, onClose, onChanged }: Props) {
-  const { projectId, can } = useProject()
+  const { projectId, project, can } = useProject()
   const [version, setVersion] = useState(0)
   const { data: job, error, isLoading, retry } = useRequest(`job:${jobId}:${version}`, () =>
     jobId ? getJob(projectId, jobId) : Promise.resolve(null),
@@ -60,14 +61,25 @@ export default function JobDetailDrawer({ jobId, onClose, onChanged }: Props) {
   }
 
   const deadlineHistory = job?.timeline.filter((e) => e.action === 'job.deadline') ?? []
+  const escalationPolicy = job?.escalation_policy ?? project.escalation_policy ?? 'block'
 
   return (
     <Drawer
       open={jobId !== null}
       onClose={onClose}
-      size={640}
+      size={680}
       title={job ? job.name : 'Chi tiết Job'}
-      extra={job && <JobStatusTag status={job.status} escalated={job.is_escalated} locked={job.is_locked} overdue={job.is_overdue} />}
+      extra={
+        job && (
+          <JobStatusBadge
+            status={job.status}
+            escalated={job.is_escalated}
+            locked={job.is_locked}
+            overdue={job.is_overdue}
+            sourceMissing={job.source_missing}
+          />
+        )
+      }
       footer={
         job && canManage && (
           <Space wrap style={{ justifyContent: 'flex-end', width: '100%' }}>
@@ -79,10 +91,10 @@ export default function JobDetailDrawer({ jobId, onClose, onChanged }: Props) {
             <Button onClick={() => act(() => setJobLock(projectId, job.id, !job.is_locked), job.is_locked ? 'Đã mở khoá' : 'Đã khoá job')}>
               {job.is_locked ? 'Mở khoá' : 'Khoá job'}
             </Button>
-            <Button onClick={() => setModal('assign')} disabled={job.is_locked}>
+            <Button onClick={() => setModal('assign')} disabled={job.is_locked || job.status === 'delivered'}>
               Giao lại
             </Button>
-            <Button type="primary" onClick={() => setModal('deadline')} disabled={job.is_locked}>
+            <Button type="primary" onClick={() => setModal('deadline')} disabled={job.is_locked || job.status === 'delivered'}>
               Đặt deadline
             </Button>
           </Space>
@@ -93,12 +105,27 @@ export default function JobDetailDrawer({ jobId, onClose, onChanged }: Props) {
       {error != null && <StateView kind="error" description={getErrorMessage(error)} action={{ label: 'Thử lại', onClick: retry }} />}
       {job && (
         <Space orientation="vertical" size="large" style={{ width: '100%' }}>
+          {job.source_missing && (
+            <Alert
+              type="warning"
+              showIcon
+              title="Không còn tìm thấy job nguồn trên CVAT ở lần đồng bộ gần nhất. Trạng thái trên VanoHub vẫn được giữ nguyên."
+            />
+          )}
           {job.is_escalated && (
-            <Alert type="error" showIcon title={`Job vượt số vòng rework tối đa (${job.rework_round}/${job.max_rework_rounds}).`} />
+            <Alert
+              type={escalationPolicy === 'warn_only' ? 'warning' : 'error'}
+              showIcon
+              title={
+                escalationPolicy === 'warn_only'
+                  ? `Job vượt số vòng rework tối đa (${job.rework_round}/${job.max_rework_rounds}) — chế độ cảnh báo.`
+                  : `Job vượt số vòng rework tối đa (${job.rework_round}/${job.max_rework_rounds}).`
+              }
+            />
           )}
           <Descriptions column={2} size="small" bordered>
-            <Descriptions.Item label="Dataset">{job.dataset_name}</Descriptions.Item>
-            <Descriptions.Item label="Batch">{job.batch_name}</Descriptions.Item>
+            <Descriptions.Item label="Project">{job.dataset_name}</Descriptions.Item>
+            <Descriptions.Item label="Task">{job.batch_name ?? '—'}</Descriptions.Item>
             <Descriptions.Item label="Annotator"><UserName user={job.annotator} empty="Chưa giao" /></Descriptions.Item>
             <Descriptions.Item label="Người QC1"><UserName user={job.qc1_reviewer} empty="Chưa giao" /></Descriptions.Item>
             <Descriptions.Item label="Deadline">{formatDateTime(job.deadline)}</Descriptions.Item>
@@ -110,6 +137,11 @@ export default function JobDetailDrawer({ jobId, onClose, onChanged }: Props) {
                 <Space wrap>
                   <span>Job #{job.cvat_job_id}</span>
                   {job.cvat_stage && <Tag>{job.cvat_stage} / {job.cvat_state}</Tag>}
+                  {job.source_missing && (
+                    <Badge type="pill-color" size="sm" color="warning">
+                      Thiếu nguồn CVAT
+                    </Badge>
+                  )}
                   {job.cvat_url && (
                     <Button size="small" icon={<ExportOutlined />} href={job.cvat_url} target="_blank" rel="noreferrer">
                       Mở trong CVAT
@@ -133,7 +165,7 @@ export default function JobDetailDrawer({ jobId, onClose, onChanged }: Props) {
                   content: (
                     <div>
                       <strong>{ACTION_LABELS[e.action] ?? e.action}</strong> {describeEvent(e)}
-                      <div style={{ color: 'rgba(0,0,0,.45)', fontSize: 12 }}>
+                      <div className="text-xs text-tertiary">
                         {formatDateTime(e.created_at)} · {e.actor?.full_name ?? 'Hệ thống'}
                         {e.note ? ` · ${e.note}` : ''}
                       </div>
@@ -146,18 +178,89 @@ export default function JobDetailDrawer({ jobId, onClose, onChanged }: Props) {
 
           <div>
             <Typography.Title level={5}>Lỗi đã ghi</Typography.Title>
-            <Table
+            <Table<JobErrorBrief>
               size="small"
               rowKey="id"
               pagination={false}
               dataSource={job.errors}
+              rowClassName={(err) => (err.is_voided ? 'opacity-60' : '')}
               locale={{ emptyText: 'Chưa có lỗi' }}
               columns={[
                 { title: 'Stage', dataIndex: 'stage', render: (s: string) => <Tag>{s.toUpperCase()}</Tag> },
                 { title: 'Round', dataIndex: 'rework_round' },
-                { title: 'Loại lỗi', dataIndex: 'category' },
-                { title: 'Vị trí', dataIndex: 'location' },
-                { title: 'Mô tả', dataIndex: 'description' },
+                {
+                  title: 'Loại lỗi',
+                  render: (_, err) => (
+                    <div className="flex flex-col gap-1">
+                      <span className={err.is_voided ? 'text-tertiary line-through' : 'font-medium text-primary'}>
+                        {err.category}
+                      </span>
+                      <div className="flex flex-wrap gap-1">
+                        {err.verdict === 'edge' && (
+                          <Badge type="pill-color" size="sm" color="warning">
+                            Cận biên
+                          </Badge>
+                        )}
+                        {err.verdict === 'fail' && (
+                          <Badge type="pill-color" size="sm" color="error">
+                            Lỗi
+                          </Badge>
+                        )}
+                        {err.is_voided && (
+                          <Badge type="pill-color" size="sm" color="gray">
+                            Đã huỷ lỗi
+                          </Badge>
+                        )}
+                      </div>
+                    </div>
+                  ),
+                },
+                {
+                  title: 'Vị trí / Cuboid',
+                  render: (_, err) => {
+                    const hasStructured =
+                      err.frame_number != null || err.cvat_object_id != null || Boolean(err.is_missing_object)
+                    return (
+                      <div className="flex flex-col gap-1">
+                        {hasStructured && (
+                          <div className="flex flex-wrap gap-1">
+                            {err.frame_number != null && (
+                              <Badge type="pill-color" size="sm" color="gray">
+                                Frame #{err.frame_number}
+                              </Badge>
+                            )}
+                            {err.cvat_object_id != null && (
+                              <Badge type="pill-color" size="sm" color="blue">
+                                Object #{err.cvat_object_id}
+                              </Badge>
+                            )}
+                            {err.is_missing_object && (
+                              <Badge type="pill-color" size="sm" color="orange">
+                                Thiếu đối tượng
+                              </Badge>
+                            )}
+                          </div>
+                        )}
+                        {err.location ? (
+                          <span className={err.is_voided ? 'text-xs text-tertiary line-through' : 'text-xs text-secondary'}>
+                            {err.location}
+                          </span>
+                        ) : !hasStructured ? (
+                          <span className="text-xs text-tertiary">—</span>
+                        ) : null}
+                      </div>
+                    )
+                  },
+                },
+                {
+                  title: 'Mô tả',
+                  dataIndex: 'description',
+                  render: (desc: string, err) => (
+                    <span className={err.is_voided ? 'text-tertiary line-through' : undefined}>
+                      {desc || '—'}
+                    </span>
+                  ),
+                },
               ]}
             />
           </div>
@@ -192,7 +295,7 @@ export default function JobDetailDrawer({ jobId, onClose, onChanged }: Props) {
           />
           <DeadlineModal
             open={modal === 'deadline'}
-            initial={job.deadline}
+            currentDeadline={job.deadline}
             confirmLoading={pending}
             onCancel={() => setModal(null)}
             onSubmit={(deadline, note) => act(() => setJobDeadline(projectId, job.id, deadline, note), 'Đã cập nhật deadline')}

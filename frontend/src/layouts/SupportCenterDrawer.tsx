@@ -2,6 +2,7 @@ import { ChevronDown, ChevronRight, SearchLg, XClose } from '@untitledui/icons'
 import { useEffect, useState } from 'react'
 import { useNavigate } from 'react-router'
 import { Button } from '@/components/base/buttons/button'
+import { Input } from '@/components/base/input/input'
 
 interface FaqItem {
   id: string
@@ -13,7 +14,7 @@ const FAQS: FaqItem[] = [
   {
     id: 'claim',
     q: 'Khi nào được nhận job mới?',
-    a: 'Bạn có thể nhấn "Nhận job mới" ở trang Job của tôi khi số job đang giữ nhỏ hơn giới hạn tối đa của dự án (GV02, mặc định 2 job).',
+    a: 'Bạn có thể nhấn "Nhận job mới" ở trang Job của tôi khi số job đang giữ nhỏ hơn giới hạn tối đa của organization (mặc định 2 job).',
   },
   {
     id: 'withdraw',
@@ -23,27 +24,28 @@ const FAQS: FaqItem[] = [
   {
     id: 'dispute',
     q: 'Không đồng ý lỗi QC ghi thì làm gì?',
-    a: 'Mở trang Cần sửa hoặc Chi tiết Job, nhấn "Phản hồi lỗi" tại dòng lỗi tương ứng và nhập lý do. Yêu cầu sẽ được gửi đến Project Manager để xem xét xử lý.',
+    a: 'Mở trang Cần sửa hoặc Chi tiết Job, nhấn "Phản hồi lỗi" tại dòng lỗi tương ứng và nhập lý do. Yêu cầu sẽ được gửi đến Project Manager xem xét và phân xử.',
   },
   {
     id: 'data-issue',
     q: 'Gặp dữ liệu hỏng thì báo ai?',
-    a: 'Trong trang Chi tiết Job, chọn "Báo vấn đề dữ liệu" và ghi rõ frame bị lỗi (mờ point cloud, thiếu sensor…). Yêu cầu sẽ được chuyển tới PM xử lý.',
+    a: 'Trong trang Chi tiết Job, chọn "Báo vấn đề dữ liệu" và ghi rõ frame bị lỗi (mờ point cloud, thiếu sensor…). Yêu cầu sẽ được chuyển tới Project Manager xử lý.',
   },
   {
     id: 'kpi',
     q: 'KPI cuboid/ngày được tính thế nào?',
-    a: 'Sản lượng KPI tính theo tổng object-frame/cuboid hoàn thành trong ngày khi nộp lên QC1 (CS01–CS03). Phần rework hoàn tất vẫn được tính vào KPI.',
+    a: 'Sản lượng KPI tính theo tổng object-frame/cuboid hoàn thành trong ngày khi nộp lên QC1. Phần rework hoàn tất vẫn được tính vào KPI.',
   },
 ]
 
 interface Props {
   open: boolean
   projectId: number | null
+  teamLeaderName: string | null
   onClose: () => void
 }
 
-/** Trung tâm hỗ trợ — Drawer trượt phải 440px với FAQ tìm kiếm được và liên hệ PM. */
+/** Trung tâm hỗ trợ — Drawer trượt phải 440px với FAQ tìm kiếm được và liên hệ Project Manager. */
 export default function SupportCenterDrawer({ open, projectId, onClose }: Props) {
   const navigate = useNavigate()
   const [search, setSearch] = useState('')
@@ -67,52 +69,52 @@ export default function SupportCenterDrawer({ open, projectId, onClose }: Props)
 
   return (
     <div className="fixed inset-0 z-50 flex justify-end" role="dialog" aria-modal="true" aria-label="Trung tâm hỗ trợ">
-      <div className="fixed inset-0 bg-[#0C111D]/70 backdrop-blur-[2px]" onClick={onClose} />
+      <div className="fixed inset-0 bg-overlay/70 backdrop-blur-[2px]" onClick={onClose} />
 
-      <aside className="relative z-10 flex h-full w-full max-w-[440px] flex-col border-l border-[#EAECF0] bg-white p-6 shadow-2xl">
+      <aside className="relative z-10 flex h-full w-full max-w-[440px] flex-col border-l border-secondary bg-primary p-6 shadow-2xl">
         <div className="flex items-center justify-between">
-          <h2 className="text-xl font-bold text-[#101828]">Trung tâm hỗ trợ</h2>
-          <button
-            type="button"
-            onClick={onClose}
+          <h2 className="text-xl font-semibold text-primary">Trung tâm hỗ trợ</h2>
+          <Button
+            color="tertiary"
+            size="xs"
+            iconLeading={XClose}
             aria-label="Đóng trung tâm hỗ trợ"
-            className="flex size-8 cursor-pointer items-center justify-center rounded-lg text-[#98A2B3] hover:bg-[#F9FAFB] hover:text-[#475467]"
-          >
-            <XClose className="size-5" />
-          </button>
+            onPress={onClose}
+          />
         </div>
 
-        <div className="mt-5 flex items-center gap-2.5 rounded-lg border border-[#D0D5DD] bg-white px-3.5 py-2.5 focus-within:border-[#7F56D9] focus-within:ring-2 focus-within:ring-[#F4EBFF]">
-          <SearchLg className="size-4 shrink-0 text-[#667085]" />
-          <input
+        <div className="mt-5">
+          <Input
+            size="sm"
+            icon={SearchLg}
             value={search}
-            onChange={(e) => setSearch(e.target.value)}
+            onChange={setSearch}
             placeholder="Tìm câu hỏi, hướng dẫn…"
-            className="w-full bg-transparent text-sm text-[#101828] outline-none placeholder:text-[#667085]"
+            aria-label="Tìm câu hỏi, hướng dẫn"
           />
         </div>
 
         <div className="mt-6 flex-1 overflow-y-auto">
-          <h3 className="text-sm font-semibold text-[#344054]">Câu hỏi thường gặp</h3>
+          <h3 className="text-sm font-semibold text-secondary">Câu hỏi thường gặp</h3>
           <ul className="mt-3 flex flex-col gap-2">
             {filtered.map((item) => {
               const isOpen = expanded === item.id
               return (
-                <li key={item.id} className="overflow-hidden rounded-lg border border-[#EAECF0] bg-white">
+                <li key={item.id} className="overflow-hidden rounded-lg border border-secondary bg-primary">
                   <button
                     type="button"
                     onClick={() => setExpanded(isOpen ? null : item.id)}
-                    className="flex w-full cursor-pointer items-center justify-between gap-3 px-4 py-3 text-left text-sm font-medium text-[#344054] hover:bg-[#F9FAFB]"
+                    className="flex w-full cursor-pointer items-center justify-between gap-3 px-4 py-3 text-left text-sm font-medium text-secondary transition hover:bg-primary_hover"
                   >
                     <span>{item.q}</span>
                     {isOpen ? (
-                      <ChevronDown className="size-4 shrink-0 text-[#667085]" />
+                      <ChevronDown className="size-4 shrink-0 text-fg-tertiary" />
                     ) : (
-                      <ChevronRight className="size-4 shrink-0 text-[#98A2B3]" />
+                      <ChevronRight className="size-4 shrink-0 text-fg-quaternary" />
                     )}
                   </button>
                   {isOpen && (
-                    <div className="border-t border-[#F2F4F7] bg-[#F9FAFB] px-4 py-3 text-sm leading-relaxed text-[#475467]">
+                    <div className="border-t border-tertiary bg-secondary px-4 py-3 text-sm leading-relaxed text-tertiary">
                       {item.a}
                     </div>
                   )}
@@ -120,7 +122,7 @@ export default function SupportCenterDrawer({ open, projectId, onClose }: Props)
               )
             })}
             {filtered.length === 0 && (
-              <li className="rounded-lg border border-dashed border-[#EAECF0] p-4 text-center text-sm text-[#667085]">
+              <li className="rounded-lg border border-dashed border-secondary p-4 text-center text-sm text-tertiary">
                 Không tìm thấy câu hỏi phù hợp.
               </li>
             )}
@@ -141,8 +143,8 @@ export default function SupportCenterDrawer({ open, projectId, onClose }: Props)
               </Button>
             )}
 
-            <p className="text-sm text-[#475467]">
-              Vẫn cần hỗ trợ? Liên hệ <span className="font-semibold text-[#101828]">Project Manager</span> của dự án.
+            <p className="text-sm text-tertiary">
+              Vẫn cần hỗ trợ? Liên hệ <span className="font-semibold text-primary">Project Manager</span> phụ trách organization.
             </p>
 
             <Button color="primary" size="md" className="w-full justify-center" onPress={onClose}>

@@ -1,4 +1,4 @@
-import { ChevronRight } from '@untitledui/icons'
+import { ChevronRight, HomeLine } from '@untitledui/icons'
 import { Link } from 'react-router'
 
 export interface BreadcrumbItem {
@@ -6,7 +6,7 @@ export interface BreadcrumbItem {
   to?: string
 }
 
-/** Breadcrumb dùng chung trong dự án: nút Home dẫn về trang chủ theo vai trò (/projects/:id). */
+/** Breadcrumb dùng chung trong organization: nút Home dẫn về trang chủ theo vai trò (/projects/:id). */
 export default function ProjectBreadcrumb({ projectId, items }: { projectId: number | null; items: BreadcrumbItem[] }) {
   const homeTo = projectId ? `/projects/${projectId}` : '/projects'
 
@@ -15,23 +15,21 @@ export default function ProjectBreadcrumb({ projectId, items }: { projectId: num
       <Link
         to={homeTo}
         aria-label="Trang chủ"
-        className="flex size-7 items-center justify-center rounded-md text-[#667085] transition hover:bg-[#F2F4F7] hover:text-[#344054]"
+        className="flex size-7 items-center justify-center rounded-md text-quaternary transition hover:bg-primary_hover hover:text-secondary"
       >
-        <svg className="size-4" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.7">
-          <path d="M3.5 9.2 10 3.5l6.5 5.7M5.5 7.8V16a1 1 0 0 0 1 1h7a1 1 0 0 0 1-1V7.8" strokeLinecap="round" strokeLinejoin="round" />
-        </svg>
+        <HomeLine className="size-4" />
       </Link>
       {items.map((item, idx) => {
         const isLast = idx === items.length - 1
         return (
           <span key={`${item.label}-${idx}`} className="inline-flex items-center gap-2">
-            <ChevronRight className="size-4 text-[#D0D5DD]" />
+            <ChevronRight className="size-4 text-quaternary" />
             {item.to && !isLast ? (
-              <Link to={item.to} className="font-normal text-[#475467] hover:text-[#101828]">
+              <Link to={item.to} className="font-normal text-tertiary transition hover:text-primary">
                 {item.label}
               </Link>
             ) : (
-              <span className="font-semibold text-[#6941C6]">{item.label}</span>
+              <span className="font-semibold text-brand-secondary">{item.label}</span>
             )}
           </span>
         )

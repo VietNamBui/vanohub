@@ -4,7 +4,7 @@ export interface RoleAssignment {
   id: number
   role: Role
   project: number
-  project_name: string
+  project_name: string | null
 }
 
 /** Dữ liệu trả về từ GET/PATCH /api/auth/me/ */
@@ -16,12 +16,13 @@ export interface CurrentUser {
   full_name?: string
   email: string
   avatar_url?: string
-  cvat_username?: string
   timezone_name?: string
   notify_rework?: boolean
   notify_deadline?: boolean
   notify_request_updates?: boolean
   notify_qc_pass?: boolean
+  cvat_linked?: boolean
+  cvat_username?: string | null
   role_assignments: RoleAssignment[]
 }
 
@@ -31,8 +32,6 @@ export interface ProfileUpdateInput {
   full_name?: string
   email?: string
   avatar_url?: string
-  cvat_username?: string
-  timezone_name?: string
   notify_rework?: boolean
   notify_deadline?: boolean
   notify_request_updates?: boolean

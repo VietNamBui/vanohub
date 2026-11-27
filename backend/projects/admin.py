@@ -33,15 +33,15 @@ class ProjectAdmin(admin.ModelAdmin):
 
 @admin.register(Dataset)
 class DatasetAdmin(admin.ModelAdmin):
-    list_display = ["name", "project", "status", "created_at"]
+    list_display = ["name", "project", "status", "cvat_project_id", "last_synced_at"]
     list_filter = ["project", "status"]
     search_fields = ["name"]
 
 
 @admin.register(Batch)
 class BatchAdmin(admin.ModelAdmin):
-    list_display = ["name", "dataset", "status", "deadline", "cvat_task_id", "last_synced_at"]
-    list_filter = ["status", "dataset__project"]
+    list_display = ["name", "project", "dataset", "cvat_task_id", "status", "deadline", "team"]
+    list_filter = ["status", "project"]
     search_fields = ["name"]
 
 

@@ -1,6 +1,7 @@
-import { ChevronDown, HelpCircle, SearchLg, User01 } from '@untitledui/icons'
+import { ChevronDown, Folder, HelpCircle, Key01, Link03, LogOut01, SearchLg, Settings01, User01 } from '@untitledui/icons'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { Link, Outlet, useMatch, useNavigate } from 'react-router'
+import ChangePasswordDialog from '../features/auth/ChangePasswordDialog'
 import { useAuth } from '../features/auth/useAuth'
 import { listProjects } from '../features/projects/api'
 import ProjectSwitcher from '../features/projects/components/ProjectSwitcher'
@@ -8,7 +9,7 @@ import { useRequest } from '../shared/hooks/useRequest'
 import { ROLE_LABELS, type Role } from '../shared/types/roles'
 import NotificationBell from './NotificationBell'
 import QuickSearchModal from './QuickSearchModal'
-import { ShellContext } from './ShellContext'
+import { ShellContext, type ProjectCapabilitiesState } from './ShellContext'
 import SupportCenterDrawer from './SupportCenterDrawer'
 
 function getInitials(name?: string) {
@@ -26,12 +27,19 @@ export default function MainLayout() {
   const navigate = useNavigate()
   const projectMatch = useMatch('/projects/:projectId/*')
   const projectId = projectMatch ? Number(projectMatch.params.projectId) : null
-  const { data: projects } = useRequest(`header-projects:${projectId ?? 'all'}`, listProjects)
+  const { data: projects } = useRequest(
+    `header-projects:${user?.id ?? 0}:${user?.role_assignments.length ?? 0}`,
+    listProjects,
+  )
   const scopedProjects = (projects ?? []).filter((p) => projectId === null || p.id === projectId)
+  const currentProject = (projects ?? []).find((p) => p.id === projectId) ?? null
 
   const [searchOpen, setSearchOpen] = useState(false)
   const [supportOpen, setSupportOpen] = useState(false)
   const [menuOpen, setMenuOpen] = useState(false)
+  const [changingPassword, setChangingPassword] = useState(false)
+  const [teamLeaderName, setTeamLeaderName] = useState<string | null>(null)
+  const [projectCapabilities, setProjectCapabilities] = useState<ProjectCapabilitiesState | null>(null)
   const menuRef = useRef<HTMLDivElement>(null)
 
   const displayName =
@@ -47,32 +55,33 @@ export default function MainLayout() {
   }, [scopedProjects])
 
   const settingsPath = projectId ? `/projects/${projectId}/account/settings` : '/account/settings'
+  const cvatLinkPath = projectId ? `/projects/${projectId}/cvat-link` : '/cvat-link'
 
-  // Phím tắt toàn cục: ⌘K mở tìm kiếm nhanh; ⌘P hồ sơ cá nhân; ⌘S cài đặt; ⌥⇧Q đăng xuất.
+  // Phím tắt toàn cục: ⌘K / Ctrl+K mở tìm kiếm nhanh; Alt+Shift+Q đăng xuất (bỏ qua khi đang gõ).
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
-      const mod = e.metaKey || e.ctrlKey
-      const key = e.key.toLowerCase()
-      if (mod && key === 'k') {
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
         e.preventDefault()
         setMenuOpen(false)
         setSearchOpen((prev) => !prev)
-      } else if (mod && key === 'p') {
+      } else if (e.altKey && e.shiftKey && e.key.toLowerCase() === 'q') {
+        const target = e.target as HTMLElement | null
+        const isEditable =
+          target != null &&
+          (target.tagName === 'INPUT' ||
+            target.tagName === 'TEXTAREA' ||
+            target.tagName === 'SELECT' ||
+            target.isContentEditable)
+        if (isEditable) return
         e.preventDefault()
-        setMenuOpen(false)
-        navigate(`${settingsPath}?tab=profile`)
-      } else if (mod && key === 's') {
-        e.preventDefault()
-        setMenuOpen(false)
-        navigate(settingsPath)
-      } else if (e.altKey && e.shiftKey && key === 'q') {
-        e.preventDefault()
-        logout()
+        if (window.confirm('Bạn muốn đăng xuất?')) {
+          logout()
+        }
       }
     }
     window.addEventListener('keydown', onKeyDown)
     return () => window.removeEventListener('keydown', onKeyDown)
-  }, [logout, navigate, settingsPath])
+  }, [logout])
 
   // Đóng menu người dùng khi bấm ra ngoài hoặc nhấn Esc
   useEffect(() => {
@@ -94,27 +103,26 @@ export default function MainLayout() {
   const shellValue = useMemo(
     () => ({
       projectId,
+      projectCapabilities,
+      setProjectCapabilities,
+      teamLeaderName,
+      setTeamLeaderName,
       openSearch: () => setSearchOpen(true),
       openSupport: () => setSupportOpen(true),
     }),
-    [projectId],
+    [projectId, projectCapabilities, teamLeaderName],
   )
 
   return (
     <ShellContext.Provider value={shellValue}>
-      <div className="flex min-h-screen flex-col bg-[#F9FAFB]">
-        <header className="sticky top-0 z-30 flex h-[72px] items-center gap-4 border-b border-[#EAECF0] bg-white px-6">
+      <div className="flex min-h-screen flex-col bg-secondary">
+        <header className="sticky top-0 z-30 flex h-[72px] items-center gap-4 border-b border-secondary bg-primary px-6">
           <Link to="/projects" className="flex shrink-0 items-center gap-2.5">
-            <span
-              className="flex size-8 items-center justify-center rounded-lg shadow-xs"
-              style={{ background: 'linear-gradient(135deg, #9E77ED 0%, #6941C6 100%)' }}
-            >
-              <svg className="size-4 text-white" viewBox="0 0 18 18" fill="none" stroke="currentColor" strokeWidth="2.1">
-                <rect x="2.5" y="2.5" width="13" height="13" rx="2.5" />
-                <path d="M6 9h6M9 6v6" strokeLinecap="round" />
-              </svg>
-            </span>
-            <span className="text-xl font-bold tracking-tight text-[#101828]">Annota</span>
+            <svg viewBox="0 0 32 32" className="size-8 rounded-lg bg-brand-solid shadow-xs" aria-hidden>
+              <path d="M16 7.5 24 12v8l-8 4.5L8 20v-8z" fill="none" stroke="white" strokeWidth="1.8" strokeLinejoin="round" />
+              <path d="M8 12l8 4.5 8-4.5M16 16.5v8" fill="none" stroke="white" strokeWidth="1.8" strokeLinejoin="round" opacity=".7" />
+            </svg>
+            <span className="text-lg font-semibold tracking-tight text-primary">VanoHub</span>
           </Link>
 
           {projectId !== null && (
@@ -127,13 +135,13 @@ export default function MainLayout() {
             <button
               type="button"
               onClick={() => setSearchOpen(true)}
-              className="hidden h-10 w-64 cursor-pointer items-center justify-between rounded-lg border border-[#D0D5DD] bg-white px-3.5 text-sm text-[#667085] transition hover:border-[#98A2B3] md:flex lg:w-80"
+              className="hidden h-10 w-64 cursor-pointer items-center justify-between rounded-lg border border-primary bg-primary px-3.5 text-sm text-tertiary shadow-xs transition hover:bg-primary_hover hover:text-secondary md:flex lg:w-80"
             >
               <span className="flex items-center gap-2">
-                <SearchLg className="size-4 text-[#667085]" />
+                <SearchLg className="size-4 text-fg-quaternary" />
                 <span>Tìm kiếm nhanh</span>
               </span>
-              <kbd className="rounded border border-[#EAECF0] bg-white px-1.5 py-0.5 text-xs font-medium text-[#667085]">
+              <kbd className="rounded border border-secondary bg-secondary px-1.5 py-0.5 text-xs font-medium text-tertiary">
                 ⌘K
               </kbd>
             </button>
@@ -142,7 +150,7 @@ export default function MainLayout() {
               type="button"
               onClick={() => setSearchOpen(true)}
               aria-label="Tìm kiếm nhanh"
-              className="flex size-10 cursor-pointer items-center justify-center rounded-lg text-[#667085] hover:bg-[#F9FAFB] md:hidden"
+              className="flex size-10 cursor-pointer items-center justify-center rounded-lg text-fg-tertiary transition hover:bg-primary_hover hover:text-fg-secondary md:hidden"
             >
               <SearchLg className="size-5" />
             </button>
@@ -153,64 +161,78 @@ export default function MainLayout() {
               <button
                 type="button"
                 onClick={() => setMenuOpen((v) => !v)}
-                className="flex cursor-pointer items-center gap-3 rounded-lg px-2 py-1.5 transition hover:bg-[#F9FAFB]"
+                className="flex cursor-pointer items-center gap-3 rounded-lg px-2 py-1.5 transition hover:bg-primary_hover"
               >
-                <span className="relative flex size-10 shrink-0 items-center justify-center rounded-full bg-[#F4EBFF] text-sm font-bold text-[#6941C6]">
+                <span className="relative flex size-10 shrink-0 items-center justify-center rounded-full bg-brand-secondary text-sm font-bold text-brand-secondary">
                   {user?.avatar_url ? (
                     <img src={user.avatar_url} alt={displayName} className="size-full rounded-full object-cover" />
                   ) : (
                     initials
                   )}
-                  <span className="absolute right-0 bottom-0 size-2.5 rounded-full bg-[#17B26A] ring-2 ring-white" />
+                  <span className="absolute right-0 bottom-0 size-2.5 rounded-full bg-fg-success-secondary ring-2 ring-white" />
                 </span>
                 <span className="hidden text-left leading-tight sm:block">
-                  <span className="block max-w-36 truncate text-sm font-semibold text-[#344054]">{displayName}</span>
-                  <span className="block max-w-36 truncate text-xs text-[#475467]">{primaryRoleLabel}</span>
+                  <span className="block max-w-36 truncate text-sm font-semibold text-secondary">{displayName}</span>
+                  <span className="block max-w-36 truncate text-xs text-tertiary">{primaryRoleLabel}</span>
                 </span>
-                <ChevronDown className="hidden size-4 text-[#667085] sm:block" />
+                <ChevronDown className="hidden size-4 text-tertiary sm:block" />
               </button>
 
               {menuOpen && (
-                <div className="absolute right-0 mt-2 w-[264px] overflow-hidden rounded-xl border border-[#EAECF0] bg-white shadow-xl">
-                  <div className="flex items-center gap-3 border-b border-[#EAECF0] px-4 py-3">
-                    <span className="relative flex size-10 shrink-0 items-center justify-center rounded-full bg-[#F4EBFF] text-sm font-bold text-[#6941C6]">
+                <div className="absolute right-0 mt-2 w-[264px] overflow-hidden rounded-xl border border-secondary bg-primary shadow-xl">
+                  <div className="flex items-center gap-3 border-b border-secondary px-4 py-3">
+                    <span className="relative flex size-10 shrink-0 items-center justify-center rounded-full bg-brand-secondary text-sm font-bold text-brand-secondary">
                       {user?.avatar_url ? (
                         <img src={user.avatar_url} alt={displayName} className="size-full rounded-full object-cover" />
                       ) : (
                         initials
                       )}
-                      <span className="absolute right-0 bottom-0 size-2.5 rounded-full bg-[#17B26A] ring-2 ring-white" />
+                      <span className="absolute right-0 bottom-0 size-2.5 rounded-full bg-fg-success-secondary ring-2 ring-white" />
                     </span>
                     <div className="min-w-0">
-                      <p className="truncate text-sm font-semibold text-[#344054]">{displayName}</p>
-                      <p className="truncate text-xs text-[#475467]">{user?.email || user?.username}</p>
+                      <p className="truncate text-sm font-semibold text-secondary">{displayName}</p>
+                      <p className="truncate text-xs text-tertiary">{user?.email || user?.username}</p>
                     </div>
                   </div>
 
                   <div className="p-1.5">
                     <MenuButton
-                      icon={<User01 className="size-4 text-[#344054]" />}
+                      icon={<User01 className="size-4 text-fg-secondary" />}
                       label="Hồ sơ cá nhân"
-                      shortcut="⌘P"
                       onClick={() => {
                         setMenuOpen(false)
                         navigate(`${settingsPath}?tab=profile`)
                       }}
                     />
                     <MenuButton
-                      icon={<SettingsIcon />}
+                      icon={<Settings01 className="size-4 text-fg-secondary" />}
                       label="Cài đặt tài khoản"
-                      shortcut="⌘S"
                       onClick={() => {
                         setMenuOpen(false)
                         navigate(settingsPath)
                       }}
                     />
+                    <MenuButton
+                      icon={<Link03 className="size-4 text-fg-secondary" />}
+                      label="Liên kết CVAT"
+                      onClick={() => {
+                        setMenuOpen(false)
+                        navigate(cvatLinkPath)
+                      }}
+                    />
+                    <MenuButton
+                      icon={<Key01 className="size-4 text-fg-secondary" />}
+                      label="Đổi mật khẩu"
+                      onClick={() => {
+                        setMenuOpen(false)
+                        setChangingPassword(true)
+                      }}
+                    />
                   </div>
 
-                  <div className="border-t border-[#EAECF0] p-1.5">
+                  <div className="border-t border-secondary p-1.5">
                     <MenuButton
-                      icon={<HelpCircle className="size-4 text-[#344054]" />}
+                      icon={<HelpCircle className="size-4 text-fg-secondary" />}
                       label="Trung tâm hỗ trợ"
                       onClick={() => {
                         setMenuOpen(false)
@@ -218,7 +240,7 @@ export default function MainLayout() {
                       }}
                     />
                     <MenuButton
-                      icon={<SearchLg className="size-4 text-[#344054]" />}
+                      icon={<SearchLg className="size-4 text-fg-secondary" />}
                       label="Tìm kiếm nhanh"
                       shortcut="⌘K"
                       onClick={() => {
@@ -227,8 +249,8 @@ export default function MainLayout() {
                       }}
                     />
                     <MenuButton
-                      icon={<ProjectsIcon />}
-                      label="Dự án của tôi"
+                      icon={<Folder className="size-4 text-fg-secondary" />}
+                      label="Organization của tôi"
                       onClick={() => {
                         setMenuOpen(false)
                         navigate('/projects')
@@ -236,9 +258,9 @@ export default function MainLayout() {
                     />
                   </div>
 
-                  <div className="border-t border-[#EAECF0] p-1.5">
+                  <div className="border-t border-secondary p-1.5">
                     <MenuButton
-                      icon={<LogoutIcon />}
+                      icon={<LogOut01 className="size-4 text-fg-secondary" />}
                       label="Đăng xuất"
                       shortcut="⌥⇧Q"
                       onClick={() => {
@@ -257,12 +279,19 @@ export default function MainLayout() {
           <Outlet />
         </main>
 
-        <QuickSearchModal open={searchOpen} projectId={projectId} onClose={() => setSearchOpen(false)} />
+        <QuickSearchModal
+          open={searchOpen}
+          projectId={projectId}
+          currentProject={currentProject}
+          onClose={() => setSearchOpen(false)}
+        />
         <SupportCenterDrawer
           open={supportOpen}
           projectId={projectId}
+          teamLeaderName={teamLeaderName}
           onClose={() => setSupportOpen(false)}
         />
+        {changingPassword && <ChangePasswordDialog onClose={() => setChangingPassword(false)} />}
       </div>
     </ShellContext.Provider>
   )
@@ -283,39 +312,13 @@ function MenuButton({
     <button
       type="button"
       onClick={onClick}
-      className="flex w-full cursor-pointer items-center justify-between rounded-lg px-3 py-2 text-sm text-[#344054] transition hover:bg-[#F9FAFB]"
+      className="flex w-full cursor-pointer items-center justify-between rounded-lg px-3 py-2 text-sm text-secondary transition hover:bg-primary_hover"
     >
       <span className="flex items-center gap-2.5">
         {icon}
         <span>{label}</span>
       </span>
-      {shortcut && <span className="text-xs text-[#667085]">{shortcut}</span>}
+      {shortcut && <span className="text-xs text-tertiary">{shortcut}</span>}
     </button>
-  )
-}
-
-function SettingsIcon() {
-  return (
-    <svg className="size-4 text-[#344054]" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.6">
-      <circle cx="10" cy="10" r="2.75" />
-      <path d="M10 3.2v1.6M10 15.2v1.6M3.2 10h1.6M15.2 10h1.6M5.2 5.2l1.1 1.1M13.7 13.7l1.1 1.1M14.8 5.2l-1.1 1.1M6.3 13.7l-1.1 1.1" strokeLinecap="round" />
-    </svg>
-  )
-}
-
-function ProjectsIcon() {
-  return (
-    <svg className="size-4 text-[#344054]" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.6">
-      <path d="M3.5 6.5A1.5 1.5 0 0 1 5 5h3.2l1.5 1.7H15a1.5 1.5 0 0 1 1.5 1.5v6.3A1.5 1.5 0 0 1 15 16H5a1.5 1.5 0 0 1-1.5-1.5v-8Z" />
-    </svg>
-  )
-}
-
-function LogoutIcon() {
-  return (
-    <svg className="size-4 text-[#344054]" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.6">
-      <path d="M12.5 14.5v1a1.5 1.5 0 0 1-1.5 1.5H5.5A1.5 1.5 0 0 1 4 15.5v-11A1.5 1.5 0 0 1 5.5 3H11a1.5 1.5 0 0 1 1.5 1.5v1" strokeLinecap="round" />
-      <path d="M9 10h7.5m0 0-2.5-2.5M16.5 10 14 12.5" strokeLinecap="round" strokeLinejoin="round" />
-    </svg>
   )
 }
