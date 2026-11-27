@@ -113,7 +113,7 @@ export default function Qc2DashboardPage() {
           </SectionCard>
 
           <div className="grid gap-5 lg:grid-cols-2">
-            <SectionCard title="Tiến độ job audit theo batch" description="Mẫu đã có kết quả / tổng mẫu được giao.">
+            <SectionCard title="Tiến độ QC2 theo task" description="Mẫu đã có kết quả / tổng mẫu được giao.">
               {data.progress_by_batch.length === 0 ? (
                 <PageState kind="empty" title="Chưa có mẫu audit" />
               ) : (
@@ -205,7 +205,7 @@ function exportCsv(data: Qc2Summary, projectName: string, periodLabel: string) {
     ['Ngày', 'Đã audit', 'Reject', 'Lỗi ghi nhận'],
     ...data.trend.map((d) => [d.date, d.audited, d.rejected, d.errors]),
     [],
-    ['Batch', 'Mẫu đã có kết quả', 'Tổng mẫu'],
+    ['Task', 'Lượt đã có kết quả', 'Tổng lượt QC2'],
     ...data.progress_by_batch.map((b) => [b.batch, b.done, b.total]),
   ]
   const csv = rows.map((r) => r.map((c) => `"${String(c).replace(/"/g, '""')}"`).join(',')).join('\r\n')

@@ -1,4 +1,3 @@
-from django.contrib.auth.password_validation import validate_password
 from rest_framework import serializers
 
 from .models import RoleAssignment, User
@@ -29,7 +28,8 @@ class CurrentUserSerializer(serializers.ModelSerializer):
     """Thông tin của người đang đăng nhập, dùng cho GET/PATCH /api/auth/me/."""
 
     full_name = serializers.SerializerMethodField()
-    is_director = serializers.SerializerMethodField()
+    cvat_linked = serializers.SerializerMethodField()
+    cvat_username = serializers.SerializerMethodField()
     role_assignments = RoleAssignmentSerializer(many=True, read_only=True)
 
     class Meta:
@@ -47,19 +47,24 @@ class CurrentUserSerializer(serializers.ModelSerializer):
             "notify_deadline",
             "notify_request_updates",
             "notify_qc_pass",
-            "is_director",
+            "cvat_linked",
+            "cvat_username",
             "role_assignments",
         ]
 
     def get_full_name(self, user):
         return user.get_full_name() or user.username
 
-    def get_is_director(self, user):
-        return user.is_director()
+    def get_cvat_linked(self, user):
+        return hasattr(user, "cvat_account")
+
+    def get_cvat_username(self, user):
+        account = getattr(user, "cvat_account", None)
+        return account.cvat_username if account else None
 
 
 class ProfileUpdateSerializer(serializers.ModelSerializer):
-    """Cập nhật hồ sơ & tuỳ chọn thông báo cá nhân (vai trò chỉ đọc theo PQ03)."""
+    """Cập nhật hồ sơ & tuỳ chọn thông báo cá nhân (vai trò và múi giờ Việt Nam là chỉ đọc)."""
 
     full_name = serializers.CharField(required=False, allow_blank=True, write_only=True)
 
@@ -71,7 +76,6 @@ class ProfileUpdateSerializer(serializers.ModelSerializer):
             "full_name",
             "email",
             "avatar_url",
-            "timezone_name",
             "notify_rework",
             "notify_deadline",
             "notify_request_updates",
@@ -90,18 +94,3 @@ class ProfileUpdateSerializer(serializers.ModelSerializer):
             instance.first_name = parts[0] if parts and parts[0] else ""
             instance.last_name = parts[1] if len(parts) > 1 else ""
         return super().update(instance, validated_data)
-
-
-class ChangePasswordSerializer(serializers.Serializer):
-    current_password = serializers.CharField(write_only=True)
-    new_password = serializers.CharField(write_only=True, min_length=8)
-
-    def validate_current_password(self, value):
-        user = self.context["request"].user
-        if not user.check_password(value):
-            raise serializers.ValidationError("Mật khẩu hiện tại không đúng.")
-        return value
-
-    def validate_new_password(self, value):
-        validate_password(value, self.context["request"].user)
-        return value

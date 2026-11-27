@@ -28,8 +28,8 @@ export default function QueuePage() {
           <p>Backlog theo từng stage. Bấm số liệu để mở danh sách job tương ứng.</p>
         </div>
         <Select
-          allowClear placeholder="Tất cả batch" style={{ width: 200 }} value={batch} onChange={setBatch}
-          options={batches?.map((b) => ({ value: b.id, label: `${b.dataset_name} / ${b.name}` }))}
+          allowClear placeholder="Tất cả task" style={{ width: 200 }} value={batch} onChange={setBatch}
+          options={batches?.map((b) => ({ value: b.id, label: b.name }))}
         />
       </div>
       <Alert

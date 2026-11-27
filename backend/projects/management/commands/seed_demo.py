@@ -23,10 +23,8 @@ from teams.models import Team, TeamMember
 PROJECT_NAME = "[DEMO] Robotaxi 3D Cuboid"
 PASSWORD = "Demo@12345"
 USERS = {
-    "director_demo": [Role.DIRECTOR],
     "pm_demo": [Role.PROJECT_MANAGER],
     "qc2_demo": [Role.QC2],
-    "tl_demo": [Role.TEAM_LEADER],
     "qc1_demo": [Role.QC1, Role.ANNOTATOR],
     "ann1_demo": [Role.ANNOTATOR],
     "ann2_demo": [Role.ANNOTATOR],
@@ -72,19 +70,17 @@ class Command(BaseCommand):
             users[username] = user
 
         project = Project.objects.create(
-            name=PROJECT_NAME, description="Dữ liệu giả để thử luồng PM / QC2 / Annotator — không phải dữ liệu thật.",
-            created_by=users["director_demo"], sampling_rate=30, max_rework_rounds=2,
+            name=PROJECT_NAME, description="Dữ liệu giả để thử luồng PM / QC2 / QC1 / Annotator — không phải dữ liệu thật.",
+            created_by=users["pm_demo"], sampling_rate=20, max_rework_rounds=2,
             annotator_wip_limit=2, kpi_annotation_target=1200,
         )
         for username, roles in USERS.items():
             for role in roles:
-                RoleAssignment.objects.get_or_create(
-                    user=users[username], role=role, project=None if role == Role.DIRECTOR else project
-                )
+                RoleAssignment.objects.get_or_create(user=users[username], role=role, project=project)
 
-        team_a = Team.objects.create(project=project, name="Team A", leader=users["tl_demo"])
+        team_a = Team.objects.create(project=project, name="Team A")
         team_b = Team.objects.create(project=project, name="Team B")
-        for name in ("tl_demo", "qc1_demo", "ann1_demo", "ann2_demo"):
+        for name in ("qc1_demo", "ann1_demo", "ann2_demo"):
             TeamMember.objects.create(team=team_a, user=users[name])
         for name in ("ann3_demo", "ann4_demo"):
             TeamMember.objects.create(team=team_b, user=users[name], capacity=4)
@@ -100,19 +96,21 @@ class Command(BaseCommand):
 
         ds_front = Dataset.objects.create(project=project, name="Front camera 11/2026", created_by=users["pm_demo"])
         ds_lidar = Dataset.objects.create(project=project, name="Lidar night 11/2026", created_by=users["pm_demo"])
-        # B01, B02 giao cho Team A (tl_demo là leader) → TL thấy "Job của team".
-        b01 = Batch.objects.create(dataset=ds_front, name="B01", deadline=now + timedelta(days=2), team=team_a)
-        b02 = Batch.objects.create(dataset=ds_front, name="B02", deadline=now + timedelta(days=5), team=team_a)
-        b03 = Batch.objects.create(dataset=ds_lidar, name="N01", deadline=now + timedelta(days=7))
+        # B01, B02 giao cho Team A.
+        # Dataset = "Project" (CVAT project), Batch = "Task" (CVAT task) trên giao diện.
+        b01 = Batch.objects.create(project=project, dataset=ds_front, name="B01", deadline=now + timedelta(days=2), team=team_a)
+        b02 = Batch.objects.create(project=project, dataset=ds_front, name="B02", deadline=now + timedelta(days=5), team=team_a)
+        b03 = Batch.objects.create(project=project, dataset=ds_lidar, name="N01", deadline=now + timedelta(days=7))
+        dataset_of = {b01: ds_front, b02: ds_front, b03: ds_lidar}
 
         annotators = [users[n] for n in ("ann1_demo", "ann2_demo", "ann3_demo", "ann4_demo")]
-        qc1 = [users["qc1_demo"], users["tl_demo"]]
+        qc1 = [users["qc1_demo"]]
 
         def make(batch, index, status, **extra):
             annotator = annotators[index % len(annotators)]
             return Job.objects.create(
-                project=project, batch=batch, name=f"{batch.name}-{index:03d}", status=status,
-                annotator=annotator, qc1_reviewer=qc1[index % 2] if status not in (
+                project=project, dataset=dataset_of[batch], batch=batch, name=f"{batch.name}-{index:03d}", status=status,
+                annotator=annotator, qc1_reviewer=qc1[index % len(qc1)] if status not in (
                     JobStatus.PENDING_ANNOTATION, JobStatus.ANNOTATING) else None,
                 deadline=batch.deadline, frame_count=100, object_count=40 + index * 3, **extra,
             )
@@ -132,9 +130,14 @@ class Command(BaseCommand):
         # N01: chưa giao (dùng để thử "Nhận job mới").
         for i in range(1, 6):
             Job.objects.create(
-                project=project, batch=b03, name=f"N01-{i:03d}",
+                project=project, dataset=ds_lidar, batch=b03, name=f"N01-{i:03d}",
                 deadline=b03.deadline, frame_count=80, target_object_count=960,
             )
+
+        from quality.qc2 import ensure_qc2_sample
+
+        for qc2_job in Job.objects.filter(project=project, status=JobStatus.PENDING_QC2):
+            ensure_qc2_sample(qc2_job)
 
         # Dữ liệu mẫu cho ann1_demo: lỗi rework, yêu cầu phản hồi lỗi / dữ liệu bị chặn & thông báo
         ann1_rework = Job.objects.filter(project=project, annotator=users["ann1_demo"], status=JobStatus.REWORK).first()
@@ -161,11 +164,11 @@ class Command(BaseCommand):
                 AnnotatorRequest.objects.create(
                     project=project, job=ann1_rework, review_error=e1,
                     request_type=AnnotatorRequest.RequestType.ERROR_DISPUTE,
-                    status=AnnotatorRequest.Status.PENDING_TL,
+                    status=AnnotatorRequest.Status.PENDING_PM,
                     title=f"Không đồng ý lỗi '{e1.category.name}' frame 214",
                     reason="Điểm point cloud đuôi xe bị nhiễu mưa.",
-                    progress_note="TL đang đối chiếu frame 214. Nếu chưa phân xử được, TL sẽ chuyển PM.",
-                    created_by=users["ann1_demo"], handler=users["tl_demo"], handler_role="TL",
+                    progress_note="PM đang đối chiếu frame 214.",
+                    created_by=users["ann1_demo"], handler=users["pm_demo"], handler_role="PM",
                 )
                 UserNotification.objects.create(
                     recipient=users["ann1_demo"], project=project, job=ann1_rework,
@@ -181,7 +184,7 @@ class Command(BaseCommand):
             job.target_object_count = max(job.object_count, 1000)
             job.save(update_fields=["target_object_count"])
 
-        # Lịch sử nộp bài vài ngày gần đây để biểu đồ dashboard & P2 có dữ liệu
+        # Lịch sử nộp bài vài ngày gần đây để biểu đồ dashboard có dữ liệu
         sample_job = Job.objects.filter(project=project, annotator=users["ann1_demo"]).first()
         if sample_job:
             for days_ago, objs in [(5, 1080), (4, 1150), (3, 1010), (2, 1220), (1, 1190), (0, 980)]:

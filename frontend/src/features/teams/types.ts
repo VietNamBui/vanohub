@@ -4,6 +4,9 @@ import type { Role } from '../../shared/types/roles'
 export interface TeamMember {
   id: number
   user: UserBrief
+  /** Vai trò hiệu lực trong dự án (backend trả kèm). */
+  roles: Role[]
+  direct_roles: Role[]
   capacity: number
   joined_at: string
 }
@@ -11,8 +14,6 @@ export interface TeamMember {
 export interface Team {
   id: number
   name: string
-  leader: number | null
-  leader_detail: UserBrief | null
   members: TeamMember[]
   created_at: string
 }

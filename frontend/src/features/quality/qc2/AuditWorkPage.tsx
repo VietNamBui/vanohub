@@ -78,7 +78,7 @@ export default function AuditWorkPage() {
       <div className="flex items-start gap-3 rounded-xl bg-brand-primary_alt p-4 ring-1 ring-brand ring-inset">
         <InfoCircle className="mt-0.5 size-5 shrink-0 text-fg-brand-primary" />
         <p className="text-sm text-secondary">
-          <span className="font-semibold">QC2 quyết Pass / Reject từng job · PM quyết Accept / Reject cả batch.</span>{' '}
+          <span className="font-semibold">Mỗi job qua QC1 đều được kiểm một phần frame — QC2 quyết Pass / Reject từng job.</span>{' '}
           Reject → job về Rework và tăng vòng rework. Lỗi QC2 tìm thấy được tính là lỗi QC1 bỏ sót.
         </p>
       </div>
@@ -94,7 +94,7 @@ export default function AuditWorkPage() {
                   {FILTERS.map((f) => <Tabs.Item key={f.id} id={f.id} label={f.label} />)}
                 </Tabs.List>
               </Tabs>
-              <Input className="min-w-48 flex-1" size="sm" icon={SearchLg} aria-label="Tìm kiếm" placeholder="Tìm job, batch, annotator…" value={search} onChange={setSearch} />
+              <Input className="min-w-48 flex-1" size="sm" icon={SearchLg} aria-label="Tìm kiếm" placeholder="Tìm job, task, annotator…" value={search} onChange={setSearch} />
             </div>
             <Table
               aria-label="Bảng job audit"
@@ -118,12 +118,12 @@ export default function AuditWorkPage() {
                   <Table.Row id={s.id} className="cursor-pointer">
                     <Table.Cell>
                       <div className="font-medium text-primary">{s.job.name}</div>
-                      <div className="text-xs text-tertiary">{s.job.batch_name}</div>
+                      <div className="text-xs text-tertiary">{s.job.dataset_name} / {s.job.batch_name}</div>
                     </Table.Cell>
                     <Table.Cell>{s.job.annotator?.full_name ?? '—'}</Table.Cell>
                     <Table.Cell>
-                      <div className="text-secondary">Audit #{s.audit}</div>
-                      {s.stratum && <div className="text-xs text-tertiary">{s.stratum}</div>}
+                      <div className="text-secondary tabular-nums">{s.frames.length}/{s.job.frame_count} frame</div>
+                      {s.rework_round > 0 && <div className="text-xs text-tertiary">vòng rework {s.rework_round}</div>}
                     </Table.Cell>
                     <Table.Cell><ResultBadge result={s.result} /></Table.Cell>
                     <Table.Cell>

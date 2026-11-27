@@ -6,6 +6,10 @@ export async function obtainTokens(username: string, password: string): Promise<
   return data
 }
 
+export async function changePassword(currentPassword: string, newPassword: string): Promise<void> {
+  await apiClient.post('/auth/me/password/', { current_password: currentPassword, new_password: newPassword })
+}
+
 export async function fetchCurrentUser(): Promise<CurrentUser> {
   const { data } = await apiClient.get<CurrentUser>('/auth/me/')
   return data
@@ -13,10 +17,5 @@ export async function fetchCurrentUser(): Promise<CurrentUser> {
 
 export async function updateCurrentUser(payload: ProfileUpdateInput): Promise<CurrentUser> {
   const { data } = await apiClient.patch<CurrentUser>('/auth/me/', payload)
-  return data
-}
-
-export async function changePassword(payload: { current_password: string; new_password: string }): Promise<{ detail: string }> {
-  const { data } = await apiClient.post<{ detail: string }>('/auth/change-password/', payload)
   return data
 }

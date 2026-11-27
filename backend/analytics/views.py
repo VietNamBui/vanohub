@@ -88,7 +88,7 @@ class ProjectOverviewView(ProjectScopedViewMixin, APIView):
         return Response({
             "counts": {
                 "datasets": project.datasets.count(),
-                "batches": project.datasets.aggregate(n=Count("batches"))["n"],
+                "batches": project.batches.count(),
                 "jobs": totals["total"],
                 "escalated": totals["escalated"],
                 "overdue": totals["overdue"],
@@ -328,26 +328,22 @@ class AnnotatorDashboardView(ProjectScopedViewMixin, APIView):
         # --- Dữ liệu mở rộng theo thiết kế Tổng quan cá nhân ---
         membership = (
             TeamMember.objects.filter(user=user, team__project=project)
-            .select_related("team__leader")
+            .select_related("team")
             .first()
         )
         team_name = membership.team.name if membership else None
-        team_leader_name = (
-            membership.team.leader.get_full_name() or membership.team.leader.username
-            if membership and membership.team.leader
-            else None
-        )
+        team_leader_name = None
         last_sync = (
-            Batch.objects.filter(dataset__project=project, last_synced_at__isnull=False)
+            Batch.objects.filter(project=project, last_synced_at__isnull=False)
             .order_by("-last_synced_at")
             .values_list("last_synced_at", flat=True)
             .first()
         )
 
-        # Công việc tiếp theo (sắp xếp DB06: quá hạn → sắp hạn → rework → còn lại)
+        # Công việc tiếp theo (quá hạn → sắp hạn → rework → còn lại)
         active_qs = order_by_db06_priority(
             jobs.filter(status__in=ACTIVE_ANNOTATOR_STATUSES)
-            .select_related("batch__dataset", "annotator", "qc1_reviewer", "project")
+            .select_related("batch", "dataset", "annotator", "qc1_reviewer", "project")
             .annotate(_open_error_count=Count("review_errors", distinct=True)),
             now=now,
         )
@@ -454,9 +450,7 @@ class AnnotatorDashboardView(ProjectScopedViewMixin, APIView):
         req_qs = AnnotatorRequest.objects.filter(project=project, created_by=user).select_related(
             "job__batch", "review_error__category", "created_by", "handler"
         )
-        pending_req_count = req_qs.filter(
-            status__in=[AnnotatorRequest.Status.PENDING_TL, AnnotatorRequest.Status.PENDING_PM]
-        ).count()
+        pending_req_count = req_qs.filter(status=AnnotatorRequest.Status.PENDING_PM).count()
         recent_req_items = AnnotatorRequestSerializer(req_qs[:5], many=True).data
 
         return Response({

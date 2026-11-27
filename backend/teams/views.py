@@ -8,6 +8,7 @@ from rest_framework.decorators import action
 from rest_framework.exceptions import ValidationError
 from rest_framework.response import Response
 
+from accounts.models import Role, RoleAssignment
 from accounts.permissions import Cap, ProjectScopedViewMixin
 from accounts.serializers import UserBriefSerializer
 from jobs.models import OPEN_STATUSES, Job
@@ -29,8 +30,10 @@ class TeamViewSet(ProjectScopedViewMixin, mixins.ListModelMixin, mixins.Retrieve
     }
 
     def get_queryset(self):
-        return Team.objects.filter(project=self.project).select_related("leader").prefetch_related(
-            Prefetch("members", queryset=TeamMember.objects.select_related("user"))
+        roles = Prefetch("user__role_assignments", queryset=RoleAssignment.objects.filter(project=self.project),
+                         to_attr="project_roles")
+        return Team.objects.filter(project=self.project).prefetch_related(
+            Prefetch("members", queryset=TeamMember.objects.select_related("user").prefetch_related(roles))
         )
 
     def perform_create(self, serializer):
@@ -40,7 +43,7 @@ class TeamViewSet(ProjectScopedViewMixin, mixins.ListModelMixin, mixins.Retrieve
     def perform_update(self, serializer):
         team = serializer.save()
         ActivityLog.record(project=self.project, actor=self.request.user, action="team.update", target=team,
-                           after={"name": team.name, "leader": team.leader_id})
+                           after={"name": team.name})
 
     @transaction.atomic
     def perform_destroy(self, team):
@@ -66,9 +69,13 @@ class TeamViewSet(ProjectScopedViewMixin, mixins.ListModelMixin, mixins.Retrieve
         existing = self._current_membership(user)
         if existing:
             raise ValidationError(f"{user} đã thuộc team {existing.team}. Dùng chức năng điều chuyển.")
-        TeamMember.objects.create(team=team, user=user, capacity=serializer.validated_data["capacity"])
-        ActivityLog.record(project=self.project, actor=request.user, action="team.add_member", target=team,
-                           after={"user": user.username})
+        with transaction.atomic():
+            # Thành viên team chưa có vai trò nào trong dự án → mặc định là Annotator.
+            if not user.get_project_roles(self.project):
+                RoleAssignment.objects.create(user=user, role=Role.ANNOTATOR, project=self.project, granted_by=request.user)
+            TeamMember.objects.create(team=team, user=user, capacity=serializer.validated_data["capacity"])
+            ActivityLog.record(project=self.project, actor=request.user, action="team.add_member", target=team,
+                               after={"user": user.username})
         return Response(self.get_serializer(self.get_object()).data, status=status.HTTP_201_CREATED)
 
     @action(detail=True, methods=["post"], url_path="remove-member")

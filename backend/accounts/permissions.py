@@ -1,4 +1,4 @@
-"""Phân quyền theo dự án (Multi-Role RBAC + Scope).
+"""Phân quyền theo organization (Multi-Role RBAC + Scope).
 
 Ý tưởng: thay vì kiểm tra "có phải PM không" rải rác trong từng view, mỗi thao tác
 được gắn với một *capability* (quyền nghiệp vụ). Bảng CAPABILITY_ROLES bên dưới chính
@@ -14,13 +14,7 @@ from rest_framework.permissions import BasePermission
 
 from .models import Role, RoleAssignment, expand_roles
 
-ALL_PROJECT_ROLES = {
-    Role.PROJECT_MANAGER,
-    Role.QC2,
-    Role.TEAM_LEADER,
-    Role.QC1,
-    Role.ANNOTATOR,
-}
+ALL_PROJECT_ROLES = set(Role)
 
 
 class Cap:
@@ -29,20 +23,19 @@ class Cap:
     VIEW_PROJECT = "view_project"
     VIEW_DASHBOARD = "view_dashboard"
     VIEW_JOBS = "view_jobs"
-    MANAGE_DATA = "manage_data"  # Dataset, Batch, nhập Job từ CVAT, khoá
+    MANAGE_DATA = "manage_data"  # Project (Dataset), Task (Batch), đồng bộ CVAT, khoá
     MANAGE_JOBS = "manage_jobs"  # giao lại, deadline, khoá job, xử lý escalation
-    MANAGE_TEAM = "manage_team"  # team, roster, điều chuyển
+    MANAGE_TEAM = "manage_team"  # team, roster, điều chuyển, tạo thành viên
     MANAGE_SETTINGS = "manage_settings"  # rework, sampling, ngưỡng KPI
-    MANAGE_AUDITS = "manage_audits"  # tạo audit, phân auditor, chốt audit
+    MANAGE_AUDITS = "manage_audits"  # quản lý audit QC2, phân auditor
     PERFORM_AUDIT = "perform_audit"  # QC2 Pass / Reject, ghi lỗi
     MANAGE_QUALITY_CATALOG = "manage_quality_catalog"  # danh mục lỗi, guideline
     VIEW_GUIDELINES = "view_guidelines"
     MANAGE_DELIVERY = "manage_delivery"
     SEND_ANNOUNCEMENT = "send_announcement"
     VIEW_ACTIVITY = "view_activity"
-    LEAD_TEAM = "lead_team"  # TL: dashboard team, job của team, giao lại / deadline trong team, cấp QC1
     ANNOTATE_JOBS = "annotate_jobs"  # Annotator: xem job được giao, bắt đầu / nộp bài / làm lại rework
-    PERFORM_QC1 = "perform_qc1"  # QC1 (và TL kéo theo): xem hàng chờ QC1, bắt đầu / Pass / Reject QC1
+    PERFORM_QC1 = "perform_qc1"  # QC1: xem hàng chờ QC1, bắt đầu / Pass / Reject QC1
 
 
 CAPABILITY_ROLES = {
@@ -60,13 +53,9 @@ CAPABILITY_ROLES = {
     Cap.MANAGE_DELIVERY: {Role.PROJECT_MANAGER},
     Cap.SEND_ANNOUNCEMENT: {Role.PROJECT_MANAGER},
     Cap.VIEW_ACTIVITY: {Role.PROJECT_MANAGER},
-    Cap.LEAD_TEAM: {Role.TEAM_LEADER},
     Cap.ANNOTATE_JOBS: {Role.ANNOTATOR},
     Cap.PERFORM_QC1: {Role.QC1},
 }
-
-# Director: theo wireframe chỉ XEM dashboard dự án, không thao tác trong dự án.
-DIRECTOR_CAPABILITIES = {Cap.VIEW_PROJECT, Cap.VIEW_DASHBOARD, Cap.VIEW_JOBS, Cap.VIEW_ACTIVITY, Cap.VIEW_GUIDELINES}
 
 
 def capabilities_for_roles(roles):
@@ -77,17 +66,14 @@ def get_project_capabilities(user, project):
     roles = expand_roles(
         RoleAssignment.objects.filter(user=user, project=project).values_list("role", flat=True)
     )
-    caps = capabilities_for_roles(roles)
-    if user.is_director():
-        caps |= DIRECTOR_CAPABILITIES
-    return caps
+    return capabilities_for_roles(roles)
 
 
 class ProjectScopedViewMixin:
     """Dùng cho mọi view nằm dưới /api/projects/<project_id>/...
 
-    - self.project: dự án lấy từ URL (404 nếu user không thuộc dự án).
-    - self.capabilities: các capability của user trong dự án.
+    - self.project: organization lấy từ URL (404 nếu user không thuộc organization).
+    - self.capabilities: các capability của user trong organization.
     - required_capabilities: {action hoặc HTTP method: capability}. Khoá "*" là mặc định.
     """
 
@@ -109,7 +95,7 @@ class ProjectScopedViewMixin:
             self._project = get_object_or_404(Project, pk=self.kwargs["project_id"])
             self.capabilities = get_project_capabilities(self.request.user, self._project)
             if not self.capabilities:
-                raise NotFound()  # Không tiết lộ dự án có tồn tại hay không.
+                raise NotFound()  # Không tiết lộ organization có tồn tại hay không.
         return self._project
 
     @property
@@ -128,7 +114,7 @@ class ProjectScopedViewMixin:
 class HasProjectCapability(BasePermission):
     """Permission class của DRF: chặn với 403 nếu thiếu capability cần cho thao tác."""
 
-    message = "Bạn không có quyền thực hiện thao tác này trong dự án."
+    message = "Bạn không có quyền thực hiện thao tác này trong organization."
 
     def has_permission(self, request, view):
         if not request.user or not request.user.is_authenticated:

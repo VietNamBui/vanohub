@@ -16,7 +16,6 @@ export function RequireCap({ cap, children }: { cap: Capability | Capability[]; 
 export function ProjectIndexRedirect() {
   const { can } = useProject()
   if (can('view_dashboard')) return <Navigate to="overview" replace />
-  if (can('lead_team')) return <Navigate to="leader/overview" replace />
   if (can('perform_audit')) return <Navigate to="qc2/dashboard" replace />
   if (can('perform_qc1')) return <Navigate to="qc1/dashboard" replace />
   if (can('annotate_jobs')) return <Navigate to="annotator/dashboard" replace />

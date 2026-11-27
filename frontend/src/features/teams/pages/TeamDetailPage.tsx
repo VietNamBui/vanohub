@@ -33,7 +33,7 @@ export default function TeamDetailPage() {
       <div className="mx-auto flex max-w-6xl flex-col gap-4 p-4 md:p-6">
         {back}
         <div className="flex flex-col items-center gap-3 rounded-2xl bg-primary py-12 text-center ring-1 ring-secondary">
-          <p className="text-sm text-tertiary">{data.error != null ? getErrorMessage(data.error) : 'Không tìm thấy team này trong dự án.'}</p>
+          <p className="text-sm text-tertiary">{data.error != null ? getErrorMessage(data.error) : 'Không tìm thấy team này trong organization.'}</p>
           {data.error != null && <Button color="secondary" onPress={data.retry}>Thử lại</Button>}
         </div>
       </div>
@@ -43,7 +43,7 @@ export default function TeamDetailPage() {
   const memberOf = (userId: number) => data.members.find((m) => m.user.id === userId)
   const loadOf = (userId: number) => data.workload.find((w) => w.user.id === userId)
   const teamMembers = team?.members ?? []
-  const qc1Count = teamMembers.filter((tm) => memberOf(tm.user.id)?.roles.includes('qc1')).length
+  const qc1Count = teamMembers.filter((tm) => data.rolesOf(tm.user.id, tm).roles.includes('qc1')).length
   const activeJobs = teamMembers.reduce((sum, tm) => sum + (memberOf(tm.user.id)?.active_jobs ?? 0), 0)
   const dash = (n: number) => (data.isLoading ? '–' : n)
 
@@ -54,7 +54,6 @@ export default function TeamDetailPage() {
         <header className="flex flex-wrap items-start justify-between gap-4">
           <div>
             <h1 className="text-display-xs font-semibold text-primary">{team?.name ?? 'Đang tải…'}</h1>
-            <p className="mt-1 text-sm text-tertiary">Team Leader: {team ? team.leader_detail?.full_name ?? 'Chưa có' : '–'}</p>
           </div>
           {team && <Button color="secondary" size="sm" iconLeading={Edit01} onPress={() => setDialog({ type: 'edit-team', team })}>Sửa</Button>}
         </header>
@@ -78,7 +77,7 @@ export default function TeamDetailPage() {
           <Table aria-label={`Thành viên ${team?.name ?? ''}`} size="sm">
             <Table.Header>
               <Table.Head id="member" label="Thành viên" isRowHeader />
-              <Table.Head id="roles" label="Vai trò" tooltip="Bấm + để gán thêm vai trò trong dự án." />
+              <Table.Head id="roles" label="Vai trò" tooltip="Bấm + để gán thêm vai trò trong organization." />
               <Table.Head id="jobs" label="Job" tooltip="Số job đang mở người này giữ khi annotate." />
               <Table.Head id="load" label="Tải" tooltip="Job đang annotate / sức chứa." />
               <Table.Head id="actions" />
@@ -95,7 +94,7 @@ export default function TeamDetailPage() {
                     </Table.Cell>
                     <Table.Cell>
                       <MemberRolesCell projectId={projectId} userId={tm.user.id} userName={tm.user.full_name}
-                        roles={memberOf(tm.user.id)?.roles ?? []} onChange={(roles) => data.setMemberRoles(tm.user.id, roles)} />
+                        {...data.rolesOf(tm.user.id, tm)} onChange={(state) => data.setMemberRoles(tm.user.id, state)} />
                     </Table.Cell>
                     <Table.Cell className="tabular-nums">{memberOf(tm.user.id)?.active_jobs ?? 0}</Table.Cell>
                     <Table.Cell className={overloaded ? 'font-medium text-error-primary tabular-nums' : 'tabular-nums'}>

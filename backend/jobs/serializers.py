@@ -12,8 +12,7 @@ class JobSerializer(serializers.ModelSerializer):
     status_label = serializers.CharField(source="get_status_display", read_only=True)
     stage = serializers.CharField(read_only=True)
     batch_name = serializers.CharField(source="batch.name", read_only=True)
-    dataset = serializers.IntegerField(source="batch.dataset_id", read_only=True)
-    dataset_name = serializers.CharField(source="batch.dataset.name", read_only=True)
+    dataset_name = serializers.CharField(source="dataset.name", read_only=True)
     annotator = UserBriefSerializer(read_only=True)
     qc1_reviewer = UserBriefSerializer(read_only=True)
     is_overdue = serializers.BooleanField(read_only=True)
@@ -89,11 +88,14 @@ class JobSerializer(serializers.ModelSerializer):
 
 
 def _open_sample(job):
-    """Mẫu QC2 của job trong đợt audit đang mở (None nếu job không được lấy mẫu)."""
+    """Mẫu QC2 hiện hành của job trong đợt audit đang mở (ưu tiên mẫu PENDING, nếu không có lấy mẫu mới nhất)."""
     samples = getattr(job, "open_samples", None)
     if samples is None:  # chưa prefetch (vd. trang chi tiết) → truy vấn trực tiếp
         samples = list(job.audit_samples.filter(audit__status="in_progress").select_related("auditor"))
-    return samples[0] if samples else None
+    if not samples:
+        return None
+    pending = [s for s in samples if s.result == "pending"]
+    return pending[-1] if pending else samples[-1]
 
 
 class ReviewErrorBriefSerializer(serializers.Serializer):

@@ -39,12 +39,15 @@ function QuickSearchPalette({ projectId, onClose }: { projectId: number | null; 
           { id: 'p-jobs', label: 'Job của tôi', path: `${base}/annotator/jobs`, kind: 'page' },
           { id: 'p-rework', label: 'Cần sửa', path: `${base}/annotator/rework`, kind: 'rework' },
           { id: 'p-requests', label: 'Yêu cầu của tôi', path: `${base}/annotator/requests`, kind: 'page' },
-          { id: 'p-analytics', label: 'Phân tích cá nhân (P2)', path: `${base}/annotator/analytics`, kind: 'dashboard' },
-          { id: 'p-guide', label: 'Hướng dẫn gán nhãn', path: `${base}/guidelines`, kind: 'guideline' },
+          { id: 'p-analytics', label: 'Phân tích cá nhân', path: `${base}/annotator/analytics`, kind: 'dashboard' },
+          { id: 'p-guide', label: 'Guidelines', path: `${base}/guidelines`, kind: 'guideline' },
+          { id: 'p-cvat', label: 'Liên kết CVAT', path: `${base}/cvat-link`, kind: 'page' },
+          { id: 'p-ann', label: 'Thông báo', path: `${base}/announcements`, kind: 'page' },
           { id: 'p-settings', label: 'Cài đặt tài khoản', path: `${base}/account/settings`, kind: 'page' },
         ]
       : [
-          { id: 'p-projects', label: 'Dự án của tôi', path: '/projects', kind: 'page' },
+          { id: 'p-projects', label: 'Organization của tôi', path: '/projects', kind: 'page' },
+          { id: 'p-cvat', label: 'Liên kết CVAT', path: '/cvat-link', kind: 'page' },
           { id: 'p-settings', label: 'Cài đặt tài khoản', path: '/account/settings', kind: 'page' },
         ]
     const needle = query.trim().toLowerCase()
@@ -118,7 +121,7 @@ function QuickSearchPalette({ projectId, onClose }: { projectId: number | null; 
               setQuery(e.target.value)
               setActiveIndex(0)
             }}
-            placeholder="Tìm mã job, batch hoặc chuyển nhanh tới trang…"
+            placeholder="Tìm mã job, task hoặc chuyển nhanh tới trang…"
             className="w-full bg-transparent text-base text-[#101828] outline-none placeholder:text-[#667085]"
           />
           <button

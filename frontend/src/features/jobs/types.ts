@@ -21,6 +21,7 @@ export interface Job {
   status: JobStatus
   status_label: string
   stage: Stage
+  /** Task (CVAT task) chứa job. */
   batch: number
   batch_name: string
   dataset: number
@@ -77,6 +78,7 @@ export interface JobFilters {
   stage?: Stage | ''
   status?: string
   dataset?: number
+  /** Task (CVAT task). */
   batch?: number
   assignee?: number
   search?: string

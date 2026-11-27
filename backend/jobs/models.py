@@ -47,6 +47,8 @@ SUBMITTED_OR_DONE_STATUSES = [
 
 class Job(models.Model):
     project = models.ForeignKey("projects.Project", on_delete=models.CASCADE, related_name="jobs")
+    # project = organization; dataset = CVAT project; batch = CVAT task (xem projects/models.py).
+    dataset = models.ForeignKey("projects.Dataset", on_delete=models.CASCADE, related_name="jobs")
     batch = models.ForeignKey("projects.Batch", on_delete=models.CASCADE, related_name="jobs")
     name = models.CharField(max_length=200)
     status = models.CharField(max_length=30, choices=JobStatus.choices, default=JobStatus.PENDING_ANNOTATION)
@@ -75,8 +77,12 @@ class Job(models.Model):
     # --- Liên kết CVAT (CVAT là nguồn dữ liệu annotation; trạng thái do Vanohub quản lý) ---
     cvat_job_id = models.PositiveIntegerField(null=True, blank=True, unique=True)
     cvat_task_id = models.PositiveIntegerField(null=True, blank=True)
+    # Frame đầu của job trong task (CVAT đánh số frame theo task) — để chỉ đúng frame cần QC2 kiểm.
+    cvat_start_frame = models.PositiveIntegerField(default=0)
     cvat_stage = models.CharField(max_length=30, blank=True)
     cvat_state = models.CharField(max_length=30, blank=True)
+    # Assignee hiện tại bên CVAT (ID user CVAT) — để biết đã đồng bộ người giữ job sang CVAT chưa.
+    cvat_assignee_id = models.PositiveIntegerField(null=True, blank=True)
 
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -140,7 +146,6 @@ class AnnotatorRequest(models.Model):
         DATA_ISSUE = "data_issue", "Dữ liệu bị chặn"
 
     class Status(models.TextChoices):
-        PENDING_TL = "pending_tl", "Đang chờ TL"
         PENDING_PM = "pending_pm", "Đang chờ PM"
         RESOLVED = "resolved", "Đã giải quyết"
         REJECTED = "rejected", "Từ chối"
@@ -151,7 +156,7 @@ class AnnotatorRequest(models.Model):
         "quality.ReviewError", on_delete=models.SET_NULL, null=True, blank=True, related_name="disputes"
     )
     request_type = models.CharField(max_length=20, choices=RequestType.choices)
-    status = models.CharField(max_length=20, choices=Status.choices, default=Status.PENDING_TL)
+    status = models.CharField(max_length=20, choices=Status.choices, default=Status.PENDING_PM)
     title = models.CharField(max_length=255)
     reason = models.TextField()
     progress_note = models.TextField(blank=True, default="")
@@ -162,7 +167,7 @@ class AnnotatorRequest(models.Model):
     handler = models.ForeignKey(
         settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name="handled_requests"
     )
-    handler_role = models.CharField(max_length=16, blank=True, default="TL")
+    handler_role = models.CharField(max_length=16, blank=True, default="PM")
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
     resolved_at = models.DateTimeField(null=True, blank=True)

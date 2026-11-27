@@ -5,9 +5,9 @@ import type { Team, Workload } from './types'
 const p = (projectId: number, path: string) => `/projects/${projectId}/${path}`
 
 export const listTeams = async (projectId: number) => (await apiClient.get<Team[]>(p(projectId, 'teams/'))).data
-export const createTeam = async (projectId: number, data: { name: string; leader?: number | null }) =>
+export const createTeam = async (projectId: number, data: { name: string }) =>
   (await apiClient.post<Team>(p(projectId, 'teams/'), data)).data
-export const updateTeam = async (projectId: number, teamId: number, data: { name?: string; leader?: number | null }) =>
+export const updateTeam = async (projectId: number, teamId: number, data: { name?: string }) =>
   (await apiClient.patch<Team>(p(projectId, `teams/${teamId}/`), data)).data
 export const deleteTeam = async (projectId: number, teamId: number) => {
   await apiClient.delete(p(projectId, `teams/${teamId}/`))

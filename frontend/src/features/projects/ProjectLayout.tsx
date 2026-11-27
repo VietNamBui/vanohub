@@ -74,17 +74,12 @@ function GearIcon() {
   )
 }
 
-/**
- * Menu điều hướng theo vai trò.
- * Annotator thấy cấu trúc đúng thiết kế: Dashboard (Tổng quan cá nhân, Phân tích cá nhân),
- * Công việc (Job của tôi, Cần sửa, Yêu cầu của tôi), Hướng dẫn gán nhãn + Hỗ trợ / Cài đặt ở cuối.
- * Các vai trò khác (PM, Director, TL, QC1, QC2) giữ đầy đủ các nhóm quản lý của mình.
- */
+/** Menu điều hướng theo 4 vai trò phẳng (PM, QC2, QC1, Annotator) và cấu trúc Organization → Project → Task → Job. */
 function buildMenu(can: (cap: Capability) => boolean): NavGroup[] {
   const allowed = (cap: Capability | Capability[]) => (Array.isArray(cap) ? cap.some(can) : can(cap))
   const isAnnotator = can('annotate_jobs')
   const hasManagementOrQc =
-    can('view_dashboard') || can('view_jobs') || can('lead_team') || can('perform_qc1') || can('perform_audit') || can('manage_team')
+    can('view_dashboard') || can('view_jobs') || can('perform_qc1') || can('perform_audit') || can('manage_team')
 
   const groups: NavGroup[] = []
 
@@ -93,9 +88,8 @@ function buildMenu(can: (cap: Capability) => boolean): NavGroup[] {
     [
       { key: 'annotator/dashboard', label: 'Tổng quan cá nhân', cap: 'annotate_jobs' },
       { key: 'annotator/analytics', label: 'Phân tích cá nhân', cap: 'annotate_jobs' },
-      { key: 'overview', label: 'Tổng quan dự án', cap: 'view_dashboard' },
+      { key: 'overview', label: 'Tổng quan', cap: 'view_dashboard' },
       { key: 'team-ranking', label: 'Xếp hạng team', cap: 'view_dashboard' },
-      { key: 'leader/overview', label: 'Tổng quan team', cap: 'lead_team' },
       { key: 'qc1/dashboard', label: 'Tổng quan QC1', cap: ['perform_qc1', 'view_dashboard'] },
       { key: 'qc2/dashboard', label: 'Tổng quan QC2', cap: 'perform_audit' },
     ] satisfies NavItem[]
@@ -105,15 +99,14 @@ function buildMenu(can: (cap: Capability) => boolean): NavGroup[] {
     groups.push({ key: 'g-dashboard', label: 'Dashboard', icon: <BarIcon />, items: dashboardItems })
   }
 
-  // 2. Công việc (Annotator + Vận hành)
+  // 2. Công việc & Vận hành
   const workItems: NavItem[] = (
     [
       { key: 'annotator/jobs', label: 'Job của tôi', cap: 'annotate_jobs', matchPrefix: 'annotator/jobs' },
       { key: 'annotator/rework', label: 'Cần sửa', cap: 'annotate_jobs' },
-      { key: 'annotator/requests', label: 'Yêu cầu của tôi', cap: 'annotate_jobs' },
-      { key: 'leader/jobs', label: 'Job của team', cap: 'lead_team' },
-      { key: 'datasets', label: 'Datasets', cap: 'view_jobs' },
-      { key: 'batches', label: 'Batches', cap: 'view_jobs' },
+      { key: 'annotator/requests', label: 'Yêu cầu của tôi', cap: ['annotate_jobs', 'manage_jobs'] },
+      { key: 'datasets', label: 'Projects', cap: 'view_jobs' },
+      { key: 'batches', label: 'Tasks', cap: 'view_jobs' },
       { key: 'jobs', label: 'Jobs', cap: 'view_jobs' },
       { key: 'queue', label: 'Data Queue', cap: 'view_jobs' },
     ] satisfies NavItem[]
@@ -128,25 +121,23 @@ function buildMenu(can: (cap: Capability) => boolean): NavGroup[] {
     })
   }
 
-  // 3. Hướng dẫn gán nhãn (mục trực tiếp nổi bật theo thiết kế Annotator)
+  // 3. Guidelines (mục trực tiếp cho Annotator thuần)
   if (allowed('view_guidelines') && !hasManagementOrQc) {
     groups.push({
       key: 'guidelines',
-      label: 'Hướng dẫn gán nhãn',
+      label: 'Guidelines',
       icon: <BookIcon />,
       directKey: 'guidelines',
       items: [],
     })
   }
 
-  // 4. Các nhóm dành cho vai trò quản lý / QC (ẩn hoàn toàn với Annotator thuần để khớp thiết kế)
+  // 4. Các nhóm quản lý / QC
   if (hasManagementOrQc) {
     const peopleItems: NavItem[] = (
       [
         { key: 'teams', label: 'Team & Members', cap: 'manage_team' },
         { key: 'workload', label: 'Tải công việc', cap: ['manage_team', 'view_dashboard'] },
-        { key: 'leader/members', label: 'Thành viên team', cap: 'lead_team' },
-        { key: 'leader/workload', label: 'Tải công việc team', cap: 'lead_team' },
       ] satisfies NavItem[]
     ).filter((i) => allowed(i.cap))
     if (peopleItems.length > 0) {
@@ -155,28 +146,29 @@ function buildMenu(can: (cap: Capability) => boolean): NavGroup[] {
 
     const qualityItems: NavItem[] = (
       [
-        { key: 'audits', label: 'Quản lý Audit', cap: 'manage_audits' },
-        { key: 'qc2/strategy', label: 'Chiến thuật audit', cap: 'manage_audits' },
+        { key: 'audits', label: 'Audit QC2 theo task', cap: 'manage_audits' },
+        { key: 'qc2/strategy', label: 'Quy tắc QC2', cap: 'manage_audits' },
         { key: 'qc2/work', label: 'Job audit QC2', cap: 'perform_audit' },
         { key: 'qc1/work', label: 'Job kiểm tra QC1', cap: 'perform_qc1' },
         { key: 'error-categories', label: 'Danh mục lỗi', cap: 'manage_quality_catalog' },
-        { key: 'guidelines', label: 'Hướng dẫn gán nhãn', cap: 'view_guidelines' },
+        { key: 'guidelines', label: 'Guidelines', cap: 'view_guidelines' },
       ] satisfies NavItem[]
     ).filter((i) => allowed(i.cap))
     if (qualityItems.length > 0) {
       groups.push({ key: 'g-quality', label: 'Chất lượng', icon: <ShieldIcon />, items: qualityItems })
     }
+  }
 
-    const extraItems: NavItem[] = (
-      [
-        { key: 'delivery', label: 'Delivery', cap: 'manage_delivery' },
-        { key: 'cvat-link', label: 'Liên kết CVAT', cap: 'view_project' },
-        { key: 'announcements', label: 'Thông báo dự án', cap: 'view_project' },
-      ] satisfies NavItem[]
-    ).filter((i) => allowed(i.cap))
-    if (extraItems.length > 0) {
-      groups.push({ key: 'g-extra', label: 'Hệ thống & Bàn giao', icon: <GearIcon />, items: extraItems })
-    }
+  // 5. Hệ thống & Thông báo — luôn mở cho MỌI vai trò (gồm cả Annotator thuần để liên kết PAT CVAT)
+  const extraItems: NavItem[] = (
+    [
+      { key: 'delivery', label: 'Bàn giao', cap: 'manage_delivery' },
+      { key: 'cvat-link', label: 'Liên kết CVAT', cap: 'view_project' },
+      { key: 'announcements', label: 'Thông báo', cap: 'view_project' },
+    ] satisfies NavItem[]
+  ).filter((i) => allowed(i.cap))
+  if (extraItems.length > 0) {
+    groups.push({ key: 'g-extra', label: 'Cấu hình & Thông báo', icon: <GearIcon />, items: extraItems })
   }
 
   return groups
@@ -193,7 +185,7 @@ export default function ProjectLayout() {
     'g-work': true,
     'g-people': true,
     'g-quality': true,
-    'g-extra': false,
+    'g-extra': true,
   })
   const [mobileOpen, setMobileOpen] = useState(false)
 
@@ -210,7 +202,7 @@ export default function ProjectLayout() {
   if (isLoading) return <StateView kind="loading" />
   if (error != null || !context) {
     return getErrorKind(error) === 'not_found' ? (
-      <StateView kind="forbidden" title="Không tìm thấy dự án hoặc bạn không có quyền truy cập" />
+      <StateView kind="forbidden" title="Không tìm thấy organization hoặc bạn không có quyền truy cập" />
     ) : (
       <StateView kind="error" description={getErrorMessage(error)} action={{ label: 'Thử lại', onClick: retry }} />
     )
@@ -230,7 +222,7 @@ export default function ProjectLayout() {
 
   const sidebarContent = (
     <div className="flex h-full flex-col justify-between px-4 py-6">
-      <nav aria-label="Điều hướng dự án" className="flex flex-col gap-1">
+      <nav aria-label="Điều hướng organization" className="flex flex-col gap-1">
         {groups.map((group) => {
           if (group.directKey) {
             const active = selected === group.directKey
@@ -244,10 +236,10 @@ export default function ProjectLayout() {
                 }}
                 className={cx(
                   'flex w-full cursor-pointer items-center gap-3 rounded-lg px-3 py-2.5 text-left text-[15px] font-semibold transition',
-                  active ? 'bg-[#F9FAFB] text-[#101828]' : 'text-[#344054] hover:bg-[#F9FAFB]',
+                  active ? 'bg-primary_hover text-primary' : 'text-secondary hover:bg-primary_hover',
                 )}
               >
-                <span className={active ? 'text-[#344054]' : 'text-[#667085]'}>{group.icon}</span>
+                <span className={active ? 'text-secondary' : 'text-tertiary'}>{group.icon}</span>
                 <span>{group.label}</span>
               </button>
             )
@@ -262,18 +254,18 @@ export default function ProjectLayout() {
                 type="button"
                 onClick={() => toggleGroup(group.key)}
                 className={cx(
-                  'flex w-full cursor-pointer items-center justify-between rounded-lg px-3 py-2.5 text-left text-[15px] font-semibold transition hover:bg-[#F9FAFB]',
-                  hasActiveChild ? 'text-[#101828]' : 'text-[#344054]',
+                  'flex w-full cursor-pointer items-center justify-between rounded-lg px-3 py-2.5 text-left text-[15px] font-semibold transition hover:bg-primary_hover',
+                  hasActiveChild ? 'text-primary' : 'text-secondary',
                 )}
               >
                 <span className="flex items-center gap-3">
-                  <span className={hasActiveChild ? 'text-[#344054]' : 'text-[#667085]'}>{group.icon}</span>
+                  <span className={hasActiveChild ? 'text-secondary' : 'text-tertiary'}>{group.icon}</span>
                   <span>{group.label}</span>
                 </span>
                 {isExpanded ? (
-                  <ChevronDown className="size-4 text-[#98A2B3]" />
+                  <ChevronDown className="size-4 text-quaternary" />
                 ) : (
-                  <ChevronRight className="size-4 text-[#98A2B3]" />
+                  <ChevronRight className="size-4 text-quaternary" />
                 )}
               </button>
 
@@ -292,8 +284,8 @@ export default function ProjectLayout() {
                         className={cx(
                           'w-full cursor-pointer rounded-lg py-2 pr-3 pl-11 text-left text-[15px] transition',
                           active
-                            ? 'bg-[#F9FAFB] font-semibold text-[#101828]'
-                            : 'font-normal text-[#475467] hover:bg-[#F9FAFB] hover:text-[#101828]',
+                            ? 'bg-primary_hover font-semibold text-primary'
+                            : 'font-normal text-tertiary hover:bg-primary_hover hover:text-primary',
                         )}
                       >
                         {item.label}
@@ -307,16 +299,16 @@ export default function ProjectLayout() {
         })}
       </nav>
 
-      <div className="mt-6 flex flex-col gap-1 border-t border-[#F2F4F7] pt-4">
+      <div className="mt-6 flex flex-col gap-1 border-t border-secondary pt-4">
         <button
           type="button"
           onClick={() => {
             setMobileOpen(false)
             openSupport()
           }}
-          className="flex w-full cursor-pointer items-center gap-3 rounded-lg px-3 py-2.5 text-left text-[15px] font-semibold text-[#344054] transition hover:bg-[#F9FAFB]"
+          className="flex w-full cursor-pointer items-center gap-3 rounded-lg px-3 py-2.5 text-left text-[15px] font-semibold text-secondary transition hover:bg-primary_hover"
         >
-          <HelpCircle className="size-5 text-[#667085]" />
+          <HelpCircle className="size-5 text-tertiary" />
           <span>Hỗ trợ</span>
         </button>
         <button
@@ -326,8 +318,8 @@ export default function ProjectLayout() {
             navigate(`${base}account/settings`)
           }}
           className={cx(
-            'flex w-full cursor-pointer items-center gap-3 rounded-lg px-3 py-2.5 text-left text-[15px] font-semibold transition hover:bg-[#F9FAFB]',
-            selected === 'account/settings' ? 'bg-[#F9FAFB] text-[#101828]' : 'text-[#344054]',
+            'flex w-full cursor-pointer items-center gap-3 rounded-lg px-3 py-2.5 text-left text-[15px] font-semibold transition hover:bg-primary_hover',
+            selected === 'account/settings' ? 'bg-primary_hover text-primary' : 'text-secondary',
           )}
         >
           <GearIcon />
@@ -340,30 +332,28 @@ export default function ProjectLayout() {
   return (
     <ProjectContext.Provider value={context}>
       <div className="flex min-h-[calc(100vh-72px)] flex-1">
-        {/* Sidebar Desktop 280px */}
-        <aside className="sticky top-[72px] hidden h-[calc(100vh-72px)] w-[280px] shrink-0 overflow-y-auto border-r border-[#EAECF0] bg-white lg:block">
+        <aside className="sticky top-[72px] hidden h-[calc(100vh-72px)] w-[280px] shrink-0 overflow-y-auto border-r border-secondary bg-primary lg:block">
           {sidebarContent}
         </aside>
 
-        {/* Mobile menu button + drawer */}
         <div className="flex min-w-0 flex-1 flex-col">
-          <div className="flex items-center justify-between border-b border-[#EAECF0] bg-white px-4 py-2 lg:hidden">
+          <div className="flex items-center justify-between border-b border-secondary bg-primary px-4 py-2 lg:hidden">
             <button
               type="button"
               onClick={() => setMobileOpen((v) => !v)}
-              className="rounded-lg border border-[#D0D5DD] px-3 py-1.5 text-sm font-semibold text-[#344054]"
+              className="rounded-lg border border-primary px-3 py-1.5 text-sm font-semibold text-secondary"
             >
               {mobileOpen ? 'Đóng menu' : 'Menu'}
             </button>
-            <span className="truncate text-sm font-medium text-[#475467]">{context.project.name}</span>
+            <span className="truncate text-sm font-medium text-tertiary">{context.project.name}</span>
           </div>
 
           {mobileOpen && (
-            <div className="border-b border-[#EAECF0] bg-white lg:hidden">{sidebarContent}</div>
+            <div className="border-b border-secondary bg-primary lg:hidden">{sidebarContent}</div>
           )}
 
           <div className="min-w-0 flex-1">
-            <Outlet />
+            <Outlet key={projectId} />
           </div>
         </div>
       </div>

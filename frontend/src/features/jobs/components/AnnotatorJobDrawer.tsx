@@ -85,8 +85,8 @@ export default function AnnotatorJobDrawer({ projectId, jobId, onClose }: Props)
           ) : job ? (
             <div className="flex flex-col gap-6">
               <dl className="grid grid-cols-2 gap-x-6 gap-y-4">
-                <MetaField label="Dataset" value={job.dataset_name} />
-                <MetaField label="Batch" value={job.batch_name} />
+                <MetaField label="Project" value={job.dataset_name} />
+                <MetaField label="Task" value={job.batch_name ?? '—'} />
                 <MetaField label="Người đang giữ" value={job.annotator ? `${job.annotator.full_name} (Annotator)` : 'Chưa giao'} />
                 <MetaField
                   label="Deadline"

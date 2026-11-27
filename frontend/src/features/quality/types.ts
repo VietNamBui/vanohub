@@ -1,6 +1,5 @@
 import type { UserBrief } from '../../shared/api/types'
 import type { JobStatus } from '../jobs/types'
-import type { SamplingMethod, StratifyBy } from '../projects/types'
 
 export type Severity = 'minor' | 'major' | 'critical'
 
@@ -17,12 +16,15 @@ export interface SampleJob {
   id: number
   name: string
   status: JobStatus
+  dataset_name: string
   batch_name: string
   annotator: UserBrief | null
   qc1_reviewer: UserBrief | null
   rework_round: number
   object_count: number
   frame_count: number
+  /** Frame đầu của job trong task (CVAT đánh số frame theo task). */
+  cvat_start_frame: number
   cvat_job_id: number | null
   cvat_url: string | null
 }
@@ -45,7 +47,9 @@ export interface AuditSample {
   audit: number
   audit_status: 'in_progress' | 'completed'
   job: SampleJob
-  stratum: string
+  /** Frame (đánh số theo task) QC2 cần kiểm — sampling_rate % số frame của job. */
+  frames: number[]
+  rework_round: number
   auditor: UserBrief | null
   result: 'pending' | 'pass' | 'reject'
   reviewed_by: UserBrief | null
@@ -54,48 +58,20 @@ export interface AuditSample {
   errors: ReviewError[]
 }
 
+/** Đợt QC2 của một task — tự tạo khi job đầu tiên vào Chờ QC2, tự chốt khi task bàn giao. */
 export interface Audit {
   id: number
   batch: number
   batch_name: string
   dataset_name: string
   status: 'in_progress' | 'completed'
-  method: SamplingMethod
   sampling_rate: number
-  stratify_by: StratifyBy | ''
-  seed: number
-  eligible_count: number
-  note: string
-  created_by: UserBrief | null
   created_at: string
   completed_at: string | null
   sample_count: number
   passed: number
   rejected: number
   pending: number
-}
-
-export interface AuditInput {
-  batch: number
-  method?: SamplingMethod
-  sampling_rate?: number
-  stratify_by?: StratifyBy
-  seed?: number
-  auditors?: number[]
-  note?: string
-}
-
-export interface AuditPreview {
-  batch: number
-  method: SamplingMethod
-  sampling_rate: number
-  stratify_by: StratifyBy | ''
-  seed: number
-  eligible_count: number
-  sample_count: number
-  estimated_objects: number
-  estimated_frames: number
-  samples: { stratum: string; job: SampleJob }[]
 }
 
 export interface ErrorInput {
@@ -135,18 +111,17 @@ export interface Qc2Summary {
 }
 
 export interface AuditStrategy {
-  method: SamplingMethod
+  /** % số frame của mỗi job QC2 kiểm. */
   sampling_rate: number
-  stratify_by: StratifyBy | ''
-  /** Chỉ PM sửa được; QC2 chỉ xem. */
+  /** Chỉ PM có quyền cấu hình mới sửa được. */
   can_edit: boolean
   history: {
     at: string
     actor: UserBrief | null
-    before: Partial<Record<'sampling_method' | 'sampling_rate' | 'stratify_by', string | number>>
-    after: Partial<Record<'sampling_method' | 'sampling_rate' | 'stratify_by', string | number>>
+    before: { sampling_rate?: number }
+    after: { sampling_rate?: number }
   }[]
-  preview_batches: { id: number; name: string; dataset_name: string; pending_qc2: number }[]
+  stats: { pending: number; passed: number; rejected: number }
 }
 
 export type Qc1Scope = 'mine' | 'pool' | 'all'

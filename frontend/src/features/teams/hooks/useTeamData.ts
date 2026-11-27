@@ -13,14 +13,14 @@ import { getWorkload, listTeams } from '../api'
  */
 export function useTeamData(projectId: number) {
   const [version, setVersion] = useState(0)
-  const [roleOverrides, setRoleOverrides] = useState<Record<number, Role[]>>({})
+  const [roleOverrides, setRoleOverrides] = useState<Record<number, RoleState>>({})
 
   const teams = useRequest(`teams:${projectId}:${version}`, () => listTeams(projectId))
   const members = useRequest(`members:${projectId}:all:${version}`, () => listMembers(projectId))
   const workload = useRequest(`workload:${projectId}:${version}`, () => getWorkload(projectId))
 
   const memberList = useMemo(
-    () => (members.data ?? []).map((m) => (roleOverrides[m.user.id] ? { ...m, roles: roleOverrides[m.user.id] } : m)),
+    () => (members.data ?? []).map((m) => (roleOverrides[m.user.id] ? { ...m, ...roleOverrides[m.user.id] } : m)),
     [members.data, roleOverrides],
   )
 
@@ -29,11 +29,15 @@ export function useTeamData(projectId: number) {
     setVersion((v) => v + 1)
   }, [])
 
-  const setMemberRoles = useCallback((userId: number, roles: Role[]) => {
+  const setMemberRoles = useCallback((userId: number, roles: RoleState) => {
     setRoleOverrides((current) => ({ ...current, [userId]: roles }))
   }, [])
 
+  /** Vai trò của một người: vai trò vừa gán trên giao diện (nếu có), không thì vai trò backend trả kèm. */
+  const rolesOf = useCallback((userId: number, fallback: RoleState): RoleState => roleOverrides[userId] ?? fallback, [roleOverrides])
+
   return {
+    rolesOf,
     teams: teams.data ?? [],
     members: memberList,
     workload: workload.data ?? [],
@@ -47,4 +51,10 @@ export function useTeamData(projectId: number) {
     reload,
     setMemberRoles,
   }
+}
+
+/** Vai trò hiệu lực + vai trò gán trực tiếp của một người. */
+export interface RoleState {
+  roles: Role[]
+  direct_roles: Role[]
 }

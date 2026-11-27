@@ -38,8 +38,32 @@ class ErrorCategory(models.Model):
         return self.name
 
 
+DEFAULT_ERROR_CATEGORIES = (
+    ("Thiếu đối tượng", "Bỏ sót đối tượng cần gán nhãn trên frame", Severity.MAJOR, ErrorCategory.AppliesTo.BOTH),
+    ("Sai nhãn lớp", "Gắn sai class/category so với guideline", Severity.MAJOR, ErrorCategory.AppliesTo.BOTH),
+    ("Lệch khung / biên", "Bounding box / cuboid lệch kích thước hoặc góc xoay", Severity.MINOR, ErrorCategory.AppliesTo.BOTH),
+    ("Gán nhầm / thừa", "Gán nhãn vùng không thuộc đối tượng mục tiêu", Severity.MINOR, ErrorCategory.AppliesTo.BOTH),
+    ("Sai thuộc tính", "Thiếu hoặc sai attribute / occlusion / truncation", Severity.MINOR, ErrorCategory.AppliesTo.BOTH),
+    ("Lỗi nghiêm trọng", "Vi phạm quy tắc guideline nghiêm trọng cần làm lại", Severity.CRITICAL, ErrorCategory.AppliesTo.BOTH),
+)
+
+
+def seed_default_error_categories(project):
+    """Tạo bộ danh mục lỗi mặc định cho organization mới (idempotent) để QC1/QC2 Reject không bị tắc."""
+    if ErrorCategory.objects.filter(project=project).exists():
+        return 0
+    objs = [
+        ErrorCategory(project=project, name=name, description=desc, severity=sev, applies_to=applies)
+        for name, desc, sev, applies in DEFAULT_ERROR_CATEGORIES
+    ]
+    ErrorCategory.objects.bulk_create(objs, ignore_conflicts=True)
+    return len(objs)
+
+
 class Audit(models.Model):
-    """Một đợt QC2 Internal Audit trên một Batch.
+    """Nhóm các lượt QC2 của MỘT TASK (Batch). Tạo tự động khi job đầu tiên của task vào Chờ QC2;
+    chốt (completed) khi task được bàn giao. Các trường method / seed / eligible_* là của cách
+    lấy mẫu job cũ — không còn dùng (QC2 giờ kiểm mọi job, mỗi job một phần frame).
 
     Lưu lại cấu hình sampling đã dùng + seed ngẫu nhiên → có thể giải thích vì sao
     những job này được chọn (yêu cầu "lưu lịch sử Sampling").
@@ -73,7 +97,10 @@ class Audit(models.Model):
 
 
 class AuditSample(models.Model):
-    """Một job được lấy mẫu trong một Audit, và kết quả QC2 của job đó."""
+    """Một lượt QC2 của một job: các frame được chọn để kiểm + kết quả.
+
+    Mỗi lần job vào Chờ QC2 (lần đầu hoặc sau rework) có một lượt mới → cùng job có thể có nhiều lượt.
+    """
 
     class Result(models.TextChoices):
         PENDING = "pending", "Chờ audit"
@@ -83,6 +110,9 @@ class AuditSample(models.Model):
     audit = models.ForeignKey(Audit, on_delete=models.CASCADE, related_name="samples")
     job = models.ForeignKey("jobs.Job", on_delete=models.CASCADE, related_name="audit_samples")
     stratum = models.CharField(max_length=120, blank=True)
+    # Số frame (đánh số theo task, như trên CVAT) QC2 cần kiểm — sampling_rate % frame của job.
+    frames = models.JSONField(default=list)
+    rework_round = models.PositiveSmallIntegerField(default=0)
     auditor = models.ForeignKey(
         settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name="audit_samples"
     )
@@ -93,7 +123,6 @@ class AuditSample(models.Model):
 
     class Meta:
         ordering = ["id"]
-        constraints = [models.UniqueConstraint(fields=["audit", "job"], name="unique_job_per_audit")]
 
 
 class ReviewError(models.Model):

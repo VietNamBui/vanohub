@@ -20,21 +20,6 @@ interface ChecklistSection {
   body: string
 }
 
-const DEFAULT_SECTIONS: ChecklistSection[] = [
-  {
-    title: 'Vị trí, kích thước và hướng',
-    body: 'Căn cuboid sát đối tượng theo point cloud và giữ đúng hướng di chuyển. Kiểm tra lại ở các góc nhìn khác trước khi xác nhận.',
-  },
-  {
-    title: 'Đối tượng và lớp',
-    body: 'Kiểm tra các điểm bị che khuất để tránh bỏ sót đối tượng. Đối chiếu lớp và thuộc tính với đối tượng thực tế.',
-  },
-  {
-    title: 'ID giữa các frame',
-    body: 'Dùng cùng ID cho một đối tượng xuyên suốt các frame liên tiếp. Kiểm tra lại các đoạn đối tượng bị che khuất hoặc xuất hiện trở lại.',
-  },
-]
-
 function parseGuidelineSections(markdown: string): ChecklistSection[] {
   const lines = markdown.split('\n')
   const sections: ChecklistSection[] = []
@@ -42,9 +27,9 @@ function parseGuidelineSections(markdown: string): ChecklistSection[] {
   let bodyLines: string[] = []
 
   const flush = () => {
-    const body = bodyLines.join(' ').replace(/\s+/g, ' ').trim()
+    const body = bodyLines.join('\n').trim()
     if (currentTitle || body) {
-      sections.push({ title: currentTitle || 'Quy tắc gán nhãn', body })
+      sections.push({ title: currentTitle || 'Nội dung hướng dẫn', body })
     }
     currentTitle = ''
     bodyLines = []
@@ -60,14 +45,14 @@ function parseGuidelineSections(markdown: string): ChecklistSection[] {
       flush()
       currentTitle = line.replace(/^#\s+/, '').trim()
     } else {
-      bodyLines.push(line.replace(/^[-*]\s+/, ''))
+      bodyLines.push(line.replace(/^[-*]\s+/, '• '))
     }
   }
   flush()
-  return sections.length > 0 ? sections : DEFAULT_SECTIONS
+  return sections
 }
 
-/** Hướng dẫn gán nhãn (DL07): chế độ Chỉ đọc cho Annotator, danh sách kiểm tra trước khi nộp, ghi chú KPI CS01–CS03. PM có thể xuất bản phiên bản mới. */
+/** Guidelines: chế độ Chỉ đọc cho thành viên, danh sách kiểm tra trước khi nộp. PM có thể xuất bản phiên bản mới. */
 export default function GuidelinesPage() {
   const { projectId, project, can } = useProject()
   const [version, setVersion] = useState(0)
@@ -83,7 +68,7 @@ export default function GuidelinesPage() {
   const canManage = can('manage_quality_catalog')
   const guidelines = data ?? []
   const current = guidelines.find((g) => g.id === selectedId) ?? guidelines[0]
-  const sections = current ? parseGuidelineSections(current.content) : DEFAULT_SECTIONS
+  const sections = current ? parseGuidelineSections(current.content) : []
 
   async function handlePublish() {
     if (!title.trim() || !content.trim()) return
@@ -100,17 +85,19 @@ export default function GuidelinesPage() {
 
   return (
     <div className="mx-auto flex max-w-[1160px] flex-col gap-6 px-6 py-7">
-      <AnnotatorBreadcrumb projectId={projectId} items={[{ label: 'Hướng dẫn gán nhãn' }]} />
+      <AnnotatorBreadcrumb projectId={projectId} items={[{ label: 'Guidelines' }]} />
 
       <header className="flex flex-wrap items-start justify-between gap-4">
         <div>
-          <h1 className="text-[30px] leading-tight font-bold text-[#101828]">Hướng dẫn gán nhãn</h1>
-          <p className="mt-1 text-base text-[#475467]">{project.name}</p>
+          <h1 className="text-display-xs font-semibold text-primary">Guidelines</h1>
+          <p className="mt-1 text-sm text-tertiary">
+            {project.name} · Mỗi lần lưu tạo một phiên bản mới; phiên bản cũ luôn được giữ lại.
+          </p>
         </div>
 
         <div className="flex flex-wrap items-center gap-3">
           {guidelines.length > 1 && current && (
-            <div className="w-52">
+            <div className="w-56">
               <NativeSelect
                 size="sm"
                 aria-label="Chọn phiên bản"
@@ -129,7 +116,7 @@ export default function GuidelinesPage() {
               color="primary"
               size="md"
               onPress={() => {
-                setTitle(current?.title ?? 'Quy tắc gán nhãn cuboid')
+                setTitle(current?.title ?? '')
                 setContent(current?.content ?? '')
                 setEditing(true)
               }}
@@ -141,25 +128,30 @@ export default function GuidelinesPage() {
       </header>
 
       {error != null ? (
-        <div className="rounded-xl border border-[#EAECF0] bg-white p-6">
+        <div className="rounded-2xl bg-primary p-6 shadow-xs ring-1 ring-secondary">
           <PageState kind="error" description={getErrorMessage(error)} onRetry={retry} />
         </div>
       ) : isLoading ? (
-        <div className="rounded-xl border border-[#EAECF0] bg-white p-6">
+        <div className="rounded-2xl bg-primary p-6 shadow-xs ring-1 ring-secondary">
           <PageState kind="loading" />
+        </div>
+      ) : !current ? (
+        <div className="rounded-2xl bg-primary p-8 text-center shadow-xs ring-1 ring-secondary">
+          <p className="text-base font-semibold text-primary">Chưa có hướng dẫn gán nhãn</p>
+          <p className="mt-1 text-sm text-tertiary">
+            {canManage
+              ? 'Bấm "Tạo hướng dẫn" để xuất bản phiên bản đầu tiên cho organization.'
+              : 'Project Manager chưa xuất bản hướng dẫn cho organization này.'}
+          </p>
         </div>
       ) : (
         <>
-          {/* Card phiên bản đang áp dụng */}
-          <section className="flex flex-wrap items-center justify-between gap-4 rounded-xl border border-[#EAECF0] bg-white px-6 py-5">
+          <section className="flex flex-wrap items-center justify-between gap-4 rounded-2xl bg-primary px-6 py-5 shadow-xs ring-1 ring-secondary">
             <div>
-              <h2 className="text-lg font-bold text-[#101828]">
-                {current ? current.title : 'Quy tắc gán nhãn cuboid'}
-              </h2>
-              <p className="mt-1 text-sm text-[#475467]">
-                {current
-                  ? `Phiên bản áp dụng v${current.version} · DL07${current.created_by ? ` · ${current.created_by.full_name}` : ''}`
-                  : 'Chưa xuất bản hướng dẫn riêng — áp dụng bộ quy tắc chuẩn · DL07'}
+              <h2 className="text-lg font-semibold text-primary">{current.title}</h2>
+              <p className="mt-1 text-sm text-tertiary">
+                Phiên bản áp dụng v{current.version}
+                {current.created_by ? ` · ${current.created_by.full_name}` : ''} · {formatDateTime(current.created_at)}
               </p>
             </div>
             <Badge size="sm" type="pill-color" color="gray">
@@ -167,29 +159,29 @@ export default function GuidelinesPage() {
             </Badge>
           </section>
 
-          {/* Card Kiểm tra trước khi nộp */}
-          <section className="rounded-xl border border-[#EAECF0] bg-white p-6">
-            <h2 className="text-lg font-bold text-[#101828]">Kiểm tra trước khi nộp</h2>
+          <section className="rounded-2xl bg-primary p-6 shadow-xs ring-1 ring-secondary">
+            <h2 className="text-lg font-semibold text-primary">Kiểm tra trước khi nộp</h2>
             <ul className="mt-5 flex flex-col gap-5">
               {sections.map((sec, idx) => (
                 <li key={`${sec.title}-${idx}`} className="flex items-start gap-3">
-                  <CheckCircle className="mt-0.5 size-5 shrink-0 text-[#7F56D9]" />
+                  <CheckCircle className="mt-0.5 size-5 shrink-0 text-brand-secondary" />
                   <div>
-                    <h3 className="text-[15px] font-bold text-[#101828]">{sec.title}</h3>
-                    {sec.body && <p className="mt-1 text-sm leading-relaxed text-[#475467]">{sec.body}</p>}
+                    <h3 className="text-[15px] font-semibold text-primary">{sec.title}</h3>
+                    {sec.body && (
+                      <p className="mt-1 text-sm leading-relaxed whitespace-pre-line text-tertiary">{sec.body}</p>
+                    )}
                   </div>
                 </li>
               ))}
             </ul>
           </section>
 
-          {/* Blue Info Callout CS01-CS03 */}
-          <div className="flex items-start gap-3 rounded-xl border border-[#B2DDFF] bg-[#EFF8FF] px-5 py-4 text-[#175CD3]">
-            <InfoCircle className="mt-0.5 size-5 shrink-0" />
+          <div className="flex items-start gap-3 rounded-2xl border border-secondary bg-secondary px-5 py-4 text-secondary">
+            <InfoCircle className="mt-0.5 size-5 shrink-0 text-brand-secondary" />
             <div>
-              <p className="text-sm font-bold">Ghi nhận sản lượng · CS01–CS03</p>
-              <p className="mt-1 text-[13px] leading-relaxed">
-                KPI tính theo cuboid/ngày khi bạn xác nhận hoàn thành object trên CVAT. Phần rework hoàn tất cũng tính vào KPI.
+              <p className="text-sm font-semibold text-primary">Ghi nhận sản lượng</p>
+              <p className="mt-1 text-[13px] leading-relaxed text-tertiary">
+                KPI tính theo object/ngày khi bạn xác nhận hoàn thành trên CVAT. Phần rework hoàn tất cũng được ghi nhận vào sản lượng.
               </p>
             </div>
           </div>
@@ -206,13 +198,13 @@ export default function GuidelinesPage() {
         pending={pending}
       >
         <div className="flex flex-col gap-4">
-          <Input label="Tiêu đề *" value={title} onChange={setTitle} placeholder="VD: Quy tắc gán nhãn cuboid" />
+          <Input label="Tiêu đề *" value={title} onChange={setTitle} placeholder="VD: Quy tắc gán nhãn" />
           <TextArea
             label="Nội dung (Markdown — dùng ## để chia các mục kiểm tra) *"
             rows={10}
             value={content}
             onChange={setContent}
-            placeholder={'## Vị trí, kích thước và hướng\nCăn cuboid sát đối tượng theo point cloud...\n\n## ID giữa các frame\nDùng cùng ID xuyên suốt các frame liên tiếp.'}
+            placeholder={'## Phạm vi\nMô tả quy tắc gán nhãn...\n\n## Kiểm tra trước khi nộp\n- Kiểm tra đầy đủ đối tượng.'}
           />
         </div>
       </FormDialog>

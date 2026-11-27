@@ -30,10 +30,6 @@ import AuditsPage from '../features/quality/qc2/AuditsPage'
 import AuditStrategyPage from '../features/quality/qc2/AuditStrategyPage'
 import AuditWorkPage from '../features/quality/qc2/AuditWorkPage'
 import Qc2DashboardPage from '../features/quality/qc2/Qc2DashboardPage'
-import TeamJobsPage from '../features/teams/leader/TeamJobsPage'
-import TeamMembersPage from '../features/teams/leader/TeamMembersPage'
-import TeamOverviewPage from '../features/teams/leader/TeamOverviewPage'
-import TeamWorkloadPage from '../features/teams/leader/TeamWorkloadPage'
 import TeamDetailPage from '../features/teams/pages/TeamDetailPage'
 import TeamsPage from '../features/teams/pages/TeamsPage'
 import WorkloadPage from '../features/teams/pages/WorkloadPage'
@@ -41,7 +37,7 @@ import MainLayout from '../layouts/MainLayout'
 import StateView from '../shared/components/StateView'
 import type { Capability } from '../shared/types/capabilities'
 
-/** Route trong dự án, kèm capability cần có (khớp với capability backend kiểm tra ở API tương ứng). */
+/** Route trong organization, kèm capability cần có (khớp với capability backend kiểm tra ở API tương ứng). */
 const guarded = (path: string, cap: Capability | Capability[], element: ReactNode) => ({
   path,
   element: <RequireCap cap={cap}>{element}</RequireCap>,
@@ -58,6 +54,7 @@ export const router = createBrowserRouter([
         children: [
           { index: true, element: <HomeRedirect /> },
           { path: 'projects', element: <ProjectListPage /> },
+          { path: 'cvat-link', element: <CvatLinkPage /> },
           { path: 'account/settings', element: <AccountSettingsPage /> },
           {
             path: 'projects/:projectId',
@@ -74,10 +71,6 @@ export const router = createBrowserRouter([
               guarded('teams/:teamId', 'manage_team', <TeamDetailPage />),
               guarded('workload', ['manage_team', 'view_dashboard'], <WorkloadPage />),
               guarded('audits', 'manage_audits', <AuditsPage />),
-              guarded('leader/overview', 'lead_team', <TeamOverviewPage />),
-              guarded('leader/jobs', 'lead_team', <TeamJobsPage />),
-              guarded('leader/members', 'lead_team', <TeamMembersPage />),
-              guarded('leader/workload', 'lead_team', <TeamWorkloadPage />),
               guarded('qc2/strategy', 'manage_audits', <AuditStrategyPage />),
               guarded('qc2/work', 'perform_audit', <AuditWorkPage />),
               guarded('qc2/dashboard', 'perform_audit', <Qc2DashboardPage />),
@@ -88,10 +81,10 @@ export const router = createBrowserRouter([
               guarded('annotator/jobs', 'annotate_jobs', <AnnotatorJobsPage />),
               guarded('annotator/jobs/:jobId', 'annotate_jobs', <AnnotatorJobDetailPage />),
               guarded('annotator/rework', 'annotate_jobs', <AnnotatorReworkPage />),
-              guarded('annotator/requests', ['annotate_jobs', 'lead_team', 'manage_jobs'], <AnnotatorRequestsPage />),
+              guarded('annotator/requests', ['annotate_jobs', 'manage_jobs'], <AnnotatorRequestsPage />),
               guarded('error-categories', 'manage_quality_catalog', <ErrorCategoriesPage />),
-              guarded('guidelines', 'view_guidelines', <GuidelinesPage />),
               guarded('delivery', 'manage_delivery', <DeliveryPage />),
+              guarded('guidelines', 'view_guidelines', <GuidelinesPage />),
               guarded('cvat-link', 'view_project', <CvatLinkPage />),
               guarded('announcements', 'view_project', <AnnouncementsPage />),
               guarded('account/settings', 'view_project', <AccountSettingsPage />),

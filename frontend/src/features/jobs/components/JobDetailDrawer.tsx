@@ -97,8 +97,8 @@ export default function JobDetailDrawer({ jobId, onClose, onChanged }: Props) {
             <Alert type="error" showIcon title={`Job vượt số vòng rework tối đa (${job.rework_round}/${job.max_rework_rounds}).`} />
           )}
           <Descriptions column={2} size="small" bordered>
-            <Descriptions.Item label="Dataset">{job.dataset_name}</Descriptions.Item>
-            <Descriptions.Item label="Batch">{job.batch_name}</Descriptions.Item>
+            <Descriptions.Item label="Project">{job.dataset_name}</Descriptions.Item>
+            <Descriptions.Item label="Task">{job.batch_name ?? '—'}</Descriptions.Item>
             <Descriptions.Item label="Annotator"><UserName user={job.annotator} empty="Chưa giao" /></Descriptions.Item>
             <Descriptions.Item label="Người QC1"><UserName user={job.qc1_reviewer} empty="Chưa giao" /></Descriptions.Item>
             <Descriptions.Item label="Deadline">{formatDateTime(job.deadline)}</Descriptions.Item>

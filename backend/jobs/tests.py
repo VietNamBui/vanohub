@@ -73,16 +73,17 @@ class JobQc2ColumnTests(TestCase):
     def test_job_list_exposes_open_audit_sample_auditor(self):
         from accounts.testing import ProjectFixture
 
+        from quality.qc2 import ensure_qc2_sample
+
         f = ProjectFixture()
-        jobs = [f.job() for _ in range(4)]
+        waiting = [f.job() for _ in range(2)]
+        in_qc1 = f.job(status=JobStatus.PENDING_QC1)
+        for job in waiting + [in_qc1]:
+            ensure_qc2_sample(job)
         pm = f.client(f.pm)
-        audit = pm.post(f.url("audits/"), {"batch": f.batch.id, "auditors": [f.qc2.id]}, format="json")
-        self.assertEqual(audit.status_code, 201, audit.data)
         rows = {r["id"]: r for r in pm.get(f.url("jobs/")).data["results"]}
-        sampled = [r for r in rows.values() if r["qc2"]]
-        self.assertEqual(len(sampled), 2)  # 50% của 4
-        self.assertEqual(sampled[0]["qc2"]["auditor"]["id"], f.qc2.id)
-        self.assertEqual(len([j for j in jobs if rows[j.id]["qc2"] is None]), 2)
+        self.assertEqual([rows[j.id]["qc2"]["auditor"]["id"] for j in waiting], [f.qc2.id, f.qc2.id])
+        self.assertIsNone(rows[in_qc1.id]["qc2"])  # chưa tới QC2 → chưa có lượt kiểm
 
 
 class AnnotatorWorkflowTests(TestCase):
@@ -193,6 +194,7 @@ class AnnotatorWorkflowTests(TestCase):
         # Tạo 2 job chưa phân công trong pool
         pool1 = Job.objects.create(
             project=self.f.project,
+            dataset=self.f.dataset,
             batch=self.f.batch,
             name="POOL-1",
             status=JobStatus.PENDING_ANNOTATION,
@@ -201,6 +203,7 @@ class AnnotatorWorkflowTests(TestCase):
         )
         pool2 = Job.objects.create(
             project=self.f.project,
+            dataset=self.f.dataset,
             batch=self.f.batch,
             name="POOL-2",
             status=JobStatus.PENDING_ANNOTATION,
@@ -212,11 +215,11 @@ class AnnotatorWorkflowTests(TestCase):
         self.assertEqual(claimed.status_code, 200, claimed.data)
         self.assertEqual(claimed.data["id"], pool1.id)
 
-        # Đã giữ 2/2 → bị chặn GV02
+        # Đã giữ 2/2 → bị chặn WIP limit
         blocked = self.ann1.post(self.f.url("annotator/jobs/claim/"), {}, format="json")
         self.assertEqual(blocked.status_code, 400)
 
-        # Thứ tự DB06: pool1 (sắp hạn 6h) đứng trước job_mine (còn 3 ngày)
+        # Thứ tự ưu tiên: pool1 (sắp hạn 6h) đứng trước job_mine (còn 3 ngày)
         listed = self.ann1.get(self.f.url("annotator/jobs/?tab=active")).data["results"]
         self.assertEqual([r["id"] for r in listed], [pool1.id, self.job_mine.id])
         self.assertTrue(Job.objects.filter(pk=pool2.id, annotator__isnull=True).exists())
@@ -225,8 +228,7 @@ class AnnotatorWorkflowTests(TestCase):
         from quality.models import ReviewError, ReviewStage
         from teams.models import Team, TeamMember
 
-        tl = make_user("tl_req", Role.TEAM_LEADER, project=self.f.project)
-        team = Team.objects.create(project=self.f.project, name="Team Alpha", leader=tl)
+        team = Team.objects.create(project=self.f.project, name="Team Alpha")
         TeamMember.objects.create(team=team, user=self.f.ann1)
 
         err = ReviewError.objects.create(
@@ -240,7 +242,7 @@ class AnnotatorWorkflowTests(TestCase):
             reported_by=self.f.qc1,
         )
 
-        # 1. Phản hồi lỗi → định tuyến sang TL
+        # 1. Phản hồi lỗi → định tuyến sang PM
         r_dispute = self.ann1.post(
             self.f.url("annotator/requests/"),
             {
@@ -252,9 +254,9 @@ class AnnotatorWorkflowTests(TestCase):
             format="json",
         )
         self.assertEqual(r_dispute.status_code, 201, r_dispute.data)
-        self.assertEqual(r_dispute.data["status"], "pending_tl")
-        self.assertEqual(r_dispute.data["handler"]["id"], tl.id)
-        self.assertEqual(r_dispute.data["handler_role"], "TL")
+        self.assertEqual(r_dispute.data["status"], "pending_pm")
+        self.assertEqual(r_dispute.data["handler"]["id"], self.f.pm.id)
+        self.assertEqual(r_dispute.data["handler_role"], "PM")
 
         # 2. Báo dữ liệu bị chặn → định tuyến sang PM
         r_data = self.ann1.post(
@@ -271,11 +273,11 @@ class AnnotatorWorkflowTests(TestCase):
         self.assertEqual(r_data.data["status"], "pending_pm")
         self.assertEqual(r_data.data["handler"]["id"], self.f.pm.id)
 
-        # 3. PQ01: ann2 không thấy yêu cầu của ann1
+        # 3. Phạm vi riêng: ann2 không thấy yêu cầu của ann1
         self.assertEqual(len(self.f.client(self.f.ann2).get(self.f.url("annotator/requests/")).data), 0)
 
-        # 4. TL giải quyết yêu cầu
-        resolved = self.f.client(tl).post(
+        # 4. PM giải quyết yêu cầu
+        resolved = self.f.client(self.f.pm).post(
             self.f.url(f"annotator/requests/{r_dispute.data['id']}/resolve/"),
             {"status": "resolved", "resolution_note": "Đã kiểm tra và gỡ lỗi sai ID."},
             format="json",

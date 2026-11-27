@@ -1,9 +1,8 @@
 import { useRef, useState } from 'react'
-import { useParams, useSearchParams } from 'react-router'
+import { Link, useParams, useSearchParams } from 'react-router'
 import { Badge } from '@/components/base/badges/badges'
 import { Button } from '@/components/base/buttons/button'
 import { Input } from '@/components/base/input/input'
-import { NativeSelect } from '@/components/base/select/select-native'
 import { Toggle } from '@/components/base/toggle/toggle'
 import { useAction } from '../../shared/hooks/useAction'
 import { ROLE_LABELS, type Role } from '../../shared/types/roles'
@@ -14,14 +13,6 @@ import { useAuth } from '../auth/useAuth'
 import AnnotatorBreadcrumb from '../jobs/components/AnnotatorBreadcrumb'
 
 type SettingsTab = 'profile' | 'security' | 'notifications'
-
-const TIMEZONE_OPTIONS = [
-  { value: 'Asia/Ho_Chi_Minh', label: '(GMT+07:00) Hà Nội' },
-  { value: 'Asia/Bangkok', label: '(GMT+07:00) Bangkok' },
-  { value: 'Asia/Singapore', label: '(GMT+08:00) Singapore' },
-  { value: 'Asia/Tokyo', label: '(GMT+09:00) Tokyo' },
-  { value: 'UTC', label: '(GMT+00:00) UTC' },
-]
 
 function initialsOf(name?: string) {
   if (!name) return '?'
@@ -135,7 +126,6 @@ function ProfileTab({
   const [fullName, setFullName] = useState(initialName)
   const [email, setEmail] = useState(user?.email ?? '')
   const [avatarUrl, setAvatarUrl] = useState(user?.avatar_url ?? '')
-  const [timezoneName, setTimezoneName] = useState(user?.timezone_name || 'Asia/Ho_Chi_Minh')
 
   function handleAvatarFile(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0]
@@ -155,7 +145,6 @@ function ProfileTab({
           full_name: fullName.trim(),
           email: email.trim(),
           avatar_url: avatarUrl,
-          timezone_name: timezoneName,
         }),
       'Đã lưu thay đổi hồ sơ',
     )
@@ -166,7 +155,6 @@ function ProfileTab({
     setFullName(initialName)
     setEmail(user?.email ?? '')
     setAvatarUrl(user?.avatar_url ?? '')
-    setTimezoneName(user?.timezone_name || 'Asia/Ho_Chi_Minh')
   }
 
   return (
@@ -210,30 +198,33 @@ function ProfileTab({
         <div className="grid grid-cols-1 gap-4 py-5 md:grid-cols-12 md:items-center">
           <label className="text-sm font-semibold text-[#344054] md:col-span-4">Email</label>
           <div className="max-w-[480px] md:col-span-8">
-            <Input type="email" value={email} onChange={setEmail} placeholder="name@annota.vn" />
+            <Input type="email" value={email} onChange={setEmail} placeholder="name@vanohub.vn" />
           </div>
         </div>
 
         <div className="grid grid-cols-1 gap-4 py-5 md:grid-cols-12 md:items-center">
-          <label className="text-sm font-semibold text-[#344054] md:col-span-4">Vai trò</label>
+          <label className="text-sm font-semibold text-[#344054] md:col-span-4">Vai trò & CVAT</label>
           <div className="flex flex-wrap items-center gap-3 md:col-span-8">
             <Badge size="md" type="pill-color" color="gray">
               {primaryRole}
             </Badge>
-            <span className="text-sm text-[#475467]">
-              {[scopedProjectName, 'tài khoản ánh xạ từ CVAT (PQ03)'].filter(Boolean).join(' · ')}
-            </span>
+            {scopedProjectName && <span className="text-sm text-[#475467]">{scopedProjectName}</span>}
+            <Badge size="md" type="pill-color" color={user?.cvat_linked ? 'success' : 'warning'}>
+              {user?.cvat_linked ? `CVAT: ${user.cvat_username}` : 'Chưa liên kết CVAT'}
+            </Badge>
+            <Link to="/cvat-link" className="text-sm font-semibold text-[#6941C6] hover:underline">
+              Quản lý liên kết CVAT
+            </Link>
           </div>
         </div>
 
         <div className="grid grid-cols-1 gap-4 py-5 md:grid-cols-12 md:items-center">
           <label className="text-sm font-semibold text-[#344054] md:col-span-4">Múi giờ</label>
-          <div className="max-w-[480px] md:col-span-8">
-            <NativeSelect
-              value={timezoneName}
-              onChange={(e) => setTimezoneName(e.target.value)}
-              options={TIMEZONE_OPTIONS}
-            />
+          <div className="flex flex-wrap items-center gap-2 md:col-span-8">
+            <Badge size="md" type="pill-color" color="gray">
+              (UTC+07:00) Việt Nam · Asia/Ho_Chi_Minh
+            </Badge>
+            <span className="text-xs text-[#667085]">Cố định theo vận hành nội bộ.</span>
           </div>
         </div>
       </div>
@@ -269,7 +260,7 @@ function SecurityTab() {
     }
     setPwError(null)
     const ok = await run(
-      () => changePassword({ current_password: currentPassword, new_password: newPassword }),
+      () => changePassword(currentPassword, newPassword),
       'Đã cập nhật mật khẩu thành công',
     )
     if (ok) {

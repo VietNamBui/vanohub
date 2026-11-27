@@ -1,5 +1,5 @@
 import { ExportOutlined, ReloadOutlined } from '@ant-design/icons'
-import { Button, Card, Checkbox, Input, Select, Space, Table, Tabs, Tooltip, Typography, type TableProps } from 'antd'
+import { App, Button, Card, Checkbox, Input, Select, Space, Table, Tabs, Tooltip, Typography, type TableProps } from 'antd'
 import { useState } from 'react'
 import { useSearchParams } from 'react-router'
 import { getErrorMessage } from '../../../shared/api/errors'
@@ -36,19 +36,23 @@ export default function JobsPage() {
     page_size: 50,
     stage: '',
     batch: searchParams.get('batch') ? Number(searchParams.get('batch')) : undefined,
+    dataset: searchParams.get('dataset') ? Number(searchParams.get('dataset')) : undefined,
     escalated: searchParams.get('escalated') === '1',
     assignee: searchParams.get('assignee') ? Number(searchParams.get('assignee')) : undefined,
     overdue: searchParams.get('overdue') === '1',
+    search: searchParams.get('search') || undefined,
   }))
   const [version, setVersion] = useState(0)
   const [selected, setSelected] = useState<number[]>([])
   const [openJob, setOpenJob] = useState<number | null>(null)
   const [bulk, setBulk] = useState<'assign' | 'deadline' | null>(null)
   const { run, pending } = useAction()
+  const { message } = App.useApp()
 
   const key = `jobs:${projectId}:${JSON.stringify(filters)}:${version}`
   const { data, error, isLoading, retry } = useRequest(key, () => listJobs(projectId, filters))
   const { data: datasets } = useRequest(`datasets:${projectId}`, () => listDatasets(projectId))
+  // Task (model Batch) thuộc một Project (model Dataset) → lọc task theo project đang chọn.
   const { data: batches } = useRequest(`batches:${projectId}:${filters.dataset ?? ''}`, () =>
     listBatches(projectId, { dataset: filters.dataset }),
   )
@@ -63,17 +67,31 @@ export default function JobsPage() {
       : job.is_locked ? 'Job đang bị khoá'
         : job.status === 'delivered' ? 'Job đã bàn giao' : null
 
+  /** Giao cho người chưa liên kết CVAT: vẫn giao, nhưng nhắc rằng CVAT sẽ đồng bộ sau. */
+  function warnIfUnlinked(userId: number | null) {
+    const member = members?.find((m) => m.user.id === userId)
+    if (member && !member.cvat_linked) {
+      message.warning(`${member.user.full_name} chưa liên kết CVAT — job đã giao trên VanoHub, sẽ đồng bộ sang CVAT khi họ liên kết.`, 6)
+    }
+  }
+
   async function assign(job: Job, field: 'annotator' | 'qc1_reviewer', userId: number | null) {
     const label = field === 'annotator' ? 'annotator' : 'người QC1'
     const ok = await run(() => assignJob(projectId, job.id, { [field]: userId }),
       userId ? `Đã đổi ${label} cho ${job.name}` : `Đã bỏ ${label} của ${job.name}`)
-    if (ok) reload()
+    if (ok) {
+      warnIfUnlinked(userId)
+      reload()
+    }
   }
 
   async function assignQc2(job: Job, userId: number | null) {
     if (!job.qc2 || userId === null) return
     const ok = await run(() => assignSampleAuditor(projectId, job.qc2!.sample_id, userId), `Đã đổi người QC2 cho ${job.name}`)
-    if (ok) reload()
+    if (ok) {
+      warnIfUnlinked(userId)
+      reload()
+    }
   }
 
   function qc2Cell(job: Job) {
@@ -114,7 +132,7 @@ export default function JobsPage() {
 
   const columns: TableProps<Job>['columns'] = [
     { title: 'Job', dataIndex: 'name', render: (name: string, job) => <a onClick={() => setOpenJob(job.id)}>{name}</a> },
-    { title: 'Dataset / Batch', render: (_, job) => `${job.dataset_name} / ${job.batch_name}` },
+    { title: 'Project / Task', render: (_, job) => `${job.dataset_name} / ${job.batch_name}` },
     {
       title: 'Trạng thái',
       render: (_, job) => (
@@ -165,7 +183,7 @@ export default function JobsPage() {
       <div className="page-header">
         <div>
           <h1>Jobs</h1>
-          <p>Toàn bộ job trong dự án. Bấm tên job để xem chi tiết và thao tác.</p>
+          <p>Toàn bộ job trong organization. Bấm tên job để xem chi tiết và thao tác.</p>
         </div>
         <Button icon={<ReloadOutlined />} onClick={reload}>Tải lại</Button>
       </div>
@@ -175,12 +193,12 @@ export default function JobsPage() {
         <Space wrap style={{ marginBottom: 16 }}>
           <Input.Search allowClear placeholder="Tên job / ID / CVAT job ID" style={{ width: 240 }} onSearch={(v) => update({ search: v })} />
           <Select
-            allowClear placeholder="Dataset" style={{ width: 180 }} value={filters.dataset}
+            allowClear placeholder="Project" style={{ width: 200 }} value={filters.dataset}
             options={datasets?.map((d) => ({ value: d.id, label: d.name }))}
             onChange={(v) => update({ dataset: v, batch: undefined })}
           />
           <Select
-            allowClear placeholder="Batch" style={{ width: 160 }} value={filters.batch}
+            allowClear placeholder="Task" style={{ width: 200 }} value={filters.batch}
             options={batches?.map((b) => ({ value: b.id, label: b.name }))}
             onChange={(v) => update({ batch: v })}
           />

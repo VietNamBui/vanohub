@@ -3,8 +3,6 @@ import { cleanParams, type Paginated } from '../../shared/api/types'
 import type { Job, JobDetail } from '../jobs/types'
 import type {
   Audit,
-  AuditInput,
-  AuditPreview,
   AuditSample,
   AuditStrategy,
   ErrorCategory,
@@ -17,23 +15,22 @@ import type {
 
 const p = (projectId: number, path: string) => `/projects/${projectId}/${path}`
 
-// --- Danh mục lỗi ---
+// --- Danh mục lỗi (QC1 & QC2 chọn khi Reject; giữ CRUD trong Hybrid để kiểm tra) ---
 export const listErrorCategories = async (projectId: number, stage?: 'qc1' | 'qc2') =>
   (await apiClient.get<ErrorCategory[]>(p(projectId, 'error-categories/'), { params: cleanParams({ stage }) })).data
-export const createErrorCategory = async (projectId: number, data: Partial<ErrorCategory>) =>
-  (await apiClient.post<ErrorCategory>(p(projectId, 'error-categories/'), data)).data
-export const updateErrorCategory = async (projectId: number, id: number, data: Partial<ErrorCategory>) =>
-  (await apiClient.patch<ErrorCategory>(p(projectId, `error-categories/${id}/`), data)).data
+export const createErrorCategory = async (
+  projectId: number,
+  data: Partial<ErrorCategory>,
+) => (await apiClient.post<ErrorCategory>(p(projectId, 'error-categories/'), data)).data
+export const updateErrorCategory = async (
+  projectId: number,
+  categoryId: number,
+  data: Partial<ErrorCategory>,
+) => (await apiClient.patch<ErrorCategory>(p(projectId, `error-categories/${categoryId}/`), data)).data
 
 // --- Audit (quản lý) ---
 export const listAudits = async (projectId: number, params: { status?: string; batch?: number } = {}) =>
   (await apiClient.get<Audit[]>(p(projectId, 'audits/'), { params: cleanParams(params) })).data
-export const previewAudit = async (projectId: number, data: AuditInput) =>
-  (await apiClient.post<AuditPreview>(p(projectId, 'audits/preview/'), data)).data
-export const createAudit = async (projectId: number, data: AuditInput) =>
-  (await apiClient.post<Audit>(p(projectId, 'audits/'), data)).data
-export const completeAudit = async (projectId: number, auditId: number) =>
-  (await apiClient.post<Audit>(p(projectId, `audits/${auditId}/complete/`))).data
 
 // --- Mẫu audit (thực hiện QC2) ---
 export const listAuditSamples = async (

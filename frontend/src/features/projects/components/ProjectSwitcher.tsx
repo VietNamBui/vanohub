@@ -14,7 +14,7 @@ export default function ProjectSwitcher({ currentProjectId }: { currentProjectId
       aria-label="Dự án đang chọn"
       loading={isLoading}
       value={projects ? currentProjectId : undefined}
-      placeholder="Dự án đang chọn"
+      placeholder="Organization đang chọn"
       onChange={(id) => navigate(`/projects/${id}`)}
       options={projects?.map((p) => ({ value: p.id, label: p.name }))}
       showSearch={{ optionFilterProp: 'label' }}
