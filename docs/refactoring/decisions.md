@@ -1,6 +1,6 @@
 # Refactor decisions
 
-Prepared: 2026-11-27. Status on `feature/issue-logger @ 0beace7`: **D01–D03 are accepted and implemented** (via `8d66adc`, reconciled below); **D04–D06 remain open**.
+Prepared: 2026-11-27. Status on `feature/issue-logger @ 0beace7`: **D01–D03 are accepted and implemented** (via `8d66adc`, reconciled below); **D04 is accepted** (pending `PV04` amendment & implementation); **D05–D06 remain open** with Dec 4 MVP defaults proposed.
 
 Use this file for the small number of choices that cross data, API, workflow, and UI boundaries. Split an individual record into an ADR only when its size or independent lifecycle warrants it. Link to the product specification rather than duplicating its full rules.
 
@@ -11,9 +11,9 @@ Use this file for the small number of choices that cross data, API, workflow, an
 | D01 | CVAT hierarchy and tenant identity | Accepted (`8d66adc`) | Related migrations, identifiers, routes, and navigation |
 | D02 | QC1-to-QC2 gate and sampling unit | Accepted (`8d66adc`) | Related transition, audit, and review UI changes |
 | D03 | Identity linking and CVAT write scope | Accepted with reliability gap (`8d66adc`) | Account migration, assignee push, invitations, unlink behavior |
-| D04 | Telemetry source and API extension placement | Open | Optional telemetry/webhook/extension implementation |
-| D05 | Object counts, baseline snapshots, and output attribution | Open | Changes to counting, productivity, quality denominators |
-| D06 | Time, provenance, and missing-data semantics | Open | New time-based metrics and their UI/API contracts |
+| D04 | Telemetry source and API extension placement | Accepted (pending `PV04` amendment & implementation) | Telemetry/export ingestion (`T08`) and slim CVAT-side v2 extension |
+| D05 | Object counts, baseline snapshots, and output attribution | Open (Dec 4 defaults proposed) | Changes to counting, productivity, quality denominators |
+| D06 | Time, provenance, and missing-data semantics | Open (Dec 4 defaults proposed) | New time-based metrics and their UI/API contracts |
 
 ## D01 — CVAT hierarchy and tenant identity
 
@@ -126,6 +126,22 @@ Extending “API docs” has two meanings: documenting existing routes or implem
 
 **Acceptance:** name the requirement that existing APIs cannot satisfy, the selected source, hosting/maintenance owner, and contract. Do not implement all historical proposed endpoints by default.
 
+### Resolution (D04)
+
+```text
+Status and date: Accepted (pending PV04 amendment & implementation), reconciled 2026-11-27.
+Selected option and reason: Hybrid split with VanoHub as sole workflow/RBAC/QC SSoT and a slim (~1.5–2.5k LOC) in-process CVAT-side Django extension implementing `cvat-event-pipeline-v2` (non-authoritative for workflow/gating), paired with API-only VanoHub consumption via CVAT `POST /api/events/export` -> `GET /api/requests/{rq_id}` -> streamed CSV download (using a dedicated `read_only=True` PAT with global privilege `user` + org role `maintainer`/`owner`). Direct CVAT PostgreSQL, ClickHouse, Vector, and NAS access remains prohibited. A pure out-of-process sidecar container cannot hook `record_server_event(..., on_commit=True)`, Django ORM signals, or pre-write `S0` snapshots; heavy 3D/2D Pre-QC checks stay out-of-process.
+Authority/evidence: User architectural decision (2026-11-27), `/media/bang/Work/projects/cvat-docs/cvat-event-pipeline-v2/` (`event-payloads-v2.schema.json`, `event-registry.json`, `docs/01-remediation-and-parity.md`–`05-acceptance-matrix.md`), `backend/cvat_integration/{client,sync,schemas}.py`, `cvat-base/cvat/apps/{events,access_tokens,iam}/`, and `cvat-di-ext/backend/cvat_ext/`.
+Affected code, data, API, and UI:
+  - Prerequisite spec update: amend `PV04` in `docs/platform-spec.md` (currently "không fork/patch CVAT") to authorize the slim in-process CVAT extension before CVAT deployment.
+  - VanoHub (`backend/cvat_integration/`, `backend/analytics/`): add dedicated read-only export token config, org-header-free `create_events_export(?org_id=...)` (never combined with `X-Organization`), `CVAT_HOST_HEADER`-aware `stream_download(result_url)` (`allow_redirects=False`), `CvatSyncScope`/`CvatExportBatch`/`CvatEventLedger`/`CvatWorkingTimeEvent`/`CvatEventQuarantine` tables, and `manage.py ingest_cvat_events` (5-min cron + `pg_try_advisory_lock`).
+  - Boundary invariants: ingested CVAT/sidecar events never mutate `Job.status`, `rework_round`, `AuditSample`, `Delivery`, `ReviewError`, `AnnotatorRequest`, or write into `ActivityLog` four-eyes history; `actor_role` is opaque metadata; actors resolve strictly via `CvatAccount.cvat_user_id`; `org_id=null` / foreign-org rows are dropped/quarantined; telemetry reads enforce `ProjectScopedViewMixin` (`404` isolation).
+  - CVAT sidecar (`cvat-di-ext` slimmed): strip 5-tier workflow/roster/OPA monkey-patches & `qc:client_*` sampling-gate authority (`EV-02`); emit `payload.cvat_ext` v2 via `record_server_event(..., on_commit=True)` with `org_id`, strict `UInt32`/`UInt16`/epoch typing, and 5-scope client allowlist.
+Migration/compatibility and external effects: Preserves existing VanoHub APIs and `SYNCABLE_STATUSES` / Hybrid A2 invariants; requires CVAT Compose durability hardening (persistent `/home/django/events` and `/vector-data-dir`, Vector disk buffer/ack, `CVAT_EXPORT_CACHE_TTL=3600`).
+Verification required and evidence: Schema validation via `/media/bang/Work/projects/cvat-docs/cvat-event-pipeline-v2/scripts/validate-export.py`, ClickHouse checks via `scripts/validate-qc-events.sh`, Dec 4 priority runtime acceptance cases (`R01`, `R02`, `R03` 3D, `R04`–`R06`, `R11`–`R13`, `R17`–`R20`), and full VanoHub CI gates.
+Supersedes / superseded by: Supersedes strict no-extension baseline assumption for telemetry (`D04` open table); conditional on `PV04` amendment before CVAT extension deployment.
+```
+
 ## D05 — Counting, snapshots, and attribution *(Open)*
 
 **Evidence:** [baseline S2 and S4](baseline.md), `backend/analytics/views.py` (`_pending_quality_cl`, `_pending_defect_error_rate`, `_pending_defect_rate_by_severity`), `backend/quality/models.py` (`AuditSample.checked_object_count`, `AuditSample.frames`), `backend/quality/views.py` (`AuditSampleViewSet._finish`), and `backend/jobs/views.py` (`submit_annotation`).
@@ -148,6 +164,8 @@ Before changing behavior, settle:
 
 Aggregate baseline counts cannot reconstruct original geometry. A checksum is not itself an immutable snapshot. When several upstream reads form a snapshot, record its consistency rule and version evidence; do not claim atomic consistency across CVAT state and asynchronously ingested events.
 
+**Feasibility note (2026-11-27):** `CvatAnnotationsPayload.count_object_frames(..., included_frames=...)` (`backend/cvat_integration/schemas.py:160-249`) already supports frame-scoped `AuditSample.checked_object_count` computation directly via `CvatClient.count_job_objects` without a CVAT sidecar; `quality/qc2.py:pick_frames` (`112-118`) still needs alignment for `frame_step > 1` and `deleted_frames`. `/media/bang/Work/projects/cvat-docs/cvat-event-pipeline-v2/docs/03-qc-kpi-and-identity-policy.md` provides candidate `Quality CL = (pass + edge) / checked` (`Fail > Edge > Pass`, distinct assessed eligible instances) rules for Dec 4 sign-off.
+
 **Acceptance:** examples with expected results, safe attribution to the correct worker/round, retry/deduplication behavior, and migration treatment for records without an original baseline.
 
 ## D06 — Time and metric semantics *(Open)*
@@ -161,6 +179,8 @@ Record timestamp format, duration unit, aggregation window, project display time
 Do not assume upstream duration units. Normalize them explicitly. Do not silently substitute zero for unknown activity or calculate a rate from unavailable/zero denominators.
 
 For QA/annotation ratios, choose comparable numerator and denominator semantics. An elapsed QA interval divided by active annotation time needs an explicit label and justification; it must not be presented as a comparable work-effort ratio by default.
+
+**Feasibility note (2026-11-27):** CVAT `send:working_time` events lack `audit_sample_id`, so feeding `NS04` (`audit_speed`) requires window-based attribution (`(job_id, user_id)` inside `AuditSample` `[created_at, reviewed_at]` with ms -> hours unit normalization and explicit `status="unavailable"` when events are absent). `qc:client_*` telemetry remains strictly excluded from all KPI/SLA/CL calculations and workflow/sampling gates.
 
 **Acceptance:** the API and Vietnamese UI distinguish estimated, unavailable, and observed values using an agreed representation, with the same time window and units.
 

@@ -67,3 +67,16 @@ Copy this template for a logical unit; omit irrelevant subdetails, not material 
 ```
 
 Do not describe a code revert as a complete rollback when migrations, data transformations, notifications, or CVAT API writes have already taken effect. Record those limits and any verified recovery procedure. Never infer a successful application check from a documentation check or from another branch's historical test result.
+
+## 2026-11-27 — T01/T08: Record D04 hybrid SSoT/sidecar decision and Dec 4 MVP implementation plan
+
+- **Status:** Documentation only.
+- **Purpose and before → after:** Updated VanoHub refactoring and operational docs to adopt the user-selected architecture (**VanoHub = workflow/QC SSoT; slim in-process CVAT-side `cvat-event-pipeline-v2` extension; API-only export ingestion**), integrate findings from the 4-agent technical/spec feasibility audit and `/media/bang/Work/projects/cvat-docs/cvat-event-pipeline-v2`, mark `T05` Ant Design migration status consistent with `changes.md`, and scope `T08` to a concrete 7-day **Dec 4, 2026 MVP** cut.
+- **Scope:** Branch `feature/issue-logger` @ `0beace7` (dirty workspace). Updated `docs/refactoring/plan.md`, `docs/refactoring/decisions.md`, `docs/refactoring/README.md`, `docs/operations/security-and-verification.md`, and `docs/refactoring/changes.md`. Left `docs/platform-spec.md`, `backend/`, and `frontend/` untouched in this turn.
+- **Impacts:** Sets `D04` to accepted (pending `PV04` amendment in `docs/platform-spec.md` & implementation), establishes non-contaminating boundary rules (no CVAT event mutations into `Job.status`, `AuditSample`, `ReviewError`, `AnnotatorRequest`, or `ActivityLog` four-eyes history), documents CVAT `POST /api/events/export` OPA/transport/ClickHouse constraints, and scopes Dec 4 MVP deliverables vs post-Dec 4 deferrals (2D parity, `QcEventOutbox` feed `R21`, external Pre-QC worker `R07`, `T03` OpenAPI).
+- **Compatibility:** Documentation only; preserves existing application contracts and `D05`/`D06` pending-definition analytics behavior until implementation.
+- **Evidence:** Directly verified against `backend/cvat_integration/{client,sync,assignee,schemas,models,views}.py`, `backend/quality/{models,views,qc2}.py`, `backend/analytics/views.py`, `backend/Pipfile`, `docker-compose.yml`, `/media/bang/Work/projects/cvat-base/cvat/apps/{events,access_tokens,iam}/`, `/media/bang/Work/projects/cvat-di-ext/`, and `/media/bang/Work/projects/cvat-docs/cvat-event-pipeline-v2/`.
+- **Verification:** Verified zero broken relative markdown links across `vanohub/docs/` and inspected `git diff --stat` scoped strictly to the 5 documentation files; no backend/frontend code changed and no runtime tests run in this docs-only pass.
+- **Reversibility:** Documentation-only edits; revert cleanly via `git checkout -- docs/refactoring docs/operations/security-and-verification.md`.
+- **Commit:** None.
+- **Follow-up:** Day 1 Gate 0 — amend `PV04` in `docs/platform-spec.md`, sign off `D05`/`D06` MVP defaults, configure CVAT read-only service PAT + persistent Vector/ClickHouse volumes, then execute Days 2–3 VanoHub API export consumer + `D03`/`D05`/`D06` implementation.
