@@ -9,6 +9,7 @@ import { TextArea } from '@/components/base/textarea/textarea'
 import SectionCard from '../../../shared/components/ui/SectionCard'
 import { useAction } from '../../../shared/hooks/useAction'
 import { useRequest } from '../../../shared/hooks/useRequest'
+import { cvatFrameUrl } from '../../../shared/utils/cvat'
 import { formatDateTime } from '../../../shared/utils/format'
 import type { ReworkScope } from '../../jobs/types'
 import { listErrorCategories, passSample, rejectSample } from '../api'
@@ -412,7 +413,7 @@ function FramesToCheck({ sample }: { sample: AuditSample }) {
           <li key={frame}>
             {url ? (
               <a
-                href={`${url}?frame=${frame}`}
+                href={cvatFrameUrl(url, frame)}
                 target="_blank"
                 rel="noreferrer"
                 className="inline-flex rounded-md px-2 py-1 text-sm font-medium text-brand-secondary tabular-nums ring-1 ring-secondary ring-inset hover:bg-primary_hover"

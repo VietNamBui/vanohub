@@ -658,9 +658,33 @@ class MemberAccountTests(TestCase):
     def test_reset_password(self):
         response = self.pm.post(self.f.url(f"members/{self.f.ann1.id}/reset-password/"))
         self.assertEqual(response.status_code, 200, response.data)
+        self.assertEqual(response["Cache-Control"], "no-store")
         self.f.ann1.refresh_from_db()
         self.assertTrue(self.f.ann1.check_password(response.data["password"]))
         self.assertEqual(self.pm.post(self.f.url(f"members/{self.f.pm.id}/reset-password/")).status_code, 400)
+
+    def test_credential_and_reset_block_superuser_and_multi_org_targets(self):
+        created = self._create().data
+        uid = created["user"]["id"]
+        cred_ok = self.pm.get(self.f.url(f"members/{uid}/credential/"))
+        self.assertEqual(cred_ok.status_code, 200)
+        self.assertEqual(cred_ok["Cache-Control"], "no-store")
+
+        superuser = User.objects.create_superuser("su_target", "su@example.com", "pw")
+        RoleAssignment.objects.create(user=superuser, role=Role.ANNOTATOR, project=self.f.project)
+        for method, path in (
+            ("get", f"members/{superuser.id}/credential/"),
+            ("post", f"members/{superuser.id}/reset-password/"),
+        ):
+            self.assertEqual(getattr(self.pm, method)(self.f.url(path)).status_code, 400)
+
+        other_project = Project.objects.create(name="Org Khác")
+        RoleAssignment.objects.create(user=self.f.ann1, role=Role.ANNOTATOR, project=other_project)
+        for method, path in (
+            ("get", f"members/{self.f.ann1.id}/credential/"),
+            ("post", f"members/{self.f.ann1.id}/reset-password/"),
+        ):
+            self.assertEqual(getattr(self.pm, method)(self.f.url(path)).status_code, 400)
 
 
 class MemberRoleRemovalTests(TestCase):

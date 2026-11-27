@@ -95,19 +95,19 @@ class JobSerializer(serializers.ModelSerializer):
         }
 
     def get_open_error_count(self, job):
-        if job.rework_round <= 0 or job.status not in (JobStatus.REWORK, JobStatus.ANNOTATING):
+        active_round = max(job.total_rework_rounds, job.rework_round) - 1
+        if active_round < 0 or job.status not in (JobStatus.REWORK, JobStatus.ANNOTATING):
             return 0
         annotated = getattr(job, "_active_rework_error_count", None)
         if annotated is not None:
             return annotated
-        target_round = job.rework_round - 1
         if hasattr(job, "_prefetched_objects_cache") and "review_errors" in job._prefetched_objects_cache:
             return sum(
                 1
                 for e in job._prefetched_objects_cache["review_errors"]
-                if e.rework_round == target_round and not e.is_voided
+                if e.rework_round == active_round and not e.is_voided
             )
-        return job.review_errors.filter(rework_round=target_round, is_voided=False).count()
+        return job.review_errors.filter(rework_round=active_round, is_voided=False).count()
 
 
 def _open_sample(job):

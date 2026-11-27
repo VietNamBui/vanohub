@@ -24,6 +24,7 @@ import DisputeErrorModal from '../components/DisputeErrorModal'
 import JobStatusBadge from '../components/JobStatusBadge'
 import ReportDataIssueModal from '../components/ReportDataIssueModal'
 import { ACTION_LABELS, formatDeadlineCountdown, JOB_STATUS_LABELS } from '../constants'
+import { splitActiveErrors } from '../jobHelpers'
 import type { JobErrorBrief, JobStatus } from '../types'
 
 const SEVERITY_BADGE: Record<string, 'gray' | 'warning' | 'error'> = {
@@ -151,12 +152,9 @@ export default function AnnotatorJobDetailPage() {
   const canStart = Boolean(job && !isBlocked && (job.status === 'pending_annotation' || job.status === 'rework'))
   const canSubmit = Boolean(job && !isBlocked && job.status === 'annotating')
 
-  const activeErrors = job
-    ? job.errors.filter((e) => !e.is_voided && (job.rework_round > 0 ? e.rework_round === job.rework_round - 1 : true))
-    : []
-  const historyErrors = job
-    ? job.errors.filter((e) => e.is_voided || (job.rework_round > 0 && e.rework_round !== job.rework_round - 1))
-    : []
+  const { active: activeErrors, history: historyErrors } = job
+    ? splitActiveErrors(job, job.errors)
+    : { active: [], history: [] }
 
   return (
     <div className="mx-auto flex max-w-6xl flex-col gap-5 p-4 md:p-6">

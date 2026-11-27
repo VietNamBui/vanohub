@@ -26,6 +26,7 @@ jobs:
     env:
       DJANGO_SECRET_KEY: ci-not-for-production-secret-key
       DJANGO_DEBUG: "False"
+      DJANGO_SECURE_SSL_REDIRECT: "False"
       POSTGRES_DB: vanohub_test
       POSTGRES_USER: vanohub
       POSTGRES_PASSWORD: vanohub_test_password

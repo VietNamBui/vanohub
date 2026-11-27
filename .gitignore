@@ -20,3 +20,7 @@ dist/
 .idea/
 .DS_Store
 Thumbs.db
+
+# Local docs archives & starter checksums
+VanoHub-Docs-and-Plan-*.zip
+vanohub-docs-starter/SHA256SUMS

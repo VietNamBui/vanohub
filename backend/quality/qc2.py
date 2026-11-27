@@ -13,7 +13,7 @@ from django.db import IntegrityError, transaction
 from django.db.models import Count, Q
 
 from accounts.models import Role, User
-from jobs.models import Job, JobStatus
+from jobs.models import DailyOutputRecord, Job, JobStatus
 from projects.models import ActivityLog, Batch, SamplingMethod
 
 from .models import Audit, AuditSample, ReviewError, ReviewStage
@@ -39,6 +39,7 @@ def get_stage_history(job: Job) -> tuple[set[int], set[int], set[int]]:
         .filter(
             Q(action__in=ANNOTATOR_EVENTS + QC1_EVENTS)
             | Q(action__in=("job.status", "job.assign"), after__event__in=ANNOTATOR_EVENTS)
+            | Q(action="job.status", after__event__in=QC1_EVENTS)
             | Q(action="job.status", after__status__in=[JobStatus.ANNOTATING, JobStatus.PENDING_QC1])
         )
         .values_list("action", "after", "actor_id")
@@ -46,16 +47,34 @@ def get_stage_history(job: Job) -> tuple[set[int], set[int], set[int]]:
     for action, after, actor_id in log_rows:
         if actor_id is None:
             continue
-        if action in QC1_EVENTS:
+        event_name = after.get("event") if isinstance(after, dict) else None
+        if action in QC1_EVENTS or event_name in QC1_EVENTS:
             qc1_ids.add(actor_id)
         elif action in ANNOTATOR_EVENTS or (
             isinstance(after, dict)
             and (
-                after.get("event") in ANNOTATOR_EVENTS
+                event_name in ANNOTATOR_EVENTS
                 or (action == "job.status" and after.get("status") in (JobStatus.ANNOTATING, JobStatus.PENDING_QC1))
             )
         ):
             annotator_ids.add(actor_id)
+
+    for before, after in ActivityLog.objects.filter(
+        job=job, action__in=("job.assign", "job.import")
+    ).values_list("before", "after"):
+        for payload in (before, after):
+            if not isinstance(payload, dict):
+                continue
+            ann_id = payload.get("annotator")
+            if isinstance(ann_id, int) and not isinstance(ann_id, bool):
+                annotator_ids.add(ann_id)
+            qc1_id = payload.get("qc1_reviewer")
+            if isinstance(qc1_id, int) and not isinstance(qc1_id, bool):
+                qc1_ids.add(qc1_id)
+
+    for user_id in DailyOutputRecord.objects.filter(job=job).values_list("user_id", flat=True):
+        if user_id is not None:
+            annotator_ids.add(user_id)
 
     for stage, reported_by_id in ReviewError.objects.filter(
         job=job, reported_by_id__isnull=False
@@ -110,11 +129,11 @@ def pick_auditor(job: Job) -> User | None:
 
 
 def pick_frames(job: Job, rate: int) -> list[int]:
-    """Chọn cố định sampling_rate % frame của job theo (job.pk, job.rework_round)."""
+    """Chọn cố định sampling_rate % frame của job theo (job.pk, max(total_rework_rounds, rework_round))."""
     total = max(job.frame_count, 1)
     count = min(total, max(1, math.ceil(total * rate / 100)))
-    # Non-cryptographic deterministic sampling per (job, rework_round)
-    rng = random.Random(f"{job.pk}:{job.rework_round}")
+    # Non-cryptographic deterministic sampling per (job, cumulative rework round)
+    rng = random.Random(f"{job.pk}:{max(job.total_rework_rounds, job.rework_round)}")
     return [job.cvat_start_frame + offset for offset in sorted(rng.sample(range(total), count))]
 
 
@@ -150,7 +169,7 @@ def ensure_qc2_sample(job: Job) -> AuditSample | None:
                 return AuditSample.objects.create(
                     audit=audit,
                     job=locked_job,
-                    rework_round=locked_job.rework_round,
+                    rework_round=max(locked_job.total_rework_rounds, locked_job.rework_round),
                     frames=pick_frames(locked_job, project.sampling_rate),
                     auditor=pick_auditor(locked_job),
                 )

@@ -17,6 +17,7 @@ import AnnotatorBreadcrumb from '../components/AnnotatorBreadcrumb'
 import DisputeErrorModal from '../components/DisputeErrorModal'
 import JobStatusBadge from '../components/JobStatusBadge'
 import { formatDeadlineCountdown } from '../constants'
+import { splitActiveErrors } from '../jobHelpers'
 import type { Job, JobDetail, JobErrorBrief } from '../types'
 
 const REWORK_PAGE_SIZE = 100
@@ -46,13 +47,7 @@ const SEVERITY_BADGE: Record<string, 'gray' | 'warning' | 'error'> = {
 }
 
 function splitJobErrors(job: JobDetail) {
-  const active = job.errors.filter(
-    (e) => !e.is_voided && (job.rework_round > 0 ? e.rework_round === job.rework_round - 1 : true),
-  )
-  const history = job.errors.filter(
-    (e) => e.is_voided || (job.rework_round > 0 && e.rework_round !== job.rework_round - 1),
-  )
-  return { active, history }
+  return splitActiveErrors(job, job.errors)
 }
 
 function CuboidErrorChips({ err }: { err: JobErrorBrief }) {

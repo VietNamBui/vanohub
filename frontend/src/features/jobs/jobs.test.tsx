@@ -6,6 +6,7 @@ import AssigneeSelect from './components/AssigneeSelect'
 import JobStatusTag from './components/JobStatusTag'
 import { JOB_STATUS_LABELS } from './constants'
 import {
+  activeErrorRound,
   buildAssigneeOptions,
   buildAssignPayload,
   buildQueueJobsUrl,
@@ -15,6 +16,7 @@ import {
   parseJobUrlFilters,
   parseQueueUrlParams,
   serializeJobUrlFilters,
+  splitActiveErrors,
   timelineDotColor,
 } from './jobHelpers'
 import type { JobDetail, JobStatus } from './types'
@@ -94,11 +96,35 @@ describe('jobs URL filters, sorting & lock helpers', () => {
     expect(switched).toBe('rework_round')
   })
 
-  it('evaluates job lock reason in strict permission -> locked -> delivered order', () => {
+  it('evaluates job lock reason in strict permission -> locked -> delivered -> post-qc1 order', () => {
     expect(getJobLockReason(false, { is_locked: true, status: 'delivered' })).toBe('Bạn không có quyền giao job')
     expect(getJobLockReason(true, { is_locked: true, status: 'annotating' })).toBe('Job đang bị khoá')
     expect(getJobLockReason(true, { is_locked: false, status: 'delivered' })).toBe('Job đã bàn giao')
-    expect(getJobLockReason(true, { is_locked: false, status: 'approved' })).toBeNull()
+    expect(getJobLockReason(true, { is_locked: false, status: 'qc1_passed' })).toBe(
+      'Không đổi người phụ trách sau khi job đã qua QC1',
+    )
+    expect(getJobLockReason(true, { is_locked: false, status: 'pending_qc2' })).toBe(
+      'Không đổi người phụ trách sau khi job đã qua QC1',
+    )
+    expect(getJobLockReason(true, { is_locked: false, status: 'approved' })).toBe(
+      'Không đổi người phụ trách sau khi job đã qua QC1',
+    )
+    expect(getJobLockReason(true, { is_locked: false, status: 'annotating' })).toBeNull()
+  })
+
+  it('computes active rework error round and splits active vs history errors across escalation resets', () => {
+    expect(activeErrorRound({ rework_round: 0, total_rework_rounds: 0 })).toBeNull()
+    expect(activeErrorRound({ rework_round: 2, total_rework_rounds: 2 })).toBe(1)
+    expect(activeErrorRound({ rework_round: 1, total_rework_rounds: 4 })).toBe(3)
+
+    const errors = [
+      { id: 1, stage: 'qc1', rework_round: 0, category: 'Sai', severity: 'major', location: '', description: '', reported_by: null, created_at: '' },
+      { id: 2, stage: 'qc1', rework_round: 3, category: 'Sai', severity: 'major', location: '', description: '', is_voided: false, reported_by: null, created_at: '' },
+      { id: 3, stage: 'qc1', rework_round: 3, category: 'Sai', severity: 'minor', location: '', description: '', is_voided: true, reported_by: null, created_at: '' },
+    ] as const
+    const split = splitActiveErrors({ rework_round: 1, total_rework_rounds: 4 }, [...errors])
+    expect(split.active.map((e) => e.id)).toEqual([2])
+    expect(split.history.map((e) => e.id)).toEqual([1, 3])
   })
 
   it('parses Queue URL params and builds relative Jobs links cleanly', () => {

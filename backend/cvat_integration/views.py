@@ -128,23 +128,41 @@ def link(request: Request) -> Response:
         _log(user, "cvat.link", cvat_username=cvat_username, cvat_user_id=cvat_id)
     data = _link_state(user, _sync_held_jobs(user))
     # Organization trên CVAT mà tài khoản này là thành viên → hiện trên VanoHub ngay.
-    data["organizations"] = _filter_sync_result_for_user(user, sync_organizations_quietly(user))
+    data["organizations"] = _filter_sync_result_for_user(
+        user, sync_organizations_quietly(user, only_cvat_user_id=cvat_id)
+    )
     return Response(data, status=http_status.HTTP_200_OK)
 
 
 def _filter_sync_result_for_user(user: User, result: dict[str, Any]) -> dict[str, Any]:
     """Chỉ trả kết quả thuộc các organization mà user là thành viên (trừ superuser)."""
-    if user.is_superuser or "error" in result:
+    if "error" in result:
         return result
-    allowed_names = set(Project.objects.filter(role_assignments__user=user).values_list("name", flat=True))
+    allowed_ids = (
+        None
+        if user.is_superuser
+        else set(Project.objects.filter(role_assignments__user=user).values_list("id", flat=True))
+    )
+
+    def _filter_named(names: list[Any], ids: list[Any]) -> list[Any]:
+        if allowed_ids is None:
+            return list(names)
+        return [name for name, pid in zip(names, ids, strict=False) if pid in allowed_ids]
+
+    def _filter_entries(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        filtered: list[dict[str, Any]] = []
+        for item in entries:
+            if allowed_ids is not None and item.get("organization_id") not in allowed_ids:
+                continue
+            filtered.append({"organization": item["organization"], "user": item["user"]})
+        return filtered
+
     return {
-        "created": [name for name in result.get("created", []) if name in allowed_names],
-        "updated": [name for name in result.get("updated", []) if name in allowed_names],
-        "pm_added": [item for item in result.get("pm_added", []) if item.get("organization") in allowed_names],
-        "members_added": [
-            item for item in result.get("members_added", []) if item.get("organization") in allowed_names
-        ],
-        "waiting": [],
+        "created": _filter_named(result.get("created", []), result.get("created_ids", [])),
+        "updated": _filter_named(result.get("updated", []), result.get("updated_ids", [])),
+        "pm_added": _filter_entries(result.get("pm_added", [])),
+        "members_added": _filter_entries(result.get("members_added", [])),
+        "waiting": result.get("waiting", []) if user.is_superuser else [],
     }
 
 

@@ -3,6 +3,7 @@ from typing import Any
 
 from django.db import transaction
 from django.db.models import Case, Count, F, IntegerField, Prefetch, Q, When
+from django.db.models.functions import Greatest
 from django.utils import timezone
 from rest_framework import mixins, status, viewsets
 from rest_framework.decorators import action
@@ -55,7 +56,7 @@ from .serializers import (
     ResolveEscalationSerializer,
 )
 
-ASSIGN_LOCKED_STATUSES = {JobStatus.PENDING_QC2, JobStatus.APPROVED, JobStatus.DELIVERED}
+ASSIGN_LOCKED_STATUSES = {JobStatus.QC1_PASSED, JobStatus.PENDING_QC2, JobStatus.APPROVED, JobStatus.DELIVERED}
 
 
 def _iso(value):
@@ -83,11 +84,13 @@ def _base_job_queryset(project):
         .annotate(
             _active_rework_error_count=Count(
                 "review_errors",
-                filter=Q(
-                    status__in=[JobStatus.REWORK, JobStatus.ANNOTATING],
-                    rework_round__gt=0,
-                    review_errors__rework_round=F("rework_round") - 1,
-                    review_errors__is_voided=False,
+                filter=(
+                    Q(
+                        status__in=[JobStatus.REWORK, JobStatus.ANNOTATING],
+                        review_errors__rework_round=Greatest(F("total_rework_rounds"), F("rework_round")) - 1,
+                        review_errors__is_voided=False,
+                    )
+                    & (Q(rework_round__gt=0) | Q(total_rework_rounds__gt=0))
                 ),
                 distinct=True,
             )
@@ -174,6 +177,18 @@ def lock_job(project, job_id):
     return job
 
 
+def lock_job_with_batch(project, job_id):
+    """Khoá theo thứ tự chuẩn Batch → Job để tránh AB-BA deadlock với thao tác cấp Task."""
+    batch_id = Job.objects.filter(pk=job_id, project=project).values_list("batch_id", flat=True).first()
+    if batch_id is None:
+        raise NotFound("Không tìm thấy job trong organization.")
+    Batch.objects.select_for_update(of=("self",)).filter(pk=batch_id).first()
+    job = lock_job(project, job_id)
+    if job.batch_id != batch_id:
+        raise ValidationError("Job vừa được chuyển task, vui lòng thử lại.")
+    return job
+
+
 @transaction.atomic
 def start_annotation(job_id, *, project, actor, note=""):
     """Annotator bắt đầu gán nhãn hoặc sửa rework: PENDING_ANNOTATION / REWORK -> ANNOTATING."""
@@ -240,7 +255,8 @@ def submit_annotation(job_id, *, project, actor, note="", object_count=None):
 
     # Tính sản lượng cuboid ghi bổ sung vào DailyOutputRecord:
     # - Không cộng đúp phần đã ghi qua đồng bộ CVAT trước QC.
-    # - Vòng partial rework: chỉ tính trên các lỗi chưa bị hủy của ĐÚNG vòng hiện hành (rework_round - 1).
+    # - Vòng partial rework: chỉ tính trên các lỗi chưa bị hủy của ĐÚNG vòng hiện hành
+    #   (max(total_rework_rounds, rework_round) - 1).
     # - Vòng full rework: tính theo khối lượng làm lại trừ phần đã ghi trong vòng hiện tại.
     is_rework = job.total_rework_rounds > 0 or job.rework_round > 0
     count_delta = max(0, job.object_count - job.last_counted_objects)
@@ -249,9 +265,10 @@ def submit_annotation(job_id, *, project, actor, note="", object_count=None):
     elif job.rework_scope == ReworkScope.FULL:
         credited = max(0, job.object_count - job.round_credited_objects)
     else:
-        if job.rework_round > 0:
+        active_round = max(job.total_rework_rounds, job.rework_round) - 1
+        if active_round >= 0:
             active_errs = job.review_errors.filter(
-                rework_round=job.rework_round - 1,
+                rework_round=active_round,
                 is_voided=False,
             )
             existing_targets, missing_targets = _count_unique_error_targets(active_errs)
@@ -798,6 +815,9 @@ class AnnotatorJobViewSet(
                     events__action__in=["qc1.start", "qc1.pass", "qc1.reject"],
                     events__actor=user,
                 )
+                .exclude(audit_samples__auditor=user)
+                .exclude(audit_samples__reviewed_by=user)
+                .exclude(review_errors__reported_by=user)
             )
             if team_ids:
                 # Chặn chặt theo team: chỉ nhận job thuộc task của team mình hoặc task chung (chưa gán team).

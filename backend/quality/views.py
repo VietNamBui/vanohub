@@ -19,7 +19,7 @@ from accounts.validation import validated_dict
 from cvat_integration.assignee import schedule_assignee_push
 from jobs.models import OPEN_STATUSES, FirstQc1Result, Job, JobStatus, ReworkScope
 from jobs.serializers import JobDetailSerializer, JobSerializer
-from jobs.views import ensure_editable, ensure_not_escalated, lock_job, order_by_db06_priority
+from jobs.views import ensure_editable, ensure_not_escalated, lock_job, lock_job_with_batch, order_by_db06_priority
 from projects.models import ActivityLog, DataStatus, EscalationPolicy, UserNotification
 from projects.notifications import (
     notify_assigned,
@@ -453,7 +453,7 @@ def qc1_pass(job_id: int, *, project: Any, actor: Any, comment: str = "") -> Job
     - Nếu task chưa được PM xác nhận QC2 (qc2_confirmed_at is None): chuyển QC1_PASSED và báo PM khi đủ 100%.
     - Nếu task đã được PM xác nhận QC2 (rework hậu QC2): chuyển thẳng PENDING_QC2 và tự tạo lượt QC2.
     """
-    job = lock_job(project, job_id)
+    job = lock_job_with_batch(project, job_id)
     _check_qc1_access(job, actor)
     if job.status not in QC1_REVIEWABLE_STATUSES:
         raise ValidationError(

@@ -15,13 +15,15 @@ Quy tắc biên dữ liệu & an toàn workflow:
   khi `batch.qc2_confirmed_at is None`; chỉ vào `PENDING_QC2` + `ensure_qc2_sample` khi batch đã xác nhận QC2.
 - Tôn trọng khóa (`is_locked`, batch/dataset không `active`, `DELIVERED`) và `EscalationPolicy.BLOCK`
   (vẫn cho đồng bộ bình thường khi `EscalationPolicy.WARN_ONLY`).
-- Nhật ký `ActivityLog` từ đồng bộ luôn gán `actor=job.annotator` (hoặc `None`) — KHÔNG bao giờ gán
-  PM bấm đồng bộ làm actor để tránh làm nhiễm luật bốn mắt (lưu `synced_by` trong `after`).
+- Nhật ký `ActivityLog` từ đồng bộ gán `actor=job.annotator` (làm/nộp), `actor=assignee/qc1_reviewer CVAT`
+  (duyệt/trả QC1), hoặc `None` — KHÔNG bao giờ gán PM bấm đồng bộ làm actor để tránh làm nhiễm luật bốn mắt
+  (lưu `synced_by` trong `after`).
 - Sản lượng ngày (`DailyOutputRecord(CVAT_SYNC)`): ghi phần chênh lệch dương khi `object_count` tăng.
 - Lỗi 404 (`CvatNotFoundError`) ở từng task/job được bắt cục bộ và đánh dấu `source_missing=True` mà
   không làm hỏng toàn bộ phiên đồng bộ organization.
 """
 
+import logging
 from contextlib import suppress
 from dataclasses import dataclass, field
 from typing import Any
@@ -49,6 +51,8 @@ from .assignee import pending_samples_prefetch, push_assignees
 from .client import CvatClient, CvatError, CvatNotFoundError
 from .models import CvatAccount
 from .schemas import CvatImportResult, CvatJobPayload, CvatSyncResult, CvatTaskPayload
+
+logger = logging.getLogger(__name__)
 
 # Các trạng thái còn được phép nhận tiến độ một chiều từ CVAT.
 # KHÔNG bao gồm QC1_PASSED / PENDING_QC2 / APPROVED / DELIVERED để không bao giờ kéo lùi sau QC1.
@@ -112,14 +116,16 @@ def _parse_task(raw: Any) -> CvatTaskPayload:
     try:
         return CvatTaskPayload.model_validate(raw)
     except PydanticValidationError as exc:
-        raise CvatError(f"Dữ liệu CVAT task không hợp lệ: {exc}") from exc
+        logger.warning("CVAT task payload invalid: %s", exc.errors(include_url=False, include_input=False))
+        raise CvatError("Dữ liệu CVAT task không hợp lệ.") from exc
 
 
 def _parse_job(raw: Any) -> CvatJobPayload:
     try:
         return CvatJobPayload.model_validate(raw)
     except PydanticValidationError as exc:
-        raise CvatError(f"Dữ liệu CVAT job không hợp lệ: {exc}") from exc
+        logger.warning("CVAT job payload invalid: %s", exc.errors(include_url=False, include_input=False))
+        raise CvatError("Dữ liệu CVAT job không hợp lệ.") from exc
 
 
 def _is_annotation_job(cvat_job: CvatJobPayload) -> bool:
@@ -173,11 +179,11 @@ def _next_cvat_status(
     if job.status == JobStatus.PENDING_ANNOTATION:
         if mapped == JobStatus.ANNOTATING:
             return JobStatus.ANNOTATING
-        if job.rework_round == 0 and mapped == JobStatus.PENDING_QC1:
+        if job.rework_round == 0 and job.total_rework_rounds == 0 and mapped == JobStatus.PENDING_QC1:
             return JobStatus.PENDING_QC1
         return None
     if job.status == JobStatus.ANNOTATING:
-        if job.rework_round == 0 and mapped == JobStatus.PENDING_QC1:
+        if job.rework_round == 0 and job.total_rework_rounds == 0 and mapped == JobStatus.PENDING_QC1:
             return JobStatus.PENDING_QC1
         if (stage, state) == ("annotation", "rejected") and (prev_stage, prev_state) != ("annotation", "rejected"):
             return JobStatus.REWORK
@@ -247,6 +253,7 @@ def _apply_cvat_state(
     actor: Any,
     *,
     object_count: int | None = None,
+    linked: dict[int, User] | None = None,
 ) -> bool:
     """Cập nhật một Job từ dữ liệu CVAT (tự save, ghi ActivityLog an toàn 4-eyes và notify escalation)."""
     stage, state = cvat_job.stage, cvat_job.state
@@ -309,6 +316,17 @@ def _apply_cvat_state(
         after_payload["object_count"] = job.object_count
     elif new_status == JobStatus.ANNOTATING:
         log_actor = job.annotator
+
+    if before == JobStatus.QC1_REVIEWING and new_status in (
+        JobStatus.REWORK,
+        JobStatus.QC1_PASSED,
+        JobStatus.PENDING_QC2,
+    ):
+        reviewer = ((linked or {}).get(assignee_id) if assignee_id else None) or job.qc1_reviewer
+        log_actor = reviewer
+        after_payload["event"] = "qc1.reject" if new_status == JobStatus.REWORK else "qc1.pass"
+        if reviewer is not None and job.qc1_reviewer_id is None and reviewer.pk != job.annotator_id:
+            job.qc1_reviewer = reviewer
 
     if actor is not None and getattr(actor, "is_authenticated", False):
         after_payload["synced_by"] = actor.pk
@@ -374,7 +392,12 @@ def _new_job(
 # ---------------------------------------------------------------- Organization
 
 
-def sync_organizations(actor: Any = None, client: Any = None) -> dict[str, Any]:
+def sync_organizations(
+    actor: Any = None,
+    client: Any = None,
+    *,
+    only_cvat_user_id: int | None = None,
+) -> dict[str, Any]:
     """Tạo / cập nhật "Organization" VanoHub từ CVAT organization + gán vai trò theo thành viên.
 
     Chỉ tạo khi organization có ít nhất một Owner / Maintainer đã liên kết VanoHub (để có PM).
@@ -382,13 +405,19 @@ def sync_organizations(actor: Any = None, client: Any = None) -> dict[str, Any]:
     client = client or CvatClient()
     linked = _linked_users()
     created: list[str] = []
+    created_ids: list[int] = []
     updated: list[str] = []
-    pm_added: list[dict[str, str]] = []
-    members_added: list[dict[str, str]] = []
+    updated_ids: list[int] = []
+    pm_added: list[dict[str, Any]] = []
+    members_added: list[dict[str, Any]] = []
     waiting: list[dict[str, Any]] = []
 
     for org in client.list_organizations():
         memberships = [m for m in client.list_memberships(org["id"]) if m.get("is_active", True)]
+        if only_cvat_user_id is not None and not any(
+            _user_id(m.get("user")) == only_cvat_user_id for m in memberships
+        ):
+            continue
         pms = [
             linked[uid]
             for m in memberships
@@ -415,11 +444,13 @@ def sync_organizations(actor: Any = None, client: Any = None) -> dict[str, Any]:
                     created_by=actor if actor and getattr(actor, "is_authenticated", False) else None,
                 )
                 created.append(name)
+                created_ids.append(project.pk)
             elif project.name != name or project.cvat_org_slug != slug:
                 project.name = name
                 project.cvat_org_slug = slug
                 project.save(update_fields=["name", "cvat_org_slug", "updated_at"])
                 updated.append(name)
+                updated_ids.append(project.pk)
             seed_default_error_categories(project)
             for membership in memberships:
                 uid = _user_id(membership.get("user"))
@@ -434,7 +465,7 @@ def sync_organizations(actor: Any = None, client: Any = None) -> dict[str, Any]:
                         defaults={"granted_by": actor},
                     )
                     if added:
-                        pm_added.append({"organization": name, "user": user.username})
+                        pm_added.append({"organization": name, "organization_id": project.pk, "user": user.username})
                         ActivityLog.record(
                             project=project,
                             actor=actor,
@@ -444,24 +475,26 @@ def sync_organizations(actor: Any = None, client: Any = None) -> dict[str, Any]:
                         )
                 elif not RoleAssignment.objects.filter(user=user, project=project).exists():
                     RoleAssignment.objects.create(user=user, role=Role.ANNOTATOR, project=project, granted_by=actor)
-                    members_added.append({"organization": name, "user": user.username})
+                    members_added.append({"organization": name, "organization_id": project.pk, "user": user.username})
         if project.cvat_synced_at is None:
             # Organization mới → kéo luôn project / task / job, PM không phải bấm thêm.
             with suppress(CvatError):
                 sync_organization(project, actor, client=client)
     return {
         "created": created,
+        "created_ids": created_ids,
         "updated": updated,
+        "updated_ids": updated_ids,
         "pm_added": pm_added,
         "members_added": members_added,
         "waiting": waiting,
     }
 
 
-def sync_organizations_quietly(actor: Any = None) -> dict[str, Any]:
+def sync_organizations_quietly(actor: Any = None, *, only_cvat_user_id: int | None = None) -> dict[str, Any]:
     """Như sync_organizations nhưng không ném lỗi (dùng sau khi liên kết CVAT)."""
     try:
-        return sync_organizations(actor)
+        return sync_organizations(actor, only_cvat_user_id=only_cvat_user_id)
     except CvatError as exc:
         return {"error": str(exc)}
 
@@ -558,7 +591,7 @@ def sync_organization(
     handled_missing_task_ids: set[int] = set()
 
     with transaction.atomic():
-        for remote_project in remote_projects:
+        for remote_project in sorted(remote_projects, key=lambda p: p.raw["id"]):
             summary["projects"] += 1
             if remote_project.skipped_foreign or remote_project.missing:
                 continue
@@ -577,7 +610,7 @@ def sync_organization(
                 continue
             dataset.name = name
 
-            for remote_task in remote_project.tasks:
+            for remote_task in sorted(remote_project.tasks, key=lambda t: t.raw["id"]):
                 summary["tasks"] += 1
                 if remote_task.skipped_foreign:
                     continue
@@ -641,28 +674,27 @@ def sync_organization(
                     ]
                 )
 
+                locked_jobs = {
+                    j.cvat_job_id: j
+                    for j in Job.objects.select_for_update(of=("self",))
+                    .select_related("project", "batch", "dataset", "annotator", "qc1_reviewer")
+                    .filter(cvat_job_id__in=[rj.payload.id for rj in remote_task.jobs])
+                    .order_by("id")
+                }
+
                 seen_job_ids: set[int] = set()
                 for remote_job in remote_task.jobs:
                     cvat_job = remote_job.payload
                     if remote_job.missing:
-                        missing_job = (
-                            Job.objects.select_for_update(of=("self",))
-                            .filter(batch=task, cvat_job_id=cvat_job.id)
-                            .first()
-                        )
-                        if missing_job is not None and not missing_job.source_missing:
+                        missing_job = locked_jobs.get(cvat_job.id)
+                        if missing_job is not None and missing_job.batch_id == task.id and not missing_job.source_missing:
                             missing_job.source_missing = True
                             missing_job.save(update_fields=["source_missing", "updated_at"])
                             summary["jobs_updated"] += 1
                         continue
 
                     seen_job_ids.add(cvat_job.id)
-                    job = (
-                        Job.objects.select_for_update(of=("self",))
-                        .select_related("project", "batch", "dataset", "annotator")
-                        .filter(cvat_job_id=cvat_job.id)
-                        .first()
-                    )
+                    job = locked_jobs.get(cvat_job.id)
                     if job is None:
                         job = _new_job(project, dataset, task, cvat_job, linked, annotator_ids)
                         job.save()
@@ -675,9 +707,18 @@ def sync_organization(
                                     "updated_at",
                                 ]
                             )
+                        ActivityLog.record(
+                            project=project,
+                            actor=None,
+                            action="job.import",
+                            target=job,
+                            job=job,
+                            after={"status": job.status, "annotator": job.annotator_id},
+                            note="Nhập từ CVAT (đồng bộ organization)",
+                        )
                         summary["jobs_created"] += 1
                     elif job.batch_id == task.id and _apply_cvat_state(
-                        job, cvat_job, actor, object_count=remote_job.object_count
+                        job, cvat_job, actor, object_count=remote_job.object_count, linked=linked
                     ):
                         summary["jobs_updated"] += 1
 
@@ -690,6 +731,7 @@ def sync_organization(
                     task.jobs.select_for_update(of=("self",))
                     .filter(cvat_job_id__isnull=False, source_missing=False)
                     .exclude(cvat_job_id__in=seen_job_ids)
+                    .order_by("id")
                 )
                 for absent_job in absent_jobs:
                     absent_job.source_missing = True
@@ -704,6 +746,7 @@ def sync_organization(
             project.batches.select_for_update(of=("self",))
             .filter(cvat_task_id__isnull=False)
             .exclude(cvat_task_id__in=seen_task_ids | handled_missing_task_ids)
+            .order_by("id")
         )
         for absent_batch in absent_batches:
             absent_batch.source_missing = True
@@ -774,13 +817,15 @@ def import_task_jobs(batch: Batch, task_id: int, actor: Any, client: Any = None)
 
         locked_batch.cvat_task_id = task_id
         locked_batch.source_missing = False
+        locked_jobs = {
+            j.cvat_job_id: j
+            for j in Job.objects.select_for_update(of=("self",))
+            .select_related("project", "batch", "dataset", "annotator", "qc1_reviewer")
+            .filter(cvat_job_id__in=[cj.id for cj in cvat_jobs])
+            .order_by("id")
+        }
         for cvat_job in cvat_jobs:
-            job = (
-                Job.objects.select_for_update(of=("self",))
-                .select_related("project", "batch", "dataset", "annotator")
-                .filter(cvat_job_id=cvat_job.id)
-                .first()
-            )
+            job = locked_jobs.get(cvat_job.id)
             if job is None:
                 job = _new_job(project, locked_batch.dataset, locked_batch, cvat_job, linked, annotator_ids)
                 job.name = f"{task.name or 'task'} · job {cvat_job.id}"
@@ -791,12 +836,13 @@ def import_task_jobs(batch: Batch, task_id: int, actor: Any, client: Any = None)
                     action="job.import",
                     target=job,
                     job=job,
+                    after={"status": job.status, "annotator": job.annotator_id},
                     note=f"Nhập từ CVAT task {task_id}",
                 )
                 created += 1
             elif job.batch_id != locked_batch.id:
                 continue  # job thuộc batch khác → không động vào
-            elif _apply_cvat_state(job, cvat_job, actor):
+            elif _apply_cvat_state(job, cvat_job, actor, linked=linked):
                 updated += 1
 
             if not _is_workflow_frozen(job) and job.status == JobStatus.PENDING_QC2:
@@ -859,6 +905,8 @@ def sync_batch(
 
     by_id = {j.id: j for j in parsed_jobs}
 
+    linked = _linked_users()
+
     # Thực hiện toàn bộ HTTP I/O đếm object NGOÀI transaction.atomic(); 404 theo từng job không làm vỡ cả batch.
     fetched_counts: dict[int, int] = {}
     missing_job_ids: set[int] = set()
@@ -886,8 +934,9 @@ def sync_batch(
 
         jobs = (
             locked_batch.jobs.select_for_update(of=("self",))
-            .select_related("project", "batch", "dataset", "annotator")
+            .select_related("project", "batch", "dataset", "annotator", "qc1_reviewer")
             .filter(cvat_job_id__isnull=False)
+            .order_by("id")
         )
         for job in jobs:
             assert job.cvat_job_id is not None
@@ -900,7 +949,7 @@ def sync_batch(
                 continue
 
             obj_count = fetched_counts.get(job.cvat_job_id) if count_objects else None
-            if _apply_cvat_state(job, cvat_job, actor, object_count=obj_count):
+            if _apply_cvat_state(job, cvat_job, actor, object_count=obj_count, linked=linked):
                 updated += 1
 
             if not _is_workflow_frozen(job) and job.status == JobStatus.PENDING_QC2:

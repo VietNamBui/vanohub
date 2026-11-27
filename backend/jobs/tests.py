@@ -617,7 +617,8 @@ class JobHardeningAndSecurityTests(TestCase):
         self.assertEqual(job.total_rework_rounds, 3)
 
     def test_assign_blocks_post_qc1_statuses_enforces_historical_four_eyes_and_batches_cvat(self):
-        for st in (JobStatus.PENDING_QC2, JobStatus.APPROVED, JobStatus.DELIVERED):
+        # P0 #6: block reassignment from QC1_PASSED onward as well as QC2/approved/delivered
+        for st in (JobStatus.QC1_PASSED, JobStatus.PENDING_QC2, JobStatus.APPROVED, JobStatus.DELIVERED):
             locked_stage_job = self.f.job(status=st, annotator=self.f.ann1)
             res = self.pm.post(
                 self.f.url(f"jobs/{locked_stage_job.id}/assign/"),

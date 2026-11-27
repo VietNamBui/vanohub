@@ -17,7 +17,7 @@ import MemberSelect from '../../projects/components/MemberSelect'
 import { useProject } from '../../projects/projectContext'
 import { assignJob, getJob, resolveEscalation, setJobDeadline, setJobLock } from '../api'
 import { ACTION_LABELS } from '../constants'
-import { describeTimelineEvent, timelineDotColor } from '../jobHelpers'
+import { describeTimelineEvent, getJobLockReason, timelineDotColor } from '../jobHelpers'
 import AssignModal from './AssignModal'
 import DeadlineModal from './DeadlineModal'
 import JobStatusBadge from './JobStatusBadge'
@@ -93,7 +93,7 @@ export default function JobDetailDrawer({ jobId, onClose, onChanged }: Props) {
             <Button
               size="sm"
               color="secondary"
-              isDisabled={job.is_locked || job.status === 'delivered'}
+              isDisabled={getJobLockReason(canManage, job) !== null}
               onPress={() => setModal('assign')}
             >
               Giao lại

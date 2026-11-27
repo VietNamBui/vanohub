@@ -10,6 +10,7 @@ Cấu hình qua biến môi trường (backend/.env):
 Organization trên CVAT được truyền trực tiếp qua tham số `organization` (từ `Project.cvat_org_slug`).
 """
 
+import logging
 from typing import Any
 from urllib.parse import urlparse
 
@@ -19,6 +20,8 @@ from pydantic import BaseModel
 from pydantic import ValidationError as PydanticValidationError
 
 from .schemas import CvatAboutPayload, CvatAnnotationsPayload, CvatJobMetaPayload, CvatJobPayload, CvatTaskPayload
+
+logger = logging.getLogger(__name__)
 
 MAX_PAGES = 1000
 
@@ -35,7 +38,8 @@ def _validate_model[ModelT: BaseModel](model_cls: type[ModelT], payload: Any, la
     try:
         return model_cls.model_validate(payload)
     except PydanticValidationError as exc:
-        raise CvatError(f"Dữ liệu CVAT không hợp lệ ({label}): {exc}") from exc
+        logger.warning("CVAT payload invalid (%s): %s", label, exc.errors(include_url=False, include_input=False))
+        raise CvatError(f"Dữ liệu CVAT không hợp lệ ({label}).") from exc
 
 
 def _validate_base_url(base_url: str) -> None:
@@ -74,13 +78,16 @@ class CvatClient:
         _validate_base_url(self.base_url)
         self.timeout = timeout
         self.session = requests.Session()
+        self.session.trust_env = False
         host_header = getattr(settings, "CVAT_HOST_HEADER", "")
         if host_header:
             self.session.headers["Host"] = host_header
-        resolved_token = token or settings.CVAT_ACCESS_TOKEN
+        resolved_token = (token or settings.CVAT_ACCESS_TOKEN or "").strip()
         resolved_username = username or settings.CVAT_USERNAME
         resolved_password = password or settings.CVAT_PASSWORD
         if resolved_token:
+            if any(ch.isspace() or ord(ch) < 33 or ord(ch) > 126 for ch in resolved_token):
+                raise CvatError("Access Token CVAT chứa ký tự không hợp lệ.")
             self.session.headers["Authorization"] = f"Bearer {resolved_token}"
         elif resolved_username and resolved_password:
             self.session.auth = (resolved_username, resolved_password)
@@ -107,7 +114,8 @@ class CvatClient:
                 allow_redirects=False,
             )
         except requests.RequestException as exc:
-            raise CvatError(f"Không kết nối được CVAT tại {self.base_url}: {exc}") from exc
+            logger.warning("CVAT request failed: %s %s (%s)", method, path, type(exc).__name__)
+            raise CvatError(f"Không kết nối được CVAT tại {self.base_url} ({type(exc).__name__}).") from exc
         if 300 <= response.status_code < 400:
             raise CvatError(
                 f"CVAT trả chuyển hướng HTTP {response.status_code} cho {path} — kiểm tra lại CVAT_URL."

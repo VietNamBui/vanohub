@@ -1,9 +1,10 @@
 from datetime import UTC, datetime
 from unittest.mock import patch
 
-from django.db import IntegrityError
+from django.db import IntegrityError, connection
 from django.db.models import RestrictedError
 from django.test import TestCase
+from django.test.utils import CaptureQueriesContext
 from django.utils import timezone
 
 from accounts.models import Role, RoleAssignment
@@ -14,6 +15,7 @@ from teams.models import Team, TeamMember
 
 from .models import Audit, AuditSample, ErrorCategory, ErrorVerdict, ReviewError, ReviewStage
 from .qc2 import ensure_qc2_sample, four_eyes_conflicts, get_stage_history, pick_auditor, pick_frames
+from .views import qc1_pass, qc1_reject
 
 
 class FrameSamplingTests(TestCase):
@@ -800,3 +802,77 @@ class QualityBugFixTests(TestCase):
             ).status_code,
             400,
         )
+
+
+class P0RegressionTests(TestCase):
+    def setUp(self) -> None:
+        self.f = ProjectFixture()
+        self.pm = self.f.client(self.f.pm)
+        self.ann1 = self.f.client(self.f.ann1)
+
+    def test_qc1_pass_locks_batch_before_job_and_assign_blocks_qc1_passed(self) -> None:
+        job = self.f.job(status=JobStatus.PENDING_QC1, annotator=self.f.ann1)
+        with CaptureQueriesContext(connection) as queries:
+            updated = qc1_pass(job.id, project=self.f.project, actor=self.f.qc1)
+        self.assertEqual(updated.status, JobStatus.QC1_PASSED)
+        for_update = [q["sql"] for q in queries if "FOR UPDATE" in q["sql"]]
+        self.assertTrue(for_update)
+        self.assertIn("projects_batch", for_update[0])
+        self.assertTrue(any("jobs_job" in sql for sql in for_update[1:]))
+
+        res = self.pm.post(self.f.url(f"jobs/{job.id}/assign/"), {"annotator": self.f.ann2.id}, format="json")
+        self.assertEqual(res.status_code, 400)
+
+    def test_reassign_preserves_prior_annotator_and_claim_excludes_qc2_auditor(self) -> None:
+        job = self.f.job(status=JobStatus.ANNOTATING, annotator=self.f.ann1)
+        res = self.pm.post(self.f.url(f"jobs/{job.id}/assign/"), {"annotator": self.f.ann2.id}, format="json")
+        self.assertEqual(res.status_code, 200, res.data)
+        ann_ids, _, _ = get_stage_history(job)
+        self.assertIn(self.f.ann1.id, ann_ids)
+        self.assertIn(self.f.ann2.id, ann_ids)
+
+        pool_job = self.f.job(status=JobStatus.PENDING_ANNOTATION, annotator=None)
+        audit = Audit.objects.create(
+            project=self.f.project, batch=self.f.batch, method="random", sampling_rate=20, seed=0, eligible_count=1
+        )
+        AuditSample.objects.create(audit=audit, job=pool_job, auditor=self.f.ann1, result=AuditSample.Result.PASS)
+        self.assertEqual(self.ann1.post(self.f.url("annotator/jobs/claim/"), {}, format="json").status_code, 400)
+
+    def test_open_error_count_tracks_active_round_after_resolve_escalation(self) -> None:
+        job = self.f.job(
+            status=JobStatus.REWORK,
+            annotator=self.f.ann1,
+            rework_round=3,
+            total_rework_rounds=3,
+            is_escalated=True,
+        )
+        ReviewError.objects.create(
+            job=job, stage=ReviewStage.QC1, rework_round=0, category=self.f.category, severity="minor"
+        )
+        res = self.pm.post(
+            self.f.url(f"jobs/{job.id}/resolve-escalation/"),
+            {"note": "Reset vòng để làm lại"},
+            format="json",
+        )
+        self.assertEqual(res.status_code, 200, res.data)
+
+        self.assertEqual(self.ann1.post(self.f.url(f"annotator/jobs/{job.id}/start/"), {}, format="json").status_code, 200)
+        self.assertEqual(
+            self.ann1.post(self.f.url(f"annotator/jobs/{job.id}/submit/"), {}, format="json").status_code,
+            200,
+        )
+        qc1_reject(
+            job.id,
+            project=self.f.project,
+            actor=self.f.qc1,
+            errors=[
+                {"category": self.f.category, "location": "f1", "description": "e1"},
+                {"category": self.f.category, "location": "f2", "description": "e2"},
+            ],
+        )
+        job.refresh_from_db()
+        self.assertEqual((job.rework_round, job.total_rework_rounds), (1, 4))
+        list_row = next(r for r in self.pm.get(self.f.url("jobs/")).data["results"] if r["id"] == job.id)
+        detail = self.pm.get(self.f.url(f"jobs/{job.id}/")).data
+        self.assertEqual(list_row["open_error_count"], 2)
+        self.assertEqual(detail["open_error_count"], 2)

@@ -20,10 +20,11 @@ from quality.qc2 import four_eyes_conflicts
 
 from . import sync
 from .assignee import _NOT_MANAGED, current_holder, jobs_held_by, push_assignees
-from .client import MAX_PAGES, CvatClient, CvatError, CvatNotFoundError
+from .client import MAX_PAGES, CvatClient, CvatError, CvatNotFoundError, _validate_model
 from .models import CvatAccount
 from .schemas import CvatAnnotationsPayload, CvatAssigneePayload, CvatJobMetaPayload, CvatJobPayload, CvatTaskPayload
 from .sync import SYNCABLE_STATUSES, import_task_jobs, sync_batch
+from .views import _filter_sync_result_for_user
 
 
 class CvatSchemaContractTests(TestCase):
@@ -1142,14 +1143,16 @@ class JobsHeldByAndSyncOrgsRbacTests(TestCase):
         other = Project.objects.create(name="Secret Org")
         mock_sync.return_value = {
             "created": [self.f.project.name, other.name],
+            "created_ids": [self.f.project.id, other.id],
             "updated": [other.name],
+            "updated_ids": [other.id],
             "pm_added": [
-                {"organization": self.f.project.name, "user": self.f.pm.username},
-                {"organization": other.name, "user": "other_pm"},
+                {"organization": self.f.project.name, "organization_id": self.f.project.id, "user": self.f.pm.username},
+                {"organization": other.name, "organization_id": other.id, "user": "other_pm"},
             ],
             "members_added": [
-                {"organization": self.f.project.name, "user": self.f.ann1.username},
-                {"organization": other.name, "user": "other_ann"},
+                {"organization": self.f.project.name, "organization_id": self.f.project.id, "user": self.f.ann1.username},
+                {"organization": other.name, "organization_id": other.id, "user": "other_ann"},
             ],
             "waiting": [{"cvat_org_id": 99, "name": "Unlinked Org", "reason": "No PM"}],
         }
@@ -1169,3 +1172,82 @@ class JobsHeldByAndSyncOrgsRbacTests(TestCase):
         self.assertEqual(admin_res.status_code, 200, admin_res.data)
         self.assertEqual(admin_res.data["created"], [self.f.project.name, other.name])
         self.assertEqual(len(admin_res.data["waiting"]), 1)
+
+    def test_sync_organizations_scoped_to_cvat_user_and_filters_duplicate_names_by_id(self):
+        foreign_pm = User.objects.create_user("foreign_pm", password="pw")
+        CvatAccount.objects.create(user=self.f.ann1, cvat_user_id=11, cvat_username="a1")
+        CvatAccount.objects.create(user=foreign_pm, cvat_user_id=99, cvat_username="fpm")
+        self.f.project.cvat_org_id = 7
+        self.f.project.save(update_fields=["cvat_org_id"])
+
+        client = _FakeSyncClient(
+            jobs=[],
+            orgs=[
+                {"id": 7, "slug": "acme", "name": self.f.project.name},
+                {"id": 8, "slug": "foreign", "name": "Foreign Org"},
+            ],
+            memberships={
+                7: [{"user": {"id": 11}, "role": "worker", "is_active": True}],
+                8: [{"user": {"id": 99}, "role": "owner", "is_active": True}],
+            },
+        )
+        res = sync.sync_organizations(actor=self.f.ann1, client=client, only_cvat_user_id=11)
+        self.assertFalse(Project.objects.filter(cvat_org_id=8).exists())
+        self.assertEqual(res["created_ids"], [])
+
+        dup = Project.objects.create(name=self.f.project.name, cvat_org_id=88)
+        filtered = _filter_sync_result_for_user(
+            self.f.pm,
+            {
+                "created": [self.f.project.name, dup.name],
+                "created_ids": [self.f.project.id, dup.id],
+                "updated": [],
+                "updated_ids": [],
+                "pm_added": [
+                    {"organization": self.f.project.name, "organization_id": self.f.project.id, "user": "pm"},
+                    {"organization": dup.name, "organization_id": dup.id, "user": "other"},
+                ],
+                "members_added": [],
+                "waiting": [{"cvat_org_id": 99}],
+            },
+        )
+        self.assertEqual(filtered["created"], [self.f.project.name])
+        self.assertEqual(filtered["pm_added"], [{"organization": self.f.project.name, "user": "pm"}])
+
+    def test_client_hardening_trust_env_crlf_token_and_redacted_validation(self):
+        with override_settings(CVAT_URL="http://cvat.test"):
+            client = CvatClient(token="secret")
+            self.assertFalse(client.session.trust_env)
+
+        with self.assertRaises(CvatError) as crlf_ctx:
+            CvatClient(base_url="http://cvat.test", token="abc\r\nX")
+        self.assertNotIn("abc", str(crlf_ctx.exception))
+
+        with self.assertRaises(CvatError) as val_ctx:
+            _validate_model(CvatTaskPayload, {"id": "bad", "name": "secret-payload"}, "task")
+        self.assertNotIn("secret-payload", str(val_ctx.exception))
+        self.assertNotIn("bad", str(val_ctx.exception))
+
+    def test_cvat_sync_qc1_completion_records_reviewer_and_event_for_four_eyes(self):
+        self.f.project.cvat_org_id = 7
+        self.f.project.cvat_org_slug = "acme"
+        self.f.project.save()
+        self.f.dataset.cvat_project_id = 900
+        self.f.dataset.save()
+        self.f.batch.cvat_task_id = 5
+        self.f.batch.save()
+        CvatAccount.objects.create(user=self.f.qc1, cvat_user_id=33, cvat_username="q1")
+        job = self.f.job(
+            status=JobStatus.QC1_REVIEWING,
+            annotator=self.f.ann1,
+            qc1_reviewer=None,
+            cvat_job_id=777,
+        )
+        client = _FakeSyncClient([{"id": 777, "stage": "validation", "state": "completed", "assignee": {"id": 33}}])
+        sync.sync_organization(self.f.project, self.f.pm, client=client)
+        job.refresh_from_db()
+        self.assertEqual(job.status, JobStatus.QC1_PASSED)
+        self.assertEqual(job.qc1_reviewer, self.f.qc1)
+        log = ActivityLog.objects.get(job=job, action="job.status")
+        self.assertEqual(log.actor, self.f.qc1)
+        self.assertEqual(log.after.get("event"), "qc1.pass")

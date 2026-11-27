@@ -317,13 +317,7 @@ export default function AnnotatorDashboardPage() {
                     </div>
 
                     {(() => {
-                      const activeFocusErrors = data.rework_focus.errors.filter(
-                        (err) =>
-                          !err.is_voided &&
-                          (data.rework_focus!.rework_round > 0
-                            ? err.rework_round === data.rework_focus!.rework_round - 1
-                            : true),
-                      )
+                      const activeFocusErrors = data.rework_focus.errors.filter((err) => !err.is_voided)
                       return (
                         <ul className="mt-4 divide-y divide-secondary">
                           {activeFocusErrors.slice(0, 3).map((err) => (

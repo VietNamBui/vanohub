@@ -22,6 +22,17 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 load_dotenv(BASE_DIR / '.env')
 
 
+def _env_bool(name: str, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in ('1', 'true', 'yes', 'on')
+
+
+def _env_list(name: str, default: str = '') -> list[str]:
+    return [item.strip() for item in os.getenv(name, default).split(',') if item.strip()]
+
+
 # Quick-start development settings - unsuitable for production
 # See https://docs.djangoproject.com/en/6.1/howto/deployment/checklist/
 
@@ -29,16 +40,9 @@ load_dotenv(BASE_DIR / '.env')
 SECRET_KEY = os.environ['DJANGO_SECRET_KEY']
 
 # SECURITY WARNING: don't run with debug turned on in production!
-DEBUG = os.getenv('DJANGO_DEBUG', 'False').lower() == 'true'
+DEBUG = _env_bool('DJANGO_DEBUG', False)
 
-ALLOWED_HOSTS = [
-    host.strip()
-    for host in os.getenv(
-        'DJANGO_ALLOWED_HOSTS',
-        'localhost,127.0.0.1' if DEBUG else '',
-    ).split(',')
-    if host.strip()
-]
+ALLOWED_HOSTS = _env_list('DJANGO_ALLOWED_HOSTS', 'localhost,127.0.0.1' if DEBUG else '')
 
 
 # Application definition
@@ -104,6 +108,9 @@ DATABASES = {
         'PASSWORD': os.environ['POSTGRES_PASSWORD'],
         'HOST': os.getenv('POSTGRES_HOST', 'localhost'),
         'PORT': os.getenv('POSTGRES_PORT', '5432'),
+        'OPTIONS': {
+            'sslmode': os.getenv('POSTGRES_SSLMODE', 'prefer'),
+        },
     }
 }
 
@@ -153,26 +160,54 @@ STATIC_URL = 'static/'
 
 MAILERS = {
     'default': {
-        'BACKEND': 'django.core.mail.backends.console.EmailBackend',
+        'BACKEND': os.getenv(
+            'DJANGO_EMAIL_BACKEND',
+            'django.core.mail.backends.console.EmailBackend'
+            if DEBUG
+            else 'django.core.mail.backends.smtp.EmailBackend',
+        ),
     },
 }
 
 AUTH_USER_MODEL = "accounts.User"
 
 
+# Security & HTTPS
+CSRF_TRUSTED_ORIGINS = _env_list('DJANGO_CSRF_TRUSTED_ORIGINS')
+if _env_bool('DJANGO_SECURE_PROXY_SSL_HEADER', False):
+    SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
+SECURE_SSL_REDIRECT = _env_bool('DJANGO_SECURE_SSL_REDIRECT', not DEBUG)
+SECURE_HSTS_SECONDS = int(os.getenv('DJANGO_SECURE_HSTS_SECONDS', '0' if DEBUG else '31536000'))
+SECURE_HSTS_INCLUDE_SUBDOMAINS = _env_bool('DJANGO_SECURE_HSTS_INCLUDE_SUBDOMAINS', False)
+SESSION_COOKIE_SECURE = not DEBUG
+CSRF_COOKIE_SECURE = not DEBUG
+
+
 # Django REST Framework
 # - JWTAuthentication: frontend React gửi header "Authorization: Bearer <access token>".
-# - SessionAuthentication: để dùng được trang API có giao diện (browsable API) sau khi
-#   đăng nhập /admin/ — tiện khi học và kiểm thử thủ công.
+# - SessionAuthentication & BrowsableAPIRenderer chỉ bật khi DEBUG=True để kiểm thử cục bộ;
+#   production chỉ dùng JWT + JSONRenderer và bật rate throttling theo anon/user.
 # - Mặc định mọi API đều yêu cầu đăng nhập; API nào mở công khai phải tự khai báo.
 REST_FRAMEWORK = {
     'DEFAULT_AUTHENTICATION_CLASSES': [
         'rest_framework_simplejwt.authentication.JWTAuthentication',
-        'rest_framework.authentication.SessionAuthentication',
+        *(['rest_framework.authentication.SessionAuthentication'] if DEBUG else []),
     ],
     'DEFAULT_PERMISSION_CLASSES': [
         'rest_framework.permissions.IsAuthenticated',
     ],
+    'DEFAULT_RENDERER_CLASSES': [
+        'rest_framework.renderers.JSONRenderer',
+        *(['rest_framework.renderers.BrowsableAPIRenderer'] if DEBUG else []),
+    ],
+    'DEFAULT_THROTTLE_CLASSES': [
+        'rest_framework.throttling.AnonRateThrottle',
+        'rest_framework.throttling.UserRateThrottle',
+    ],
+    'DEFAULT_THROTTLE_RATES': {
+        'anon': os.getenv('DJANGO_THROTTLE_ANON', '120/minute'),
+        'user': os.getenv('DJANGO_THROTTLE_USER', '2000/minute'),
+    },
     # Hợp đồng API chuẩn ISO 8601 / RFC 3339, lưu trữ UTC (TIME_ZONE='UTC', USE_TZ=True).
     'DATETIME_FORMAT': 'iso-8601',
     'DATETIME_INPUT_FORMATS': ['iso-8601'],
@@ -197,14 +232,11 @@ CVAT_ACCESS_TOKEN = os.getenv('CVAT_ACCESS_TOKEN', '')
 CVAT_HOST_HEADER = os.getenv('CVAT_HOST_HEADER', '')
 CVAT_USERNAME = os.getenv('CVAT_USERNAME', '')
 CVAT_PASSWORD = os.getenv('CVAT_PASSWORD', '')
-CVAT_REQUIRE_HTTPS = os.getenv('CVAT_REQUIRE_HTTPS', 'False').lower() == 'true'
+CVAT_REQUIRE_HTTPS = _env_bool('CVAT_REQUIRE_HTTPS', False)
 
 
 # CORS: cho phép frontend Vite (khác cổng) gọi API.
-CORS_ALLOWED_ORIGINS = [
-    origin.strip()
-    for origin in os.getenv(
-        'CORS_ALLOWED_ORIGINS', 'http://localhost:5173,http://127.0.0.1:5173'
-    ).split(',')
-    if origin.strip()
-]
+CORS_ALLOWED_ORIGINS = _env_list(
+    'CORS_ALLOWED_ORIGINS',
+    'http://localhost:5173,http://127.0.0.1:5173' if DEBUG else '',
+)

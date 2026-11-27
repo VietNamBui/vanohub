@@ -404,6 +404,17 @@ def _project_member(project, user_id):
     return user
 
 
+def _ensure_credential_target_manageable(actor, project, target):
+    if actor.is_superuser:
+        return
+    if target.is_superuser or target.is_staff:
+        raise ValidationError("Không thao tác mật khẩu của tài khoản quản trị hệ thống.")
+    if target.role_assignments.filter(role=Role.PROJECT_MANAGER).exists():
+        raise ValidationError("Không thao tác mật khẩu của Project Manager.")
+    if target.role_assignments.exclude(project=project).exists():
+        raise ValidationError("Thành viên thuộc nhiều organization — liên hệ quản trị viên hệ thống.")
+
+
 class MemberCredentialView(ProjectScopedViewMixin, APIView):
     """GET /api/projects/{id}/members/{user_id}/credential/ — PM xem tài khoản + mật khẩu tạm của thành viên."""
 
@@ -411,12 +422,15 @@ class MemberCredentialView(ProjectScopedViewMixin, APIView):
 
     def get(self, request, project_id, user_id):
         user = _project_member(self.project, user_id)
+        _ensure_credential_target_manageable(request.user, self.project, user)
         encrypted = user.initial_password_encrypted
         password = credentials.decrypt(encrypted) if encrypted else None
         state = "initial" if password else ("unreadable" if encrypted else "changed")
         if password:
             ActivityLog.record(project=self.project, actor=request.user, action="member.view_password", target=user)
-        return Response({"username": user.username, "password": password, "status": state})
+        response = Response({"username": user.username, "password": password, "status": state})
+        response["Cache-Control"] = "no-store"
+        return response
 
 
 class MemberResetPasswordView(ProjectScopedViewMixin, APIView):
@@ -428,12 +442,13 @@ class MemberResetPasswordView(ProjectScopedViewMixin, APIView):
         user = _project_member(self.project, user_id)
         if user.pk == request.user.pk:
             raise ValidationError("Tự đổi mật khẩu của mình ở menu tài khoản.")
-        if user.role_assignments.filter(role=Role.PROJECT_MANAGER).exists():
-            raise ValidationError("Không cấp lại mật khẩu cho Project Manager.")
+        _ensure_credential_target_manageable(request.user, self.project, user)
         password = credentials.set_initial_password(user)
         user.save(update_fields=["password", "initial_password_encrypted"])
         ActivityLog.record(project=self.project, actor=request.user, action="member.reset_password", target=user)
-        return Response({"username": user.username, "password": password, "status": "initial"})
+        response = Response({"username": user.username, "password": password, "status": "initial"})
+        response["Cache-Control"] = "no-store"
+        return response
 
 
 class PermissionMatrixView(ProjectScopedViewMixin, APIView):

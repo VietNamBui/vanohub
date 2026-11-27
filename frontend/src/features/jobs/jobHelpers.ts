@@ -4,7 +4,7 @@ import type { Role } from '../../shared/types/roles'
 import { formatDateTime } from '../../shared/utils/format'
 import type { Member } from '../projects/types'
 import { JOB_STATUS_LABELS } from './constants'
-import type { Job, JobDetail, JobFilters, JobStatus, QueueStage, Stage } from './types'
+import type { Job, JobDetail, JobErrorBrief, JobFilters, JobStatus, QueueStage, Stage } from './types'
 
 const VALID_STAGES = new Set<Stage>(['annotation', 'qc1', 'qc2', 'done'])
 const VALID_QUEUE_STAGES = new Set<QueueStage['stage']>(['annotation', 'qc1', 'qc2'])
@@ -77,7 +77,7 @@ export function nextJobSortOrdering(
   return descriptor.direction === 'descending' ? `-${col}` : col
 }
 
-/** Lý do không sửa được người phụ trách (khớp ensure_editable ở backend), null = sửa được. */
+/** Lý do không sửa được người phụ trách (khớp ensure_editable + ASSIGN_LOCKED_STATUSES ở backend), null = sửa được. */
 export function getJobLockReason(
   canManage: boolean,
   job: Pick<Job, 'is_locked' | 'status'>,
@@ -85,7 +85,27 @@ export function getJobLockReason(
   if (!canManage) return 'Bạn không có quyền giao job'
   if (job.is_locked) return 'Job đang bị khoá'
   if (job.status === 'delivered') return 'Job đã bàn giao'
+  if (job.status === 'qc1_passed' || job.status === 'pending_qc2' || job.status === 'approved') {
+    return 'Không đổi người phụ trách sau khi job đã qua QC1'
+  }
   return null
+}
+
+/** Vòng lỗi rework đang cần annotator xử lý (dùng total_rework_rounds để không lệch sau resolve-escalation). */
+export function activeErrorRound(job: { rework_round: number; total_rework_rounds?: number }): number | null {
+  const maxRound = Math.max(job.total_rework_rounds ?? 0, job.rework_round)
+  return maxRound > 0 ? maxRound - 1 : null
+}
+
+/** Tách lỗi của job thành lỗi đang cần sửa ở vòng hiện tại và lịch sử các vòng trước / đã huỷ. */
+export function splitActiveErrors(
+  job: { rework_round: number; total_rework_rounds?: number },
+  errors: JobErrorBrief[],
+): { active: JobErrorBrief[]; history: JobErrorBrief[] } {
+  const round = activeErrorRound(job)
+  const active = errors.filter((e) => !e.is_voided && (round === null || e.rework_round === round))
+  const history = errors.filter((e) => e.is_voided || (round !== null && e.rework_round !== round))
+  return { active, history }
 }
 
 /** Đọc bộ lọc task và stage từ URLSearchParams của trang Data Queue. */
