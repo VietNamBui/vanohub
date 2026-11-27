@@ -2,12 +2,9 @@ import { useState } from 'react'
 import { TextArea } from '@/components/base/textarea/textarea'
 import FormDialog from '../../../shared/components/ui/FormDialog'
 import MemberSelect from '../../projects/components/MemberSelect'
+import { buildAssignPayload, type AssignValues } from '../jobHelpers'
 
-export interface AssignValues {
-  annotator?: number | null
-  qc1_reviewer?: number | null
-  note?: string
-}
+export type { AssignValues }
 
 interface Props {
   open: boolean
@@ -41,13 +38,17 @@ function AssignForm({ open, projectId, title, initial, confirmLoading, onCancel,
   const [note, setNote] = useState(initial?.note ?? '')
 
   function handleSubmit() {
-    if (!touchedAnnotator && !touchedQc1) {
+    const payload = buildAssignPayload({
+      touchedAnnotator,
+      touchedQc1,
+      annotator,
+      qc1Reviewer,
+      note,
+    })
+    if (!payload) {
       onCancel()
       return
     }
-    const payload: AssignValues = { note }
-    if (touchedAnnotator) payload.annotator = annotator
-    if (touchedQc1) payload.qc1_reviewer = qc1Reviewer
     onSubmit(payload)
   }
 

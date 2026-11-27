@@ -7,22 +7,13 @@ import {
   ListBox as AriaListBox,
   ListBoxItem as AriaListBoxItem,
   Popover as AriaPopover,
-  type Key,
 } from 'react-aria-components'
 import { HintText } from '@/components/base/input/hint-text'
 import { Label } from '@/components/base/input/label'
 import { cx } from '@/utils/cx'
+import { buildSearchableRows, CLEAR_KEY, type SearchableOption } from './searchableSelectUtils'
 
-const CLEAR_KEY = '__clear__'
-
-export interface SearchableOption {
-  id: string | number
-  label: string
-  /** Chuỗi tìm kiếm mở rộng (mặc định tìm theo `label`). */
-  searchText?: string
-  supportingText?: string
-  isDisabled?: boolean
-}
+export type { SearchableOption }
 
 interface SearchableSelectProps<T extends SearchableOption> {
   items: T[]
@@ -158,14 +149,6 @@ export default function SearchableSelect<T extends SearchableOption>({
   )
 }
 
-interface PopoverOption<T extends SearchableOption> {
-  id: Key
-  label: string
-  item?: T
-  isDisabled?: boolean
-  isClear?: boolean
-}
-
 function SearchablePopoverBody<T extends SearchableOption>({
   items,
   selectedKey,
@@ -188,23 +171,7 @@ function SearchablePopoverBody<T extends SearchableOption>({
   onClose: () => void
 }) {
   const [query, setQuery] = useState('')
-  const normalized = query.trim().toLowerCase()
-
-  const filtered = normalized
-    ? items.filter((item) => (item.searchText ?? `${item.label} ${item.supportingText ?? ''}`).toLowerCase().includes(normalized))
-    : items
-
-  const rows: PopoverOption<T>[] = [
-    ...(allowClear && !normalized ? [{ id: CLEAR_KEY, label: clearLabel, isClear: true }] : []),
-    ...filtered.map((item) => ({
-      id: item.id,
-      label: item.label,
-      item,
-      isDisabled: item.isDisabled,
-    })),
-  ]
-
-  const disabledKeys = rows.filter((r) => r.isDisabled).map((r) => r.id)
+  const { rows, disabledKeys } = buildSearchableRows(items, query, allowClear, clearLabel)
 
   return (
     <div className="flex flex-col">

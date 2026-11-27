@@ -28,6 +28,7 @@ import DeadlineModal from '../components/DeadlineModal'
 import JobDetailDrawer from '../components/JobDetailDrawer'
 import JobStatusTag from '../components/JobStatusTag'
 import { JOB_STATUS_LABELS } from '../constants'
+import { getJobLockReason, nextJobSortOrdering, parseJobUrlFilters, serializeJobUrlFilters } from '../jobHelpers'
 import type { Job, JobFilters, Stage } from '../types'
 
 const ALL_KEY = '__all__'
@@ -47,37 +48,12 @@ const PAGE_SIZE_OPTIONS: SelectItemType[] = [
   { id: '100', label: '100 / trang' },
 ]
 
-const VALID_STAGES = new Set<Stage>(['annotation', 'qc1', 'qc2', 'done'])
-
-function parsePositiveInt(raw: string | null): number | undefined {
-  if (!raw) return undefined
-  const num = Number(raw)
-  return Number.isInteger(num) && num > 0 ? num : undefined
-}
-
-function parseUrlFilters(sp: URLSearchParams): Omit<JobFilters, 'page' | 'page_size' | 'ordering'> {
-  const rawStage = sp.get('stage') ?? ''
-  const stage: Stage | '' = VALID_STAGES.has(rawStage as Stage) ? (rawStage as Stage) : ''
-  return {
-    stage,
-    status: sp.get('status') || undefined,
-    dataset: parsePositiveInt(sp.get('dataset')),
-    batch: parsePositiveInt(sp.get('batch')),
-    assignee: parsePositiveInt(sp.get('assignee')),
-    search: sp.get('search') || undefined,
-    escalated: sp.get('escalated') === '1',
-    overdue: sp.get('overdue') === '1',
-    due_soon: sp.get('due_soon') === '1',
-    unassigned: sp.get('unassigned') === '1',
-  }
-}
-
 /** Danh sách job dùng chung trong organization, lọc theo stage / project / task / cờ. */
 export default function JobsPage() {
   const { projectId, can } = useProject()
   const [searchParams, setSearchParams] = useSearchParams()
   const spKey = searchParams.toString()
-  const urlFilters = useMemo(() => parseUrlFilters(searchParams), [searchParams])
+  const urlFilters = useMemo(() => parseJobUrlFilters(searchParams), [searchParams])
   const [pager, setPager] = useState<{ spKey: string; page: number; page_size: number; ordering?: string }>({
     spKey,
     page: 1,
@@ -120,14 +96,7 @@ export default function JobsPage() {
   const canManage = can('manage_jobs')
 
   /** Lý do không sửa được người phụ trách (khớp ensure_editable ở backend), null = sửa được. */
-  const lockReason = (job: Job) =>
-    !canManage
-      ? 'Bạn không có quyền giao job'
-      : job.is_locked
-        ? 'Job đang bị khoá'
-        : job.status === 'delivered'
-          ? 'Job đã bàn giao'
-          : null
+  const lockReason = (job: Job) => getJobLockReason(canManage, job)
 
   /** Giao cho người chưa liên kết CVAT: vẫn giao, nhưng nhắc rằng CVAT sẽ đồng bộ sau. */
   function warnIfUnlinked(userId: number | null) {
@@ -195,18 +164,7 @@ export default function JobsPage() {
   }
 
   const update = (patch: Partial<JobFilters>) => {
-    const next = { ...urlFilters, ...patch }
-    const params = new URLSearchParams()
-    if (next.stage) params.set('stage', next.stage)
-    if (next.status) params.set('status', next.status)
-    if (next.dataset) params.set('dataset', String(next.dataset))
-    if (next.batch) params.set('batch', String(next.batch))
-    if (next.assignee) params.set('assignee', String(next.assignee))
-    if (next.search?.trim()) params.set('search', next.search.trim())
-    if (next.escalated) params.set('escalated', '1')
-    if (next.overdue) params.set('overdue', '1')
-    if (next.due_soon) params.set('due_soon', '1')
-    if (next.unassigned) params.set('unassigned', '1')
+    const params = serializeJobUrlFilters({ ...urlFilters, ...patch })
     setSearchParams(params, { replace: true })
     setPager((p) => ({ ...p, spKey: params.toString(), page: 1 }))
     setSelected([])
@@ -433,14 +391,7 @@ export default function JobsPage() {
               }}
               sortDescriptor={sortDescriptor}
               onSortChange={(descriptor) => {
-                const col = String(descriptor.column)
-                // Chu kỳ 3 trạng thái như AntD: tăng dần → giảm dần → bỏ sắp xếp.
-                const nextOrdering =
-                  filters.ordering === `-${col}`
-                    ? undefined
-                    : descriptor.direction === 'descending'
-                      ? `-${col}`
-                      : col
+                const nextOrdering = nextJobSortOrdering(filters.ordering, descriptor)
                 setPager((p) => ({ ...p, spKey, page: 1, ordering: nextOrdering }))
                 setSelected([])
               }}

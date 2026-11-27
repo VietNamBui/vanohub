@@ -12,13 +12,13 @@ import { listBatches } from '../../projects/api'
 import { useProject } from '../../projects/projectContext'
 import { getJobQueue } from '../api'
 import { JOB_STATUS_LABELS, STAGE_LABELS } from '../constants'
+import { buildQueueJobsUrl, parseQueueUrlParams } from '../jobHelpers'
 import type { JobStatus, QueueStage } from '../types'
 
 type QueueStageFilter = '' | QueueStage['stage']
 
 const ALL_BATCHES = '__all__'
 const ALL_STAGE_TAB = 'all'
-const VALID_QUEUE_STAGES = new Set<QueueStage['stage']>(['annotation', 'qc1', 'qc2'])
 
 const STAGE_TABS: { id: string; label: string }[] = [
   { id: ALL_STAGE_TAB, label: 'Tất cả stage' },
@@ -39,23 +39,13 @@ const STATUS_BADGE_COLORS: Record<JobStatus, BadgeColors> = {
   delivered: 'sky',
 }
 
-function parsePositiveInt(raw: string | null): number | undefined {
-  if (!raw) return undefined
-  const num = Number(raw)
-  return Number.isInteger(num) && num > 0 ? num : undefined
-}
-
 /**
  * Data Queue — xem backlog job theo từng stage (Annotation, QC1, QC2) và chuyển thẳng sang danh sách job tương ứng.
  */
 export default function QueuePage() {
   const { projectId } = useProject()
   const [searchParams, setSearchParams] = useSearchParams()
-  const batch = parsePositiveInt(searchParams.get('batch'))
-  const rawStage = searchParams.get('stage') ?? ''
-  const selectedStage: QueueStageFilter = VALID_QUEUE_STAGES.has(rawStage as QueueStage['stage'])
-    ? (rawStage as QueueStage['stage'])
-    : ''
+  const { batch, stage: selectedStage } = parseQueueUrlParams(searchParams)
 
   const { data, error, isLoading, retry } = useRequest(`queue:${projectId}:${batch ?? ''}`, () =>
     getJobQueue(projectId, batch),
@@ -71,15 +61,7 @@ export default function QueuePage() {
     setSearchParams(params, { replace: true })
   }
 
-  function jobsUrl(extra: Record<string, string | number | undefined>) {
-    const params = new URLSearchParams()
-    if (batch) params.set('batch', String(batch))
-    for (const [k, v] of Object.entries(extra)) {
-      if (v !== undefined && v !== '') params.set(k, String(v))
-    }
-    const qs = params.toString()
-    return qs ? `../jobs?${qs}` : '../jobs'
-  }
+  const jobsUrl = (extra: Record<string, string | number | undefined>) => buildQueueJobsUrl(batch, extra)
 
   const batchItems: SelectItemType[] = [
     { id: ALL_BATCHES, label: 'Tất cả task' },

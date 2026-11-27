@@ -2,9 +2,9 @@ import { AlertTriangle } from '@untitledui/icons'
 import { Tooltip, TooltipTrigger } from '@/components/base/tooltip/tooltip'
 import type { UserBrief } from '../../../shared/api/types'
 import RoleBadges from '../../../shared/components/RoleBadges'
-import SearchableSelect, { type SearchableOption } from '../../../shared/components/ui/SearchableSelect'
-import type { Role } from '../../../shared/types/roles'
+import SearchableSelect from '../../../shared/components/ui/SearchableSelect'
 import type { Member } from '../../projects/types'
+import { buildAssigneeOptions } from '../jobHelpers'
 
 interface Props {
   value: UserBrief | null
@@ -18,12 +18,6 @@ interface Props {
   placeholder?: string
   /** Người không được chọn (vd. luật bốn mắt) — vẫn hiện nhưng mờ. */
   blockedIds?: number[]
-}
-
-interface AssigneeOption extends SearchableOption {
-  username: string
-  roles: Role[]
-  cvatLinked: boolean
 }
 
 export const CVAT_UNLINKED_HINT =
@@ -54,31 +48,7 @@ export default function AssigneeSelect({
     )
   }
 
-  const blockedSet = new Set(blockedIds)
-  const items: AssigneeOption[] = options.map((m) => ({
-    id: m.user.id,
-    label: m.user.full_name,
-    searchText: `${m.user.full_name} ${m.user.username}`,
-    username: m.user.username,
-    roles: m.roles,
-    cvatLinked: m.cvat_linked,
-    isDisabled: blockedSet.has(m.user.id),
-  }))
-
-  // Người đang được giao nhưng không còn trong danh sách (vd. đã mất vai trò) vẫn phải hiện đúng tên.
-  if (value && !items.some((i) => i.id === value.id)) {
-    items.unshift({
-      id: value.id,
-      label: value.full_name,
-      searchText: `${value.full_name} ${value.username}`,
-      username: value.username,
-      roles: [],
-      cvatLinked: true,
-      isDisabled: true,
-    })
-  }
-
-  const selectedUnlinked = value != null && items.find((i) => i.id === value.id)?.cvatLinked === false
+  const { items, selectedUnlinked } = buildAssigneeOptions(options, value, blockedIds)
 
   return (
     <div className="inline-flex items-center gap-1.5" onClick={(event) => event.stopPropagation()}>

@@ -16,8 +16,8 @@ import { formatDateTime } from '../../../shared/utils/format'
 import MemberSelect from '../../projects/components/MemberSelect'
 import { useProject } from '../../projects/projectContext'
 import { assignJob, getJob, resolveEscalation, setJobDeadline, setJobLock } from '../api'
-import { ACTION_LABELS, JOB_STATUS_LABELS } from '../constants'
-import type { JobDetail, JobStatus } from '../types'
+import { ACTION_LABELS } from '../constants'
+import { describeTimelineEvent, timelineDotColor } from '../jobHelpers'
 import AssignModal from './AssignModal'
 import DeadlineModal from './DeadlineModal'
 import JobStatusBadge from './JobStatusBadge'
@@ -27,25 +27,6 @@ interface Props {
   onClose: () => void
   /** Gọi sau mỗi thao tác thay đổi job, để trang cha tải lại danh sách. */
   onChanged?: () => void
-}
-
-function describeEvent(event: JobDetail['timeline'][number]) {
-  const after = event.after ?? {}
-  if (event.action === 'job.status' || event.action.startsWith('qc1.') || event.action.startsWith('qc2.')) {
-    const status = after.status as JobStatus | undefined
-    return status ? `→ ${JOB_STATUS_LABELS[status] ?? status}` : ''
-  }
-  if (event.action === 'job.deadline') {
-    const d = after.deadline as string | null
-    return `→ ${d ? formatDateTime(d) : 'không có deadline'}`
-  }
-  return ''
-}
-
-function timelineDotColor(action: string): string {
-  if (action === 'qc2.reject') return 'bg-fg-error-primary'
-  if (action === 'qc2.pass') return 'bg-fg-success-primary'
-  return 'bg-brand-solid'
 }
 
 /** Chi tiết Job: thông tin, dòng thời gian, lỗi đã ghi, lịch sử deadline, thao tác theo quyền. */
@@ -244,7 +225,7 @@ export default function JobDetailDrawer({ jobId, onClose, onChanged }: Props) {
             ) : (
               <ol className="flex flex-col">
                 {job.timeline.map((e, i) => {
-                  const summary = describeEvent(e)
+                  const summary = describeTimelineEvent(e)
                   return (
                     <li key={e.id} className="relative flex gap-3 pb-4 last:pb-0">
                       {i < job.timeline.length - 1 && (

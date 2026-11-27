@@ -14,43 +14,7 @@ import { formatDateTime } from '../../../shared/utils/format'
 import AnnotatorBreadcrumb from '../../jobs/components/AnnotatorBreadcrumb'
 import { listGuidelines, publishGuideline } from '../api'
 import { useProject } from '../projectContext'
-
-interface ChecklistSection {
-  title: string
-  body: string
-}
-
-function parseGuidelineSections(markdown: string): ChecklistSection[] {
-  const lines = markdown.split('\n')
-  const sections: ChecklistSection[] = []
-  let currentTitle = ''
-  let bodyLines: string[] = []
-
-  const flush = () => {
-    const body = bodyLines.join('\n').trim()
-    if (currentTitle || body) {
-      sections.push({ title: currentTitle || 'Nội dung hướng dẫn', body })
-    }
-    currentTitle = ''
-    bodyLines = []
-  }
-
-  for (const raw of lines) {
-    const line = raw.trim()
-    if (!line) continue
-    if (line.startsWith('## ')) {
-      flush()
-      currentTitle = line.replace(/^##\s+/, '').trim()
-    } else if (line.startsWith('# ')) {
-      flush()
-      currentTitle = line.replace(/^#\s+/, '').trim()
-    } else {
-      bodyLines.push(line.replace(/^[-*]\s+/, '• '))
-    }
-  }
-  flush()
-  return sections
-}
+import { parseGuidelineSections, validateGuidelineDraft } from '../projectHelpers'
 
 /** Guidelines: chế độ Chỉ đọc cho thành viên, danh sách kiểm tra trước khi nộp. PM có thể xuất bản phiên bản mới. */
 export default function GuidelinesPage() {
@@ -73,17 +37,16 @@ export default function GuidelinesPage() {
   const sections = current ? parseGuidelineSections(current.content) : []
 
   async function handlePublish() {
-    const trimmedTitle = title.trim()
-    const trimmedContent = content.trim()
-    if (!trimmedTitle || !trimmedContent) {
-      setTitleError(trimmedTitle ? null : 'Vui lòng nhập tiêu đề.')
-      setContentError(trimmedContent ? null : 'Vui lòng nhập nội dung hướng dẫn.')
+    const validated = validateGuidelineDraft(title, content)
+    if (!validated.valid) {
+      setTitleError(validated.titleError)
+      setContentError(validated.contentError)
       return
     }
     setTitleError(null)
     setContentError(null)
     const ok = await run(
-      () => publishGuideline(projectId, { title: trimmedTitle, content: trimmedContent }),
+      () => publishGuideline(projectId, { title: validated.trimmedTitle, content: validated.trimmedContent }),
       'Đã xuất bản phiên bản hướng dẫn mới',
     )
     if (ok) {
