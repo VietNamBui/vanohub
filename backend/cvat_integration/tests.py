@@ -3,6 +3,7 @@ from typing import Any
 from unittest import mock
 from unittest.mock import MagicMock, patch
 
+from django.conf import settings
 from django.db import connection
 from django.test import TestCase, override_settings
 from django.utils import timezone
@@ -214,6 +215,47 @@ class CvatClientSecurityAndApiTests(TestCase):
         self.assertEqual(ann.get("/api/cvat/tasks/").status_code, 403)
         self.assertEqual(qc1.get("/api/cvat/tasks/").status_code, 403)
         self.assertEqual(qc2.get("/api/cvat/tasks/").status_code, 403)
+
+    def test_client_rejects_invalid_and_unsafe_urls_before_creating_session(self):
+        invalid_urls = [
+            ("ftp://cvat.test", "http(s)://<host>"),
+            ("file:///etc/passwd", "http(s)://<host>"),
+            ("cvat.test", "http(s)://<host>"),
+            ("http://", "http(s)://<host>"),
+            ("http://user:pass@cvat.test", "thông tin đăng nhập"),
+            ("http://cvat.test?x=1", "query string"),
+            ("http://cvat.test#frag", "fragment"),
+            ("http://cvat.test?", "query string"),
+            ("http://cvat.test#", "fragment"),
+            ("http://cvat.test:notaport", "http(s)://<host>"),
+            ("http://[invalid", "http(s)://<host>"),
+        ]
+        with patch("cvat_integration.client.requests.Session") as mock_session:
+            for bad_url, expected_text in invalid_urls:
+                with self.subTest(base_url=bad_url), self.assertRaises(CvatError) as ctx:
+                    CvatClient(base_url=bad_url, token="secret")
+                self.assertIn(expected_text, str(ctx.exception))
+            mock_session.assert_not_called()
+
+    @override_settings(CVAT_REQUIRE_HTTPS=True)
+    def test_client_enforces_https_when_cvat_require_https_is_true(self):
+        with (
+            patch("cvat_integration.client.requests.Session") as mock_session,
+            self.assertRaises(CvatError) as ctx,
+        ):
+            CvatClient(base_url="http://cvat.test", token="secret")
+        self.assertIn("https://", str(ctx.exception))
+        mock_session.assert_not_called()
+
+        client = CvatClient(base_url="https://cvat.test/", token="secret")
+        self.assertEqual(client.base_url, "https://cvat.test")
+
+    def test_client_allows_http_when_cvat_require_https_defaults_to_false(self):
+        self.assertFalse(settings.CVAT_REQUIRE_HTTPS)
+        for url in ("http://localhost:8080", "http://cvat.test"):
+            with self.subTest(base_url=url):
+                client = CvatClient(base_url=url, token="secret")
+                self.assertEqual(client.base_url, url)
 
 
 class CvatSyncValidationTests(TestCase):

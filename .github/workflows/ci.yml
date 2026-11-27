@@ -85,5 +85,8 @@ jobs:
       - name: Lint (ESLint)
         run: npm run lint
 
+      - name: Unit tests (Vitest)
+        run: npm test
+
       - name: Build
         run: npm run build

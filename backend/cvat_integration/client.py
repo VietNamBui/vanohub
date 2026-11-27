@@ -11,6 +11,7 @@ Organization trên CVAT được truyền trực tiếp qua tham số `organizat
 """
 
 from typing import Any
+from urllib.parse import urlparse
 
 import requests
 from django.conf import settings
@@ -37,6 +38,26 @@ def _validate_model[ModelT: BaseModel](model_cls: type[ModelT], payload: Any, la
         raise CvatError(f"Dữ liệu CVAT không hợp lệ ({label}): {exc}") from exc
 
 
+def _validate_base_url(base_url: str) -> None:
+    """Validate CVAT base URL scheme, host, and absence of credentials, query, or fragment."""
+    try:
+        parsed = urlparse(base_url)
+    except ValueError as exc:
+        raise CvatError("CVAT_URL không hợp lệ: cần dạng http(s)://<host>.") from exc
+    if parsed.scheme not in ("http", "https") or not parsed.hostname:
+        raise CvatError("CVAT_URL không hợp lệ: cần dạng http(s)://<host>.")
+    if parsed.username is not None or parsed.password is not None:
+        raise CvatError("CVAT_URL không được chứa thông tin đăng nhập trong URL.")
+    if parsed.query or parsed.fragment or "?" in base_url or "#" in base_url:
+        raise CvatError("CVAT_URL không được chứa query string hoặc fragment.")
+    try:
+        _ = parsed.port
+    except ValueError as exc:
+        raise CvatError("CVAT_URL không hợp lệ: cần dạng http(s)://<host>.") from exc
+    if getattr(settings, "CVAT_REQUIRE_HTTPS", False) and parsed.scheme != "https":
+        raise CvatError("CVAT_URL phải dùng https:// khi CVAT_REQUIRE_HTTPS=True.")
+
+
 class CvatClient:
     def __init__(
         self,
@@ -50,6 +71,7 @@ class CvatClient:
         self.base_url = (base_url or settings.CVAT_URL or "").rstrip("/")
         if not self.base_url:
             raise CvatError("Chưa cấu hình CVAT_URL trong backend/.env.")
+        _validate_base_url(self.base_url)
         self.timeout = timeout
         self.session = requests.Session()
         host_header = getattr(settings, "CVAT_HOST_HEADER", "")

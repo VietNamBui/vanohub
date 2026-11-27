@@ -197,6 +197,7 @@ CVAT_ACCESS_TOKEN = os.getenv('CVAT_ACCESS_TOKEN', '')
 CVAT_HOST_HEADER = os.getenv('CVAT_HOST_HEADER', '')
 CVAT_USERNAME = os.getenv('CVAT_USERNAME', '')
 CVAT_PASSWORD = os.getenv('CVAT_PASSWORD', '')
+CVAT_REQUIRE_HTTPS = os.getenv('CVAT_REQUIRE_HTTPS', 'False').lower() == 'true'
 
 
 # CORS: cho phép frontend Vite (khác cổng) gọi API.
