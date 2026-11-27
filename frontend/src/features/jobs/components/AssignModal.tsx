@@ -1,4 +1,6 @@
-import { Form, Input, Modal } from 'antd'
+import { useState } from 'react'
+import { TextArea } from '@/components/base/textarea/textarea'
+import FormDialog from '../../../shared/components/ui/FormDialog'
 import MemberSelect from '../../projects/components/MemberSelect'
 
 export interface AssignValues {
@@ -21,43 +23,74 @@ interface Props {
  * Giao lại annotator / người QC1. Chỉ field nào được đổi mới gửi lên backend
  * (để giao nhiều job cùng lúc mà không ghi đè field còn lại).
  */
-export default function AssignModal({ open, projectId, title, initial, confirmLoading, onCancel, onSubmit }: Props) {
-  const [form] = Form.useForm<AssignValues>()
+export default function AssignModal(props: Props) {
+  if (!props.open) return null
+  return (
+    <AssignForm
+      key={`${props.projectId}:${props.title ?? ''}:${props.initial?.annotator ?? 'none'}:${props.initial?.qc1_reviewer ?? 'none'}`}
+      {...props}
+    />
+  )
+}
 
-  function handleOk() {
-    const touched = form.isFieldsTouched(['annotator']) || form.isFieldsTouched(['qc1_reviewer'])
-    if (!touched) {
+function AssignForm({ open, projectId, title, initial, confirmLoading, onCancel, onSubmit }: Props) {
+  const [annotator, setAnnotator] = useState<number | null>(initial?.annotator ?? null)
+  const [qc1Reviewer, setQc1Reviewer] = useState<number | null>(initial?.qc1_reviewer ?? null)
+  const [touchedAnnotator, setTouchedAnnotator] = useState(false)
+  const [touchedQc1, setTouchedQc1] = useState(false)
+  const [note, setNote] = useState(initial?.note ?? '')
+
+  function handleSubmit() {
+    if (!touchedAnnotator && !touchedQc1) {
       onCancel()
       return
     }
-    const values = form.getFieldsValue()
-    const payload: AssignValues = { note: values.note ?? '' }
-    if (form.isFieldTouched('annotator')) payload.annotator = values.annotator ?? null
-    if (form.isFieldTouched('qc1_reviewer')) payload.qc1_reviewer = values.qc1_reviewer ?? null
+    const payload: AssignValues = { note }
+    if (touchedAnnotator) payload.annotator = annotator
+    if (touchedQc1) payload.qc1_reviewer = qc1Reviewer
     onSubmit(payload)
   }
 
   return (
-    <Modal
-      open={open}
+    <FormDialog
+      isOpen={open}
+      onClose={onCancel}
       title={title ?? 'Giao lại job'}
-      okText="Lưu"
-      onOk={handleOk}
-      onCancel={onCancel}
-      confirmLoading={confirmLoading}
-      destroyOnHidden
+      submitLabel="Lưu"
+      onSubmit={handleSubmit}
+      pending={confirmLoading}
     >
-      <Form form={form} layout="vertical" initialValues={initial} preserve={false}>
-        <Form.Item name="annotator" label="Annotator" extra="Chỉ hiện người có vai trò Annotator. Số job là số job đang giữ.">
-          <MemberSelect projectId={projectId} role="annotator" />
-        </Form.Item>
-        <Form.Item name="qc1_reviewer" label="Người QC1" extra="Luật bốn mắt: không được trùng annotator.">
-          <MemberSelect projectId={projectId} role="qc1" />
-        </Form.Item>
-        <Form.Item name="note" label="Ghi chú">
-          <Input.TextArea rows={2} placeholder="Lý do giao lại (lưu vào lịch sử)" />
-        </Form.Item>
-      </Form>
-    </Modal>
+      <div className="flex flex-col gap-4">
+        <MemberSelect
+          projectId={projectId}
+          role="annotator"
+          label="Annotator"
+          hint="Chỉ hiện người có vai trò Annotator. Số job là số job đang giữ."
+          value={annotator}
+          onChange={(id) => {
+            setAnnotator(id)
+            setTouchedAnnotator(true)
+          }}
+        />
+        <MemberSelect
+          projectId={projectId}
+          role="qc1"
+          label="Người QC1"
+          hint="Luật bốn mắt: không được trùng annotator."
+          value={qc1Reviewer}
+          onChange={(id) => {
+            setQc1Reviewer(id)
+            setTouchedQc1(true)
+          }}
+        />
+        <TextArea
+          label="Ghi chú"
+          placeholder="Lý do giao lại (lưu vào lịch sử)"
+          rows={2}
+          value={note}
+          onChange={setNote}
+        />
+      </div>
+    </FormDialog>
   )
 }

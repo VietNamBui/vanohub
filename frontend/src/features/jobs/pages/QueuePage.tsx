@@ -1,7 +1,12 @@
-import { Alert, Card, Col, Descriptions, Row, Select, Statistic, Tabs, Tag } from 'antd'
+import { InfoCircle } from '@untitledui/icons'
 import { Link, useSearchParams } from 'react-router'
+import { Tabs } from '@/components/application/tabs/tabs'
+import type { BadgeColors } from '@/components/base/badges/badge-types'
+import { Badge } from '@/components/base/badges/badges'
+import { Select, type SelectItemType } from '@/components/base/select/select'
 import { getErrorMessage } from '../../../shared/api/errors'
 import StateView from '../../../shared/components/StateView'
+import SectionCard from '../../../shared/components/ui/SectionCard'
 import { useRequest } from '../../../shared/hooks/useRequest'
 import { listBatches } from '../../projects/api'
 import { useProject } from '../../projects/projectContext'
@@ -11,14 +16,28 @@ import type { JobStatus, QueueStage } from '../types'
 
 type QueueStageFilter = '' | QueueStage['stage']
 
+const ALL_BATCHES = '__all__'
+const ALL_STAGE_TAB = 'all'
 const VALID_QUEUE_STAGES = new Set<QueueStage['stage']>(['annotation', 'qc1', 'qc2'])
 
-const STAGE_TABS: { key: QueueStageFilter; label: string }[] = [
-  { key: '', label: 'Tất cả stage' },
-  { key: 'annotation', label: STAGE_LABELS.annotation },
-  { key: 'qc1', label: STAGE_LABELS.qc1 },
-  { key: 'qc2', label: STAGE_LABELS.qc2 },
+const STAGE_TABS: { id: string; label: string }[] = [
+  { id: ALL_STAGE_TAB, label: 'Tất cả stage' },
+  { id: 'annotation', label: STAGE_LABELS.annotation },
+  { id: 'qc1', label: STAGE_LABELS.qc1 },
+  { id: 'qc2', label: STAGE_LABELS.qc2 },
 ]
+
+const STATUS_BADGE_COLORS: Record<JobStatus, BadgeColors> = {
+  pending_annotation: 'gray',
+  annotating: 'blue',
+  pending_qc1: 'warning',
+  qc1_reviewing: 'warning',
+  qc1_passed: 'indigo',
+  rework: 'orange',
+  pending_qc2: 'purple',
+  approved: 'success',
+  delivered: 'sky',
+}
 
 function parsePositiveInt(raw: string | null): number | undefined {
   if (!raw) return undefined
@@ -62,6 +81,11 @@ export default function QueuePage() {
     return qs ? `../jobs?${qs}` : '../jobs'
   }
 
+  const batchItems: SelectItemType[] = [
+    { id: ALL_BATCHES, label: 'Tất cả task' },
+    ...(batches ?? []).map((b) => ({ id: String(b.id), label: b.name })),
+  ]
+
   const visibleStages = data
     ? selectedStage
       ? data.stages.filter((s) => s.stage === selectedStage)
@@ -69,78 +93,136 @@ export default function QueuePage() {
     : []
 
   return (
-    <div className="page">
-      <div className="page-header">
+    <div className="mx-auto flex max-w-7xl flex-col gap-5 p-4 md:p-6">
+      <header className="flex flex-wrap items-end justify-between gap-4">
         <div>
-          <h1>Data Queue</h1>
-          <p>Backlog theo từng stage. Bấm số liệu để mở danh sách job tương ứng.</p>
+          <h1 className="text-display-xs font-semibold text-primary">Data Queue</h1>
+          <p className="mt-1 text-sm text-tertiary">Backlog theo từng stage. Bấm số liệu để mở danh sách job tương ứng.</p>
         </div>
         <Select
-          allowClear
+          className="w-56"
+          size="sm"
+          aria-label="Lọc theo task"
           placeholder="Tất cả task"
-          style={{ width: 200 }}
-          value={batch}
-          onChange={(value) => updateQuery({ batch: value })}
-          options={batches?.map((b) => ({ value: b.id, label: b.name }))}
-        />
+          items={batchItems}
+          selectedKey={batch != null ? String(batch) : ALL_BATCHES}
+          onSelectionChange={(key) => {
+            const nextBatch = key === ALL_BATCHES || key == null ? undefined : Number(key)
+            updateQuery({ batch: nextBatch })
+          }}
+        >
+          {(item) => <Select.Item id={item.id} label={item.label} />}
+        </Select>
+      </header>
+
+      <div className="flex items-start gap-3 rounded-xl bg-brand-primary_alt p-4 ring-1 ring-brand ring-inset">
+        <InfoCircle className="mt-0.5 size-5 shrink-0 text-fg-brand-primary" aria-hidden="true" />
+        <p className="text-sm text-secondary">
+          Hiện PM giao việc thủ công ở trang Jobs / Tải công việc; Annotator có thể tự nhận việc từ hàng chờ trong giới hạn WIP.
+        </p>
       </div>
-      <Alert
-        type="info"
-        showIcon
-        style={{ marginBottom: 16 }}
-        title="Hiện PM giao việc thủ công ở trang Jobs / Tải công việc; Annotator có thể tự nhận việc từ hàng chờ trong giới hạn WIP."
-      />
+
       <Tabs
-        activeKey={selectedStage}
-        onChange={(key) => updateQuery({ stage: key as QueueStageFilter })}
-        items={STAGE_TABS}
-      />
+        selectedKey={selectedStage || ALL_STAGE_TAB}
+        onSelectionChange={(key) => updateQuery({ stage: key === ALL_STAGE_TAB ? '' : (key as QueueStageFilter) })}
+      >
+        <Tabs.List type="underline" size="sm" aria-label="Lọc theo stage" className="gap-6">
+          {STAGE_TABS.map((t) => (
+            <Tabs.Item key={t.id} id={t.id} label={t.label} />
+          ))}
+        </Tabs.List>
+      </Tabs>
+
       {isLoading && <StateView kind="loading" />}
       {error != null && (
         <StateView kind="error" description={getErrorMessage(error)} action={{ label: 'Thử lại', onClick: retry }} />
       )}
+
       {data && (
         <>
-          <Row gutter={[16, 16]}>
+          <div className={selectedStage ? 'grid grid-cols-1 gap-4' : 'grid grid-cols-1 gap-4 lg:grid-cols-3'}>
             {visibleStages.map((stage) => (
-              <Col xs={24} lg={selectedStage ? 24 : 8} key={stage.stage}>
-                <Card title={`Hàng đợi ${STAGE_LABELS[stage.stage]}`}>
-                  <Statistic title="Job đang ở stage" value={stage.total} />
-                  <Descriptions column={1} size="small" style={{ marginTop: 16 }}>
-                    {stage.stage !== 'qc2' && (
-                      <Descriptions.Item label={stage.stage === 'annotation' ? 'Chưa có annotator' : 'Chưa có người QC1'}>
-                        {stage.unassigned}
-                      </Descriptions.Item>
-                    )}
-                    {stage.stage === 'annotation' && <Descriptions.Item label="Rework">{stage.rework}</Descriptions.Item>}
-                    <Descriptions.Item label="Escalated">{stage.escalated}</Descriptions.Item>
-                    <Descriptions.Item label="Quá hạn">{stage.overdue}</Descriptions.Item>
-                    <Descriptions.Item label="Đang khoá">{stage.locked}</Descriptions.Item>
-                  </Descriptions>
-                  <div style={{ marginTop: 12 }} className="flex flex-wrap gap-1.5">
-                    {Object.entries(stage.by_status).map(([status, n]) => (
-                      <Link key={status} to={jobsUrl({ stage: stage.stage, status })} relative="path">
-                        <Tag>{JOB_STATUS_LABELS[status as JobStatus] ?? status}: {n}</Tag>
-                      </Link>
-                    ))}
+              <SectionCard key={stage.stage} title={`Hàng đợi ${STAGE_LABELS[stage.stage]}`}>
+                <div>
+                  <div className="text-xs font-medium text-tertiary">Job đang ở stage</div>
+                  <div className="mt-1 text-display-sm font-semibold text-primary tabular-nums">{stage.total}</div>
+                </div>
+
+                <dl className="mt-4 divide-y divide-secondary rounded-xl border border-secondary bg-secondary_subtle text-sm">
+                  {stage.stage !== 'qc2' && (
+                    <div className="flex items-center justify-between px-3.5 py-2.5">
+                      <dt className="text-tertiary">
+                        {stage.stage === 'annotation' ? 'Chưa có annotator' : 'Chưa có người QC1'}
+                      </dt>
+                      <dd className="font-semibold text-primary tabular-nums">{stage.unassigned}</dd>
+                    </div>
+                  )}
+                  {stage.stage === 'annotation' && (
+                    <div className="flex items-center justify-between px-3.5 py-2.5">
+                      <dt className="text-tertiary">Rework</dt>
+                      <dd className="font-semibold text-primary tabular-nums">{stage.rework}</dd>
+                    </div>
+                  )}
+                  <div className="flex items-center justify-between px-3.5 py-2.5">
+                    <dt className="text-tertiary">Escalated</dt>
+                    <dd className="font-semibold text-primary tabular-nums">{stage.escalated}</dd>
                   </div>
-                  <div style={{ marginTop: 12 }}>
-                    <Link to={jobsUrl({ stage: stage.stage })} relative="path">
-                      Xem danh sách job →
+                  <div className="flex items-center justify-between px-3.5 py-2.5">
+                    <dt className="text-tertiary">Quá hạn</dt>
+                    <dd className="font-semibold text-primary tabular-nums">{stage.overdue}</dd>
+                  </div>
+                  <div className="flex items-center justify-between px-3.5 py-2.5">
+                    <dt className="text-tertiary">Đang khoá</dt>
+                    <dd className="font-semibold text-primary tabular-nums">{stage.locked}</dd>
+                  </div>
+                </dl>
+
+                <div className="mt-4 flex flex-wrap gap-1.5">
+                  {Object.entries(stage.by_status).map(([status, n]) => (
+                    <Link
+                      key={status}
+                      to={jobsUrl({ stage: stage.stage, status })}
+                      relative="path"
+                      className="transition hover:opacity-80"
+                    >
+                      <Badge type="pill-color" size="sm" color={STATUS_BADGE_COLORS[status as JobStatus] ?? 'gray'}>
+                        {JOB_STATUS_LABELS[status as JobStatus] ?? status}: {n}
+                      </Badge>
                     </Link>
-                  </div>
-                </Card>
-              </Col>
+                  ))}
+                </div>
+
+                <div className="mt-4 border-t border-secondary pt-3">
+                  <Link
+                    to={jobsUrl({ stage: stage.stage })}
+                    relative="path"
+                    className="text-sm font-semibold text-brand-secondary hover:underline"
+                  >
+                    Xem danh sách job →
+                  </Link>
+                </div>
+              </SectionCard>
             ))}
-          </Row>
-          <Card style={{ marginTop: 16 }}>
+          </div>
+
+          <SectionCard>
             <div className="flex flex-wrap items-center justify-between gap-4">
-              <Statistic title="Job đã hoàn tất (Đã duyệt / Đã bàn giao)" value={data.done} suffix={`/ ${data.total}`} />
-              <Link to={jobsUrl({ stage: 'done' })} relative="path">
+              <div>
+                <div className="text-xs font-medium text-tertiary">Job đã hoàn tất (Đã duyệt / Đã bàn giao)</div>
+                <div className="mt-1 flex items-baseline gap-1.5">
+                  <span className="text-display-sm font-semibold text-primary tabular-nums">{data.done}</span>
+                  <span className="text-sm font-medium text-tertiary tabular-nums">/ {data.total}</span>
+                </div>
+              </div>
+              <Link
+                to={jobsUrl({ stage: 'done' })}
+                relative="path"
+                className="text-sm font-semibold text-brand-secondary hover:underline"
+              >
                 Xem job hoàn tất →
               </Link>
             </div>
-          </Card>
+          </SectionCard>
         </>
       )}
     </div>

@@ -13,15 +13,16 @@ interface FormDialogProps {
   pending?: boolean
   /** Nút xác nhận màu đỏ (xoá, bỏ khỏi team...). */
   destructive?: boolean
+  maxWidthClass?: string
 }
 
 /** Hộp thoại có form + 2 nút Huỷ / Lưu, dựng trên Modal của Untitled UI. */
 export default function FormDialog({
-  isOpen, onClose, title, description, children, submitLabel = 'Lưu', onSubmit, pending, destructive,
+  isOpen, onClose, title, description, children, submitLabel = 'Lưu', onSubmit, pending, destructive, maxWidthClass = 'max-w-md',
 }: FormDialogProps) {
   return (
     <ModalOverlay isOpen={isOpen} onOpenChange={(open) => !open && onClose()} isDismissable>
-      <Modal className="max-w-md">
+      <Modal className={maxWidthClass}>
         <Dialog aria-label={title}>
           <form
             className="flex w-full flex-col gap-5 p-6"

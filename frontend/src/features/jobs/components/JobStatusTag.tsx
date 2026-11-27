@@ -1,6 +1,8 @@
-import { ExclamationCircleOutlined, LockOutlined, WarningOutlined } from '@ant-design/icons'
-import { Space, Tag, Tooltip } from 'antd'
-import { JOB_STATUS_COLORS, JOB_STATUS_LABELS } from '../constants'
+import { AlertCircle, AlertTriangle, Lock01 } from '@untitledui/icons'
+import type { BadgeColors } from '@/components/base/badges/badge-types'
+import { Badge } from '@/components/base/badges/badges'
+import { Tooltip, TooltipTrigger } from '@/components/base/tooltip/tooltip'
+import { JOB_STATUS_LABELS } from '../constants'
 import type { JobStatus } from '../types'
 
 interface Props {
@@ -11,28 +13,55 @@ interface Props {
   sourceMissing?: boolean
 }
 
+const COLORS: Record<JobStatus, BadgeColors> = {
+  pending_annotation: 'gray',
+  annotating: 'blue',
+  pending_qc1: 'warning',
+  qc1_reviewing: 'warning',
+  qc1_passed: 'indigo',
+  rework: 'orange',
+  pending_qc2: 'purple',
+  approved: 'success',
+  delivered: 'sky',
+}
+
 export default function JobStatusTag({ status, escalated, locked, overdue, sourceMissing }: Props) {
   return (
-    <Space size={4} wrap>
-      <Tag color={JOB_STATUS_COLORS[status]}>{JOB_STATUS_LABELS[status]}</Tag>
+    <span className="inline-flex flex-wrap items-center gap-1">
+      <Badge type="pill-color" size="sm" color={COLORS[status]}>
+        {JOB_STATUS_LABELS[status]}
+      </Badge>
       {escalated && (
-        <Tag color="error" icon={<ExclamationCircleOutlined />}>
+        <Badge type="pill-color" size="sm" color="error">
+          <AlertCircle className="mr-1 size-3" aria-hidden="true" />
           Escalated
-        </Tag>
+        </Badge>
       )}
-      {overdue && <Tag color="warning">Quá hạn</Tag>}
+      {overdue && (
+        <Badge type="pill-color" size="sm" color="warning">
+          Quá hạn
+        </Badge>
+      )}
       {sourceMissing && (
         <Tooltip title="Không còn tìm thấy job nguồn trên CVAT ở lần đồng bộ gần nhất">
-          <Tag color="warning" icon={<WarningOutlined />}>
-            Thiếu nguồn CVAT
-          </Tag>
+          <TooltipTrigger className="cursor-default">
+            <Badge type="pill-color" size="sm" color="warning">
+              <AlertTriangle className="mr-1 size-3" aria-hidden="true" />
+              Thiếu nguồn CVAT
+            </Badge>
+          </TooltipTrigger>
         </Tooltip>
       )}
       {locked && (
         <Tooltip title="Job đang bị khoá">
-          <Tag icon={<LockOutlined />}>Khoá</Tag>
+          <TooltipTrigger className="cursor-default">
+            <Badge type="pill-color" size="sm" color="gray">
+              <Lock01 className="mr-1 size-3" aria-hidden="true" />
+              Khoá
+            </Badge>
+          </TooltipTrigger>
         </Tooltip>
       )}
-    </Space>
+    </span>
   )
 }

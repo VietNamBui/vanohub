@@ -1,9 +1,14 @@
-import { ExportOutlined } from '@ant-design/icons'
-import { Alert, Button, Descriptions, Drawer, Empty, Form, Input, Modal, Space, Table, Tag, Timeline, Typography } from 'antd'
+import { AlertCircle, AlertTriangle, LinkExternal01 } from '@untitledui/icons'
 import { useState } from 'react'
+import { Table } from '@/components/application/table/table'
 import { Badge } from '@/components/base/badges/badges'
+import { Button } from '@/components/base/buttons/button'
+import { TextArea } from '@/components/base/textarea/textarea'
 import { getErrorMessage } from '../../../shared/api/errors'
 import StateView from '../../../shared/components/StateView'
+import EmptyRow from '../../../shared/components/ui/EmptyRow'
+import FormDialog from '../../../shared/components/ui/FormDialog'
+import Slideover from '../../../shared/components/ui/Slideover'
 import UserName from '../../../shared/components/UserName'
 import { useAction } from '../../../shared/hooks/useAction'
 import { useRequest } from '../../../shared/hooks/useRequest'
@@ -12,7 +17,7 @@ import MemberSelect from '../../projects/components/MemberSelect'
 import { useProject } from '../../projects/projectContext'
 import { assignJob, getJob, resolveEscalation, setJobDeadline, setJobLock } from '../api'
 import { ACTION_LABELS, JOB_STATUS_LABELS } from '../constants'
-import type { JobDetail, JobErrorBrief, JobStatus } from '../types'
+import type { JobDetail, JobStatus } from '../types'
 import AssignModal from './AssignModal'
 import DeadlineModal from './DeadlineModal'
 import JobStatusBadge from './JobStatusBadge'
@@ -37,6 +42,12 @@ function describeEvent(event: JobDetail['timeline'][number]) {
   return ''
 }
 
+function timelineDotColor(action: string): string {
+  if (action === 'qc2.reject') return 'bg-fg-error-primary'
+  if (action === 'qc2.pass') return 'bg-fg-success-primary'
+  return 'bg-brand-solid'
+}
+
 /** Chi tiết Job: thông tin, dòng thời gian, lỗi đã ghi, lịch sử deadline, thao tác theo quyền. */
 export default function JobDetailDrawer({ jobId, onClose, onChanged }: Props) {
   const { projectId, project, can } = useProject()
@@ -46,9 +57,12 @@ export default function JobDetailDrawer({ jobId, onClose, onChanged }: Props) {
   )
   const { run, pending } = useAction()
   const [modal, setModal] = useState<'assign' | 'deadline' | 'escalation' | null>(null)
-  const [escalationForm] = Form.useForm<{ annotator?: number; note: string }>()
 
   const canManage = can('manage_jobs')
+  const handleClose = () => {
+    setModal(null)
+    onClose()
+  }
   const refresh = () => {
     setVersion((v) => v + 1)
     onChanged?.()
@@ -64,10 +78,9 @@ export default function JobDetailDrawer({ jobId, onClose, onChanged }: Props) {
   const escalationPolicy = job?.escalation_policy ?? project.escalation_policy ?? 'block'
 
   return (
-    <Drawer
-      open={jobId !== null}
-      onClose={onClose}
-      size={680}
+    <Slideover
+      isOpen={jobId !== null}
+      onClose={handleClose}
       title={job ? job.name : 'Chi tiết Job'}
       extra={
         job && (
@@ -81,206 +94,289 @@ export default function JobDetailDrawer({ jobId, onClose, onChanged }: Props) {
         )
       }
       footer={
-        job && canManage && (
-          <Space wrap style={{ justifyContent: 'flex-end', width: '100%' }}>
+        job && canManage ? (
+          <div className="flex flex-wrap items-center justify-end gap-2">
             {job.is_escalated && (
-              <Button danger onClick={() => setModal('escalation')}>
+              <Button size="sm" color="secondary-destructive" onPress={() => setModal('escalation')}>
                 Xử lý escalation
               </Button>
             )}
-            <Button onClick={() => act(() => setJobLock(projectId, job.id, !job.is_locked), job.is_locked ? 'Đã mở khoá' : 'Đã khoá job')}>
+            <Button
+              size="sm"
+              color="secondary"
+              isLoading={pending}
+              onPress={() => act(() => setJobLock(projectId, job.id, !job.is_locked), job.is_locked ? 'Đã mở khoá' : 'Đã khoá job')}
+            >
               {job.is_locked ? 'Mở khoá' : 'Khoá job'}
             </Button>
-            <Button onClick={() => setModal('assign')} disabled={job.is_locked || job.status === 'delivered'}>
+            <Button
+              size="sm"
+              color="secondary"
+              isDisabled={job.is_locked || job.status === 'delivered'}
+              onPress={() => setModal('assign')}
+            >
               Giao lại
             </Button>
-            <Button type="primary" onClick={() => setModal('deadline')} disabled={job.is_locked || job.status === 'delivered'}>
+            <Button
+              size="sm"
+              color="primary"
+              isDisabled={job.is_locked || job.status === 'delivered'}
+              onPress={() => setModal('deadline')}
+            >
               Đặt deadline
             </Button>
-          </Space>
-        )
+          </div>
+        ) : undefined
       }
     >
       {isLoading && <StateView kind="loading" />}
-      {error != null && <StateView kind="error" description={getErrorMessage(error)} action={{ label: 'Thử lại', onClick: retry }} />}
+      {error != null && (
+        <StateView kind="error" description={getErrorMessage(error)} action={{ label: 'Thử lại', onClick: retry }} />
+      )}
       {job && (
-        <Space orientation="vertical" size="large" style={{ width: '100%' }}>
+        <div className="flex flex-col gap-6">
           {job.source_missing && (
-            <Alert
-              type="warning"
-              showIcon
-              title="Không còn tìm thấy job nguồn trên CVAT ở lần đồng bộ gần nhất. Trạng thái trên VanoHub vẫn được giữ nguyên."
-            />
+            <div className="flex items-start gap-2.5 rounded-xl bg-warning-primary px-4 py-3 text-sm text-warning-primary ring-1 ring-utility-yellow-200 ring-inset">
+              <AlertTriangle className="mt-0.5 size-4 shrink-0 text-fg-warning-primary" aria-hidden="true" />
+              <span>Không còn tìm thấy job nguồn trên CVAT ở lần đồng bộ gần nhất. Trạng thái trên VanoHub vẫn được giữ nguyên.</span>
+            </div>
           )}
+
           {job.is_escalated && (
-            <Alert
-              type={escalationPolicy === 'warn_only' ? 'warning' : 'error'}
-              showIcon
-              title={
-                escalationPolicy === 'warn_only'
-                  ? `Job vượt số vòng rework tối đa (${job.rework_round}/${job.max_rework_rounds}) — chế độ cảnh báo.`
-                  : `Job vượt số vòng rework tối đa (${job.rework_round}/${job.max_rework_rounds}).`
-              }
-            />
-          )}
-          <Descriptions column={2} size="small" bordered>
-            <Descriptions.Item label="Project">{job.dataset_name}</Descriptions.Item>
-            <Descriptions.Item label="Task">{job.batch_name ?? '—'}</Descriptions.Item>
-            <Descriptions.Item label="Annotator"><UserName user={job.annotator} empty="Chưa giao" /></Descriptions.Item>
-            <Descriptions.Item label="Người QC1"><UserName user={job.qc1_reviewer} empty="Chưa giao" /></Descriptions.Item>
-            <Descriptions.Item label="Deadline">{formatDateTime(job.deadline)}</Descriptions.Item>
-            <Descriptions.Item label="Round rework">{job.rework_round} / {job.max_rework_rounds}</Descriptions.Item>
-            <Descriptions.Item label="Số object">{job.object_count}</Descriptions.Item>
-            <Descriptions.Item label="Số frame">{job.frame_count}</Descriptions.Item>
-            <Descriptions.Item label="CVAT" span={2}>
-              {job.cvat_job_id ? (
-                <Space wrap>
-                  <span>Job #{job.cvat_job_id}</span>
-                  {job.cvat_stage && <Tag>{job.cvat_stage} / {job.cvat_state}</Tag>}
-                  {job.source_missing && (
-                    <Badge type="pill-color" size="sm" color="warning">
-                      Thiếu nguồn CVAT
-                    </Badge>
-                  )}
-                  {job.cvat_url && (
-                    <Button size="small" icon={<ExportOutlined />} href={job.cvat_url} target="_blank" rel="noreferrer">
-                      Mở trong CVAT
-                    </Button>
-                  )}
-                </Space>
-              ) : (
-                <Typography.Text type="secondary">Chưa liên kết CVAT</Typography.Text>
-              )}
-            </Descriptions.Item>
-          </Descriptions>
-
-          <div>
-            <Typography.Title level={5}>Dòng thời gian</Typography.Title>
-            {job.timeline.length === 0 ? (
-              <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="Chưa có sự kiện" />
+            escalationPolicy === 'warn_only' ? (
+              <div className="flex items-start gap-2.5 rounded-xl bg-warning-primary px-4 py-3 text-sm text-warning-primary ring-1 ring-utility-yellow-200 ring-inset">
+                <AlertTriangle className="mt-0.5 size-4 shrink-0 text-fg-warning-primary" aria-hidden="true" />
+                <span>
+                  {`Job vượt số vòng rework tối đa (${job.rework_round}/${job.max_rework_rounds}) — chế độ cảnh báo.`}
+                </span>
+              </div>
             ) : (
-              <Timeline
-                items={job.timeline.map((e) => ({
-                  color: e.action === 'qc2.reject' ? 'red' : e.action === 'qc2.pass' ? 'green' : 'blue',
-                  content: (
-                    <div>
-                      <strong>{ACTION_LABELS[e.action] ?? e.action}</strong> {describeEvent(e)}
-                      <div className="text-xs text-tertiary">
-                        {formatDateTime(e.created_at)} · {e.actor?.full_name ?? 'Hệ thống'}
-                        {e.note ? ` · ${e.note}` : ''}
-                      </div>
-                    </div>
-                  ),
-                }))}
-              />
-            )}
-          </div>
+              <div className="flex items-start gap-2.5 rounded-xl bg-error-primary px-4 py-3 text-sm text-error-primary ring-1 ring-utility-red-200 ring-inset">
+                <AlertCircle className="mt-0.5 size-4 shrink-0 text-fg-error-primary" aria-hidden="true" />
+                <span>
+                  {`Job vượt số vòng rework tối đa (${job.rework_round}/${job.max_rework_rounds}).`}
+                </span>
+              </div>
+            )
+          )}
 
-          <div>
-            <Typography.Title level={5}>Lỗi đã ghi</Typography.Title>
-            <Table<JobErrorBrief>
-              size="small"
-              rowKey="id"
-              pagination={false}
-              dataSource={job.errors}
-              rowClassName={(err) => (err.is_voided ? 'opacity-60' : '')}
-              locale={{ emptyText: 'Chưa có lỗi' }}
-              columns={[
-                { title: 'Stage', dataIndex: 'stage', render: (s: string) => <Tag>{s.toUpperCase()}</Tag> },
-                { title: 'Round', dataIndex: 'rework_round' },
-                {
-                  title: 'Loại lỗi',
-                  render: (_, err) => (
-                    <div className="flex flex-col gap-1">
-                      <span className={err.is_voided ? 'text-tertiary line-through' : 'font-medium text-primary'}>
-                        {err.category}
-                      </span>
-                      <div className="flex flex-wrap gap-1">
-                        {err.verdict === 'edge' && (
-                          <Badge type="pill-color" size="sm" color="warning">
-                            Cận biên
-                          </Badge>
-                        )}
-                        {err.verdict === 'fail' && (
-                          <Badge type="pill-color" size="sm" color="error">
-                            Lỗi
-                          </Badge>
-                        )}
-                        {err.is_voided && (
-                          <Badge type="pill-color" size="sm" color="gray">
-                            Đã huỷ lỗi
-                          </Badge>
-                        )}
+          <dl className="grid grid-cols-1 gap-4 rounded-xl border border-secondary bg-secondary_subtle p-4 sm:grid-cols-2">
+            <div>
+              <dt className="text-xs font-medium text-tertiary">Project</dt>
+              <dd className="mt-0.5 text-sm font-medium text-primary">{job.dataset_name}</dd>
+            </div>
+            <div>
+              <dt className="text-xs font-medium text-tertiary">Task</dt>
+              <dd className="mt-0.5 text-sm font-medium text-primary">{job.batch_name ?? '—'}</dd>
+            </div>
+            <div>
+              <dt className="text-xs font-medium text-tertiary">Annotator</dt>
+              <dd className="mt-0.5 text-sm text-primary">
+                <UserName user={job.annotator} empty="Chưa giao" />
+              </dd>
+            </div>
+            <div>
+              <dt className="text-xs font-medium text-tertiary">Người QC1</dt>
+              <dd className="mt-0.5 text-sm text-primary">
+                <UserName user={job.qc1_reviewer} empty="Chưa giao" />
+              </dd>
+            </div>
+            <div>
+              <dt className="text-xs font-medium text-tertiary">Deadline</dt>
+              <dd className="mt-0.5 text-sm text-primary tabular-nums">{formatDateTime(job.deadline)}</dd>
+            </div>
+            <div>
+              <dt className="text-xs font-medium text-tertiary">Round rework</dt>
+              <dd className="mt-0.5 text-sm text-primary tabular-nums">
+                {job.rework_round} / {job.max_rework_rounds}
+              </dd>
+            </div>
+            <div>
+              <dt className="text-xs font-medium text-tertiary">Số object</dt>
+              <dd className="mt-0.5 text-sm text-primary tabular-nums">{job.object_count}</dd>
+            </div>
+            <div>
+              <dt className="text-xs font-medium text-tertiary">Số frame</dt>
+              <dd className="mt-0.5 text-sm text-primary tabular-nums">{job.frame_count}</dd>
+            </div>
+            <div className="sm:col-span-2">
+              <dt className="text-xs font-medium text-tertiary">CVAT</dt>
+              <dd className="mt-1">
+                {job.cvat_job_id ? (
+                  <div className="flex flex-wrap items-center gap-2 text-sm text-primary">
+                    <span>Job #{job.cvat_job_id}</span>
+                    {job.cvat_stage && (
+                      <Badge type="color" size="sm" color="gray">
+                        {job.cvat_stage} / {job.cvat_state}
+                      </Badge>
+                    )}
+                    {job.source_missing && (
+                      <Badge type="pill-color" size="sm" color="warning">
+                        Thiếu nguồn CVAT
+                      </Badge>
+                    )}
+                    {job.cvat_url && (
+                      <Button
+                        size="xs"
+                        color="secondary"
+                        iconLeading={LinkExternal01}
+                        href={job.cvat_url}
+                        target="_blank"
+                        rel="noreferrer"
+                      >
+                        Mở trong CVAT
+                      </Button>
+                    )}
+                  </div>
+                ) : (
+                  <span className="text-sm text-tertiary">Chưa liên kết CVAT</span>
+                )}
+              </dd>
+            </div>
+          </dl>
+
+          <section>
+            <h3 className="mb-3 text-sm font-semibold text-primary">Dòng thời gian</h3>
+            {job.timeline.length === 0 ? (
+              <div className="rounded-xl border border-secondary bg-primary">
+                <EmptyRow text="Chưa có sự kiện" />
+              </div>
+            ) : (
+              <ol className="flex flex-col">
+                {job.timeline.map((e, i) => {
+                  const summary = describeEvent(e)
+                  return (
+                    <li key={e.id} className="relative flex gap-3 pb-4 last:pb-0">
+                      {i < job.timeline.length - 1 && (
+                        <span className="absolute top-3.5 bottom-0 left-[5px] w-px bg-border-secondary" aria-hidden="true" />
+                      )}
+                      <span className={`mt-1.5 size-3 shrink-0 rounded-full ${timelineDotColor(e.action)}`} aria-hidden="true" />
+                      <div className="min-w-0 text-sm">
+                        <p className="text-primary">
+                          <span className="font-semibold">{ACTION_LABELS[e.action] ?? e.action}</span>
+                          {summary ? ` ${summary}` : ''}
+                        </p>
+                        <p className="mt-0.5 text-xs text-tertiary">
+                          {formatDateTime(e.created_at)} · {e.actor?.full_name ?? 'Hệ thống'}
+                          {e.note ? ` · ${e.note}` : ''}
+                        </p>
                       </div>
-                    </div>
-                  ),
-                },
-                {
-                  title: 'Vị trí / Cuboid',
-                  render: (_, err) => {
+                    </li>
+                  )
+                })}
+              </ol>
+            )}
+          </section>
+
+          <section>
+            <h3 className="mb-3 text-sm font-semibold text-primary">Lỗi đã ghi</h3>
+            <div className="overflow-hidden rounded-xl bg-primary ring-1 ring-secondary">
+              <Table aria-label="Lỗi đã ghi" size="sm">
+                <Table.Header>
+                  <Table.Head id="stage" label="Stage" isRowHeader />
+                  <Table.Head id="round" label="Round" />
+                  <Table.Head id="category" label="Loại lỗi" />
+                  <Table.Head id="location" label="Vị trí / Cuboid" />
+                  <Table.Head id="description" label="Mô tả" />
+                </Table.Header>
+                <Table.Body items={job.errors} renderEmptyState={() => <EmptyRow text="Chưa có lỗi" />}>
+                  {(err) => {
                     const hasStructured =
                       err.frame_number != null || err.cvat_object_id != null || Boolean(err.is_missing_object)
                     return (
-                      <div className="flex flex-col gap-1">
-                        {hasStructured && (
-                          <div className="flex flex-wrap gap-1">
-                            {err.frame_number != null && (
-                              <Badge type="pill-color" size="sm" color="gray">
-                                Frame #{err.frame_number}
-                              </Badge>
-                            )}
-                            {err.cvat_object_id != null && (
-                              <Badge type="pill-color" size="sm" color="blue">
-                                Object #{err.cvat_object_id}
-                              </Badge>
-                            )}
-                            {err.is_missing_object && (
-                              <Badge type="pill-color" size="sm" color="orange">
-                                Thiếu đối tượng
-                              </Badge>
-                            )}
+                      <Table.Row id={err.id} className={err.is_voided ? 'opacity-60' : undefined}>
+                        <Table.Cell>
+                          <Badge type="color" size="sm" color="gray">
+                            {err.stage.toUpperCase()}
+                          </Badge>
+                        </Table.Cell>
+                        <Table.Cell className="tabular-nums">{err.rework_round}</Table.Cell>
+                        <Table.Cell>
+                          <div className="flex flex-col gap-1">
+                            <span className={err.is_voided ? 'text-tertiary line-through' : 'font-medium text-primary'}>
+                              {err.category}
+                            </span>
+                            <div className="flex flex-wrap gap-1">
+                              {err.verdict === 'edge' && (
+                                <Badge type="pill-color" size="sm" color="warning">
+                                  Cận biên
+                                </Badge>
+                              )}
+                              {err.verdict === 'fail' && (
+                                <Badge type="pill-color" size="sm" color="error">
+                                  Lỗi
+                                </Badge>
+                              )}
+                              {err.is_voided && (
+                                <Badge type="pill-color" size="sm" color="gray">
+                                  Đã huỷ lỗi
+                                </Badge>
+                              )}
+                            </div>
                           </div>
-                        )}
-                        {err.location ? (
-                          <span className={err.is_voided ? 'text-xs text-tertiary line-through' : 'text-xs text-secondary'}>
-                            {err.location}
+                        </Table.Cell>
+                        <Table.Cell>
+                          <div className="flex flex-col gap-1">
+                            {hasStructured && (
+                              <div className="flex flex-wrap gap-1">
+                                {err.frame_number != null && (
+                                  <Badge type="pill-color" size="sm" color="gray">
+                                    Frame #{err.frame_number}
+                                  </Badge>
+                                )}
+                                {err.cvat_object_id != null && (
+                                  <Badge type="pill-color" size="sm" color="blue">
+                                    Object #{err.cvat_object_id}
+                                  </Badge>
+                                )}
+                                {err.is_missing_object && (
+                                  <Badge type="pill-color" size="sm" color="orange">
+                                    Thiếu đối tượng
+                                  </Badge>
+                                )}
+                              </div>
+                            )}
+                            {err.location ? (
+                              <span className={err.is_voided ? 'text-xs text-tertiary line-through' : 'text-xs text-secondary'}>
+                                {err.location}
+                              </span>
+                            ) : !hasStructured ? (
+                              <span className="text-xs text-tertiary">—</span>
+                            ) : null}
+                          </div>
+                        </Table.Cell>
+                        <Table.Cell>
+                          <span className={err.is_voided ? 'text-tertiary line-through' : undefined}>
+                            {err.description || '—'}
                           </span>
-                        ) : !hasStructured ? (
-                          <span className="text-xs text-tertiary">—</span>
-                        ) : null}
-                      </div>
+                        </Table.Cell>
+                      </Table.Row>
                     )
-                  },
-                },
-                {
-                  title: 'Mô tả',
-                  dataIndex: 'description',
-                  render: (desc: string, err) => (
-                    <span className={err.is_voided ? 'text-tertiary line-through' : undefined}>
-                      {desc || '—'}
-                    </span>
-                  ),
-                },
-              ]}
-            />
-          </div>
+                  }}
+                </Table.Body>
+              </Table>
+            </div>
+          </section>
 
-          <div>
-            <Typography.Title level={5}>Lịch sử deadline</Typography.Title>
+          <section>
+            <h3 className="mb-2 text-sm font-semibold text-primary">Lịch sử deadline</h3>
             {deadlineHistory.length === 0 ? (
-              <Typography.Text type="secondary">Chưa đổi deadline.</Typography.Text>
+              <p className="text-sm text-tertiary">Chưa đổi deadline.</p>
             ) : (
-              <ul style={{ paddingLeft: 18, margin: 0 }}>
+              <ul className="list-disc space-y-1 pl-5 text-sm text-primary">
                 {deadlineHistory.map((e) => (
                   <li key={e.id}>
                     {formatDateTime(e.before?.deadline as string | null)} → {formatDateTime(e.after?.deadline as string | null)}
-                    <Typography.Text type="secondary"> · {e.actor?.full_name} · {formatDateTime(e.created_at)}</Typography.Text>
+                    <span className="text-tertiary">
+                      {' '}
+                      · {e.actor?.full_name ?? 'Hệ thống'} · {formatDateTime(e.created_at)}
+                    </span>
                   </li>
                 ))}
               </ul>
             )}
-          </div>
-        </Space>
+          </section>
+        </div>
       )}
 
       {job && (
@@ -300,34 +396,60 @@ export default function JobDetailDrawer({ jobId, onClose, onChanged }: Props) {
             onCancel={() => setModal(null)}
             onSubmit={(deadline, note) => act(() => setJobDeadline(projectId, job.id, deadline, note), 'Đã cập nhật deadline')}
           />
-          <Modal
-            open={modal === 'escalation'}
-            title="Xử lý job Escalated"
-            okText="Xác nhận"
-            confirmLoading={pending}
-            onCancel={() => setModal(null)}
-            onOk={() => escalationForm.submit()}
-            destroyOnHidden
-          >
-            <Typography.Paragraph type="secondary">
-              Gỡ cờ Escalated và đặt lại số vòng rework về 0 (lịch sử lỗi vẫn được giữ). Có thể giao cho annotator khác.
-            </Typography.Paragraph>
-            <Form
-              form={escalationForm}
-              layout="vertical"
-              preserve={false}
-              onFinish={(v) => act(() => resolveEscalation(projectId, job.id, v.annotator, v.note ?? ''), 'Đã xử lý escalation')}
-            >
-              <Form.Item name="annotator" label="Giao cho annotator khác (tuỳ chọn)">
-                <MemberSelect projectId={projectId} role="annotator" />
-              </Form.Item>
-              <Form.Item name="note" label="Ghi chú">
-                <Input.TextArea rows={2} />
-              </Form.Item>
-            </Form>
-          </Modal>
+          {modal === 'escalation' && (
+            <EscalationDialog
+              key={job.id}
+              isOpen
+              projectId={projectId}
+              pending={pending}
+              onClose={() => setModal(null)}
+              onSubmit={(annotator, note) =>
+                act(() => resolveEscalation(projectId, job.id, annotator ?? undefined, note), 'Đã xử lý escalation')
+              }
+            />
+          )}
         </>
       )}
-    </Drawer>
+    </Slideover>
+  )
+}
+
+function EscalationDialog({
+  isOpen,
+  projectId,
+  pending,
+  onClose,
+  onSubmit,
+}: {
+  isOpen: boolean
+  projectId: number
+  pending: boolean
+  onClose: () => void
+  onSubmit: (annotator: number | null, note: string) => void
+}) {
+  const [annotator, setAnnotator] = useState<number | null>(null)
+  const [note, setNote] = useState('')
+
+  return (
+    <FormDialog
+      isOpen={isOpen}
+      onClose={onClose}
+      title="Xử lý job Escalated"
+      description="Gỡ cờ Escalated và đặt lại số vòng rework về 0 (lịch sử lỗi vẫn được giữ). Có thể giao cho annotator khác."
+      submitLabel="Xác nhận"
+      pending={pending}
+      onSubmit={() => onSubmit(annotator, note)}
+    >
+      <div className="flex flex-col gap-4">
+        <MemberSelect
+          projectId={projectId}
+          role="annotator"
+          label="Giao cho annotator khác (tuỳ chọn)"
+          value={annotator}
+          onChange={setAnnotator}
+        />
+        <TextArea label="Ghi chú" rows={2} value={note} onChange={setNote} />
+      </div>
+    </FormDialog>
   )
 }

@@ -5,6 +5,7 @@ import ChangePasswordDialog from '../features/auth/ChangePasswordDialog'
 import { useAuth } from '../features/auth/useAuth'
 import { listProjects } from '../features/projects/api'
 import ProjectSwitcher from '../features/projects/components/ProjectSwitcher'
+import RoleBadges from '../shared/components/RoleBadges'
 import { useRequest } from '../shared/hooks/useRequest'
 import { ROLE_LABELS, type Role } from '../shared/types/roles'
 import NotificationBell from './NotificationBell'
@@ -28,10 +29,13 @@ export default function MainLayout() {
   const projectMatch = useMatch('/projects/:projectId/*')
   const projectId = projectMatch ? Number(projectMatch.params.projectId) : null
   const { data: projects } = useRequest(
-    `header-projects:${user?.id ?? 0}:${user?.role_assignments.length ?? 0}`,
+    `header-projects:${user?.id ?? 0}:${user?.role_assignments.length ?? 0}:${projectId ?? 'all'}`,
     listProjects,
   )
-  const scopedProjects = (projects ?? []).filter((p) => projectId === null || p.id === projectId)
+  const scopedProjects = useMemo(
+    () => (projects ?? []).filter((p) => projectId === null || p.id === projectId),
+    [projects, projectId],
+  )
   const currentProject = (projects ?? []).find((p) => p.id === projectId) ?? null
 
   const [searchOpen, setSearchOpen] = useState(false)
@@ -46,13 +50,16 @@ export default function MainLayout() {
     user?.full_name || [user?.first_name, user?.last_name].filter(Boolean).join(' ') || user?.username || 'Người dùng'
   const initials = getInitials(displayName)
 
+  const scopedRoles = useMemo<Role[]>(
+    () => [...new Set(scopedProjects.flatMap((p) => p.my_roles))],
+    [scopedProjects],
+  )
+
   const primaryRoleLabel = useMemo(() => {
-    const roles: Role[] = scopedProjects.flatMap((p) => p.my_roles)
-    const unique = [...new Set(roles)]
-    if (unique.length === 0) return 'Thành viên'
-    if (unique.length === 1) return ROLE_LABELS[unique[0]]
-    return unique.map((r) => ROLE_LABELS[r]).slice(0, 2).join(' · ')
-  }, [scopedProjects])
+    if (scopedRoles.length === 0) return 'Thành viên'
+    if (scopedRoles.length === 1) return ROLE_LABELS[scopedRoles[0]]
+    return scopedRoles.map((r) => ROLE_LABELS[r]).slice(0, 2).join(' · ')
+  }, [scopedRoles])
 
   const settingsPath = projectId ? `/projects/${projectId}/account/settings` : '/account/settings'
   const cvatLinkPath = projectId ? `/projects/${projectId}/cvat-link` : '/cvat-link'
@@ -156,6 +163,12 @@ export default function MainLayout() {
             </button>
 
             {scopedProjects.length > 0 && <NotificationBell projects={scopedProjects} />}
+
+            {scopedRoles.length > 0 && (
+              <div className="hidden items-center lg:flex">
+                <RoleBadges roles={scopedRoles} short />
+              </div>
+            )}
 
             <div className="relative" ref={menuRef}>
               <button

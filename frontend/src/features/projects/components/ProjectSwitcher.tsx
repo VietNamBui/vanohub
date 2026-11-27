@@ -1,23 +1,32 @@
-import { Select } from 'antd'
 import { useNavigate } from 'react-router'
+import SearchableSelect, { type SearchableOption } from '../../../shared/components/ui/SearchableSelect'
 import { useRequest } from '../../../shared/hooks/useRequest'
 import { listProjects } from '../api'
 
-/** Bộ chọn "Dự án đang chọn" trên thanh trên cùng. */
+/** Bộ chọn "Dự án đang chọn" trên thanh trên cùng (hỗ trợ tìm kiếm theo tên). */
 export default function ProjectSwitcher({ currentProjectId }: { currentProjectId: number }) {
   const navigate = useNavigate()
   const { data: projects, isLoading } = useRequest('projects', listProjects)
 
+  const items: SearchableOption[] = (projects ?? []).map((p) => ({
+    id: p.id,
+    label: p.name,
+  }))
+
   return (
-    <Select
-      style={{ width: 280 }}
-      aria-label="Dự án đang chọn"
-      loading={isLoading}
-      value={projects ? currentProjectId : undefined}
+    <SearchableSelect
+      size="sm"
+      className="w-72"
+      ariaLabel="Dự án đang chọn"
       placeholder="Organization đang chọn"
-      onChange={(id) => navigate(`/projects/${id}`)}
-      options={projects?.map((p) => ({ value: p.id, label: p.name }))}
-      showSearch={{ optionFilterProp: 'label' }}
+      searchPlaceholder="Tìm organization…"
+      allowClear={false}
+      isDisabled={isLoading || items.length === 0}
+      items={items}
+      selectedKey={projects?.some((p) => p.id === currentProjectId) ? currentProjectId : null}
+      onSelectionChange={(key) => {
+        if (key != null) navigate(`/projects/${key}`)
+      }}
     />
   )
 }

@@ -3,7 +3,7 @@ import { useState } from 'react'
 import { Badge } from '@/components/base/badges/badges'
 import { Button } from '@/components/base/buttons/button'
 import { Input } from '@/components/base/input/input'
-import { NativeSelect } from '@/components/base/select/select-native'
+import { Select } from '@/components/base/select/select'
 import { TextArea } from '@/components/base/textarea/textarea'
 import { getErrorMessage } from '../../../shared/api/errors'
 import FormDialog from '../../../shared/components/ui/FormDialog'
@@ -60,6 +60,8 @@ export default function GuidelinesPage() {
   const [editing, setEditing] = useState(false)
   const [title, setTitle] = useState('')
   const [content, setContent] = useState('')
+  const [titleError, setTitleError] = useState<string | null>(null)
+  const [contentError, setContentError] = useState<string | null>(null)
   const { run, pending } = useAction()
   const { data, error, isLoading, retry } = useRequest(`guidelines:${projectId}:${version}`, () =>
     listGuidelines(projectId),
@@ -71,9 +73,17 @@ export default function GuidelinesPage() {
   const sections = current ? parseGuidelineSections(current.content) : []
 
   async function handlePublish() {
-    if (!title.trim() || !content.trim()) return
+    const trimmedTitle = title.trim()
+    const trimmedContent = content.trim()
+    if (!trimmedTitle || !trimmedContent) {
+      setTitleError(trimmedTitle ? null : 'Vui lòng nhập tiêu đề.')
+      setContentError(trimmedContent ? null : 'Vui lòng nhập nội dung hướng dẫn.')
+      return
+    }
+    setTitleError(null)
+    setContentError(null)
     const ok = await run(
-      () => publishGuideline(projectId, { title: title.trim(), content: content.trim() }),
+      () => publishGuideline(projectId, { title: trimmedTitle, content: trimmedContent }),
       'Đã xuất bản phiên bản hướng dẫn mới',
     )
     if (ok) {
@@ -97,18 +107,19 @@ export default function GuidelinesPage() {
 
         <div className="flex flex-wrap items-center gap-3">
           {guidelines.length > 1 && current && (
-            <div className="w-56">
-              <NativeSelect
-                size="sm"
-                aria-label="Chọn phiên bản"
-                value={String(current.id)}
-                onChange={(e) => setSelectedId(Number(e.target.value))}
-                options={guidelines.map((g, idx) => ({
-                  value: String(g.id),
-                  label: `v${g.version}${idx === 0 ? ' (Mới nhất)' : ''} · ${formatDateTime(g.created_at)}`,
-                }))}
-              />
-            </div>
+            <Select
+              size="sm"
+              className="w-64"
+              aria-label="Chọn phiên bản"
+              items={guidelines.map((g, idx) => ({
+                id: String(g.id),
+                label: `v${g.version}${idx === 0 ? ' (Mới nhất)' : ''} · ${formatDateTime(g.created_at)}`,
+              }))}
+              selectedKey={String(current.id)}
+              onSelectionChange={(k) => k != null && setSelectedId(Number(k))}
+            >
+              {(item) => <Select.Item id={item.id} label={item.label} />}
+            </Select>
           )}
 
           {canManage && (
@@ -118,6 +129,8 @@ export default function GuidelinesPage() {
               onPress={() => {
                 setTitle(current?.title ?? '')
                 setContent(current?.content ?? '')
+                setTitleError(null)
+                setContentError(null)
                 setEditing(true)
               }}
             >
@@ -194,16 +207,32 @@ export default function GuidelinesPage() {
         title="Xuất bản phiên bản hướng dẫn mới"
         description="Mỗi lần lưu sẽ tạo phiên bản mới; lịch sử phiên bản cũ luôn được giữ lại."
         submitLabel="Lưu phiên bản"
+        maxWidthClass="max-w-2xl"
         onSubmit={handlePublish}
         pending={pending}
       >
         <div className="flex flex-col gap-4">
-          <Input label="Tiêu đề *" value={title} onChange={setTitle} placeholder="VD: Quy tắc gán nhãn" />
+          <Input
+            label="Tiêu đề *"
+            value={title}
+            onChange={(val) => {
+              setTitle(val)
+              if (titleError) setTitleError(null)
+            }}
+            isInvalid={!!titleError}
+            hint={titleError ?? undefined}
+            placeholder="VD: Quy tắc gán nhãn"
+          />
           <TextArea
             label="Nội dung (Markdown — dùng ## để chia các mục kiểm tra) *"
-            rows={10}
+            rows={12}
             value={content}
-            onChange={setContent}
+            onChange={(val) => {
+              setContent(val)
+              if (contentError) setContentError(null)
+            }}
+            isInvalid={!!contentError}
+            hint={contentError ?? undefined}
             placeholder={'## Phạm vi\nMô tả quy tắc gán nhãn...\n\n## Kiểm tra trước khi nộp\n- Kiểm tra đầy đủ đối tượng.'}
           />
         </div>

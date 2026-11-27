@@ -1,13 +1,13 @@
 import { RefreshCw01 } from '@untitledui/icons'
-import { App } from 'antd'
 import { Button } from '@/components/base/buttons/button'
 import { useAction } from '../../../shared/hooks/useAction'
+import { useToast } from '../../../shared/hooks/toastContext'
 import { syncProjectWithCvat } from '../api'
 
 /** Nút "Đồng bộ CVAT": kéo project / task / job mới của organization từ CVAT về, cập nhật trạng thái job. */
 export default function CvatSyncButton({ projectId, onDone, size = 'md' }: { projectId: number; onDone: () => void; size?: 'sm' | 'md' }) {
   const { run, pending } = useAction()
-  const { message } = App.useApp()
+  const toast = useToast()
 
   async function sync() {
     const r = await run(() => syncProjectWithCvat(projectId))
@@ -19,9 +19,9 @@ export default function CvatSyncButton({ projectId, onDone, size = 'md' }: { pro
       r.jobs_created ? `${r.jobs_created} job mới` : null,
       r.jobs_updated ? `${r.jobs_updated} job cập nhật` : null,
     ].filter(Boolean)
-    message.success(`Đã đồng bộ CVAT: ${parts.join(', ')}.`)
-    if (r.assignee_error) message.warning(`Chưa đẩy được người giữ job sang CVAT: ${r.assignee_error}`, 8)
-    else if (r.waiting_link) message.info(`${r.waiting_link} job đang chờ người giữ liên kết CVAT.`)
+    toast.success(`Đã đồng bộ CVAT: ${parts.join(', ')}.`)
+    if (r.assignee_error) toast.warning(`Chưa đẩy được người giữ job sang CVAT: ${r.assignee_error}`, 8)
+    else if (r.waiting_link) toast.info(`${r.waiting_link} job đang chờ người giữ liên kết CVAT.`)
     onDone()
   }
 
