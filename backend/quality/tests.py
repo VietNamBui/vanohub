@@ -9,7 +9,7 @@ from django.utils import timezone
 from accounts.models import Role, RoleAssignment
 from accounts.testing import ProjectFixture, make_user
 from jobs.models import FirstQc1Result, Job, JobStatus, ReworkScope
-from projects.models import Batch, DataStatus, EscalationPolicy, UserNotification
+from projects.models import ActivityLog, Batch, DataStatus, EscalationPolicy, UserNotification
 from teams.models import Team, TeamMember
 
 from .models import Audit, AuditSample, ErrorCategory, ErrorVerdict, ReviewError, ReviewStage
@@ -737,3 +737,66 @@ class QualityBugFixTests(TestCase):
         self.assertEqual(self.qc1.get(self.f.url("qc1/jobs/?annotator=abc")).status_code, 400)
         search_res = self.qc1.get(self.f.url("qc1/jobs/?search=999999999999999999"))
         self.assertEqual(search_res.status_code, 200)
+
+    def test_audit_sample_assign_enforces_four_eyes_and_blocks_non_pending_or_completed_audit(self) -> None:
+        RoleAssignment.objects.create(user=self.f.ann1, role=Role.QC2, project=self.f.project)
+        RoleAssignment.objects.create(user=self.f.qc1, role=Role.QC2, project=self.f.project)
+        valid_qc2 = make_user("qc2_valid_assign", Role.QC2, project=self.f.project)
+
+        job = self.f.job(
+            status=JobStatus.PENDING_QC2,
+            annotator=self.f.ann1,
+            qc1_reviewer=self.f.qc1,
+            frame_count=10,
+        )
+        sample = ensure_qc2_sample(job)
+        assert sample is not None
+
+        for conflicting_user in (self.f.ann1, self.f.qc1):
+            resp = self.pm.post(
+                self.f.url(f"audit-samples/{sample.id}/assign/"),
+                {"auditor": conflicting_user.id},
+                format="json",
+            )
+            self.assertEqual(resp.status_code, 400)
+            self.assertIn("Luật bốn mắt", str(resp.data))
+
+        non_qc2_resp = self.pm.post(
+            self.f.url(f"audit-samples/{sample.id}/assign/"),
+            {"auditor": self.f.ann2.id},
+            format="json",
+        )
+        self.assertEqual(non_qc2_resp.status_code, 400)
+
+        with patch("quality.views.schedule_assignee_push") as mock_push:
+            ok = self.pm.post(
+                self.f.url(f"audit-samples/{sample.id}/assign/"),
+                {"auditor": valid_qc2.id},
+                format="json",
+            )
+        self.assertEqual(ok.status_code, 200, ok.data)
+        sample.refresh_from_db()
+        self.assertEqual(sample.auditor, valid_qc2)
+        mock_push.assert_called_once_with([job.id])
+        self.assertTrue(ActivityLog.objects.filter(job=job, action="qc2.assign_auditor").exists())
+
+        AuditSample.objects.filter(pk=sample.pk).update(result=AuditSample.Result.PASS)
+        self.assertEqual(
+            self.pm.post(
+                self.f.url(f"audit-samples/{sample.id}/assign/"),
+                {"auditor": self.f.qc2.id},
+                format="json",
+            ).status_code,
+            400,
+        )
+
+        AuditSample.objects.filter(pk=sample.pk).update(result=AuditSample.Result.PENDING)
+        Audit.objects.filter(pk=sample.audit_id).update(status=Audit.Status.COMPLETED)
+        self.assertEqual(
+            self.pm.post(
+                self.f.url(f"audit-samples/{sample.id}/assign/"),
+                {"auditor": self.f.qc2.id},
+                format="json",
+            ).status_code,
+            400,
+        )

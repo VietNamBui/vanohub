@@ -19,7 +19,9 @@ from .models import (
     ActivityLog,
     Announcement,
     AnnouncementRead,
+    Batch,
     Dataset,
+    DataStatus,
     Project,
     SamplingMethod,
     UserNotification,
@@ -511,6 +513,56 @@ class ProjectCreateAndBatchConfirmQc2Tests(TestCase):
             ).exists()
         )
         mock_push.assert_called_once_with(sorted([j1.id, j2.id]))
+
+    def test_confirm_qc2_rejects_empty_locked_batch_dataset_repeat_and_enforces_isolation(self):
+        empty_batch = Batch.objects.create(project=self.f.project, dataset=self.f.dataset, name="Empty Batch")
+        self.assertEqual(
+            self.pm_client.post(self.f.url(f"batches/{empty_batch.id}/confirm-qc2/"), {}, format="json").status_code,
+            400,
+        )
+
+        j = self.f.job(status=JobStatus.QC1_PASSED, annotator=self.f.ann1, frame_count=10)
+
+        self.f.batch.status = DataStatus.LOCKED
+        self.f.batch.save(update_fields=["status"])
+        self.assertEqual(
+            self.pm_client.post(self.f.url(f"batches/{self.f.batch.id}/confirm-qc2/"), {}, format="json").status_code,
+            400,
+        )
+        self.f.batch.status = DataStatus.ACTIVE
+        self.f.batch.save(update_fields=["status"])
+
+        self.f.dataset.status = DataStatus.LOCKED
+        self.f.dataset.save(update_fields=["status"])
+        self.assertEqual(
+            self.pm_client.post(self.f.url(f"batches/{self.f.batch.id}/confirm-qc2/"), {}, format="json").status_code,
+            400,
+        )
+        self.f.dataset.status = DataStatus.ACTIVE
+        self.f.dataset.save(update_fields=["status"])
+
+        qc2_client = self.f.client(self.f.qc2)
+        outsider_client = self.f.client(make_user("outsider_qc2_confirm"))
+        self.assertEqual(
+            qc2_client.post(self.f.url(f"batches/{self.f.batch.id}/confirm-qc2/"), {}, format="json").status_code,
+            403,
+        )
+        self.assertEqual(
+            self.ann_client.post(self.f.url(f"batches/{self.f.batch.id}/confirm-qc2/"), {}, format="json").status_code,
+            403,
+        )
+        self.assertEqual(
+            outsider_client.post(self.f.url(f"batches/{self.f.batch.id}/confirm-qc2/"), {}, format="json").status_code,
+            404,
+        )
+
+        with patch("projects.views.schedule_assignee_push"):
+            ok = self.pm_client.post(self.f.url(f"batches/{self.f.batch.id}/confirm-qc2/"), {}, format="json")
+        self.assertEqual(ok.status_code, 200, ok.data)
+
+        repeat = self.pm_client.post(self.f.url(f"batches/{self.f.batch.id}/confirm-qc2/"), {}, format="json")
+        self.assertEqual(repeat.status_code, 400)
+        self.assertEqual(AuditSample.objects.filter(job=j).count(), 1)
 
     def test_batch_deadline_activity_filters_and_notifications_use_rfc3339_utc(self):
         # Batch deadline yêu cầu RFC 3339 kèm múi giờ và trả về UTC 'Z'

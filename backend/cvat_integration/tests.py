@@ -3,6 +3,7 @@ from typing import Any
 from unittest import mock
 from unittest.mock import MagicMock, patch
 
+import requests
 from django.conf import settings
 from django.db import connection
 from django.test import TestCase, override_settings
@@ -248,6 +249,111 @@ class CvatClientSecurityAndApiTests(TestCase):
             with self.subTest(base_url=url):
                 client = CvatClient(base_url=url, token="secret")
                 self.assertEqual(client.base_url, url)
+
+    def test_client_validation_edge_cases_and_auth_modes(self):
+        with (
+            override_settings(CVAT_URL="", CVAT_ACCESS_TOKEN="secret"),
+            patch("cvat_integration.client.requests.Session") as mock_session,
+            self.assertRaises(CvatError),
+        ):
+            CvatClient(base_url=None)
+        mock_session.assert_not_called()
+
+        with override_settings(CVAT_ACCESS_TOKEN="", CVAT_USERNAME="", CVAT_PASSWORD=""):
+            with self.assertRaises(CvatError):
+                CvatClient(base_url="http://cvat.test")
+            with self.assertRaises(CvatError):
+                CvatClient(base_url="http://cvat.test", username="only-user", password="")
+
+        for bad_cred_url in ("http://onlyuser@cvat.test", "http://:onlypass@cvat.test"):
+            with (
+                patch("cvat_integration.client.requests.Session") as mock_session,
+                self.assertRaises(CvatError) as ctx,
+            ):
+                CvatClient(base_url=bad_cred_url, token="secret")
+            self.assertIn("thông tin đăng nhập", str(ctx.exception))
+            mock_session.assert_not_called()
+
+        basic_client = CvatClient(base_url="http://cvat.test///", username="svc", password="pw")
+        self.assertEqual(basic_client.base_url, "http://cvat.test")
+        self.assertEqual(basic_client.session.auth, ("svc", "pw"))
+        self.assertNotIn("Authorization", basic_client.session.headers)
+
+        ipv6_client = CvatClient(base_url="http://[::1]:8080/", token="secret")
+        self.assertEqual(ipv6_client.base_url, "http://[::1]:8080")
+
+        with (
+            override_settings(CVAT_REQUIRE_HTTPS=True),
+            patch("cvat_integration.client.requests.Session") as mock_session,
+            self.assertRaises(CvatError),
+        ):
+            CvatClient(base_url="http://localhost:8080", token="secret")
+        mock_session.assert_not_called()
+
+    def test_client_request_error_mapping_empty_body_multipage_and_writes(self):
+        client = CvatClient(base_url="http://cvat.local", token="secret")
+
+        with (
+            patch.object(client.session, "request", side_effect=requests.ConnectionError("refused")),
+            self.assertRaises(CvatError),
+        ):
+            client._get("server/about")
+
+        for status in (401, 403, 502):
+            err_resp = MagicMock(status_code=status, ok=False, content=b"{}")
+            with patch.object(client.session, "request", return_value=err_resp), self.assertRaises(CvatError):
+                client._get("server/about")
+
+        no_content = MagicMock(status_code=204, ok=True, content=b"")
+        with patch.object(client.session, "request", return_value=no_content):
+            self.assertIsNone(client._request("DELETE", "jobs/1"))
+
+        page1 = MagicMock(status_code=200, ok=True, content=b'{"results": [{"id": 1}], "next": "p2"}')
+        page1.json.return_value = {"results": [{"id": 1}], "next": "p2"}
+        page2 = MagicMock(status_code=200, ok=True, content=b'{"results": [{"id": 2}], "next": null}')
+        page2.json.return_value = {"results": [{"id": 2}], "next": None}
+        with patch.object(client.session, "request", side_effect=[page1, page2]):
+            self.assertEqual(client._get_all("tasks"), [{"id": 1}, {"id": 2}])
+
+        for bad_page_body in ({"results": "invalid", "next": None}, [{"id": 1}]):
+            bad_page = MagicMock(status_code=200, ok=True, content=b"{}")
+            bad_page.json.return_value = bad_page_body
+            with patch.object(client.session, "request", return_value=bad_page), self.assertRaises(CvatError):
+                client._get_all("tasks")
+
+        ok_post = MagicMock(status_code=201, ok=True, content=b'{"key": "inv"}')
+        ok_post.json.return_value = {"key": "inv"}
+        with patch.object(client.session, "request", return_value=ok_post) as mock_req:
+            client.invite_to_org("acme", "a1@example.com")
+            self.assertEqual(mock_req.call_args.args, ("POST", "http://cvat.local/api/invitations"))
+            self.assertEqual(mock_req.call_args.kwargs["params"], {"org": "acme"})
+            self.assertEqual(mock_req.call_args.kwargs["json"], {"role": "worker", "email": "a1@example.com"})
+            self.assertFalse(mock_req.call_args.kwargs["allow_redirects"])
+
+        ok_patch = MagicMock(status_code=200, ok=True, content=b'{"id": 77}')
+        ok_patch.json.return_value = {"id": 77}
+        with patch.object(client.session, "request", return_value=ok_patch) as mock_req:
+            client.set_job_assignee(77, 11)
+            self.assertEqual(mock_req.call_args.args, ("PATCH", "http://cvat.local/api/jobs/77"))
+            self.assertEqual(mock_req.call_args.kwargs["json"], {"assignee": 11})
+
+    def test_count_job_objects_uses_meta_and_falls_back_when_meta_404(self):
+        client = CvatClient(base_url="http://cvat.local", token="secret")
+        ann_with_meta = {"tracks": [{"id": 1, "shapes": [{"frame": 0, "outside": False}]}]}
+        meta_payload = {
+            "size": 4,
+            "start_frame": 0,
+            "stop_frame": None,
+            "frame_filter": "step=2",
+            "deleted_frames": [2],
+            "included_frames": None,
+        }
+        with patch.object(client, "_get", side_effect=[ann_with_meta, meta_payload]):
+            self.assertEqual(client.count_job_objects(87), 3)
+
+        ann_fallback = {"shapes": [{"id": 1, "frame": 5, "outside": False}, {"id": 2, "frame": 9, "outside": False}]}
+        with patch.object(client, "_get", side_effect=[ann_fallback, CvatNotFoundError("404")]):
+            self.assertEqual(client.count_job_objects(88, start_frame=4, stop_frame=6), 1)
 
 
 class CvatSyncValidationTests(TestCase):
@@ -623,6 +729,43 @@ class AutoOrgMembershipTests(TestCase):
         self.assertEqual(client.pushed, [(4, 33)])
         self.assertEqual(len(result["warnings"]), 1)
         self.assertIn("chưa có email", result["warnings"][0])
+
+    def test_pending_invitation_invite_failure_and_unlinked_org_project(self):
+        class PendingMembershipCvat(FakeOrgCvat):
+            def list_memberships(self, org_id):
+                return [{"user": {"id": 11}, "is_active": False}]
+
+        pending_client = PendingMembershipCvat()
+        job_pending = self.f.job(status=JobStatus.ANNOTATING, annotator=self.f.ann1, cvat_job_id=10)
+        res_pending = push_assignees([job_pending], pending_client)
+        self.assertEqual(pending_client.invited, [])
+        self.assertEqual(pending_client.pushed, [(10, 11)])
+        self.assertEqual(len(res_pending["warnings"]), 1)
+        self.assertIn("chưa chấp nhận", res_pending["warnings"][0])
+
+        class FailingInviteCvat(FakeOrgCvat):
+            def invite_to_org(self, org_slug, email, role="worker"):
+                raise CvatError("smtp down")
+
+        fail_client = FailingInviteCvat()
+        job_fail = self.f.job(status=JobStatus.ANNOTATING, annotator=self.f.ann1, cvat_job_id=11)
+        res_fail = push_assignees([job_fail], fail_client)
+        self.assertEqual(fail_client.pushed, [(11, 11)])
+        self.assertEqual(len(res_fail["warnings"]), 1)
+        self.assertIn("Không tự thêm được vào organization", res_fail["warnings"][0])
+
+        self.f.project.cvat_org_id = None
+        self.f.project.cvat_org_slug = ""
+        self.f.project.save(update_fields=["cvat_org_id", "cvat_org_slug"])
+        no_org_client = FakeOrgCvat()
+        with patch.object(no_org_client, "list_memberships") as mock_list:
+            res_no_org = push_assignees(
+                [self.f.job(status=JobStatus.ANNOTATING, annotator=self.f.ann1, cvat_job_id=12)],
+                no_org_client,
+            )
+            mock_list.assert_not_called()
+        self.assertEqual(no_org_client.pushed, [(12, 11)])
+        self.assertEqual(res_no_org["warnings"], [])
 
 
 class _FakeSyncClient:
