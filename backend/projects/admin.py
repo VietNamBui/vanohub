@@ -1,6 +1,5 @@
-from django.contrib import admin
-
 from accounts.models import RoleAssignment
+from django.contrib import admin
 
 from .models import ActivityLog, Announcement, Batch, Dataset, Delivery, Guideline, Project
 

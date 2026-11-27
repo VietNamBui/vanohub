@@ -1,10 +1,9 @@
 """Hàm tạo dữ liệu dùng chung cho test của các app (không dùng ở code chạy thật)."""
 
-from rest_framework.test import APIClient
-
 from jobs.models import Job, JobStatus
 from projects.models import Batch, Dataset, Project
 from quality.models import ErrorCategory
+from rest_framework.test import APIClient
 
 from .models import Role, RoleAssignment, User
 

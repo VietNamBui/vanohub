@@ -1,11 +1,10 @@
 import { AlertCircle, ArrowRight, Eye, EyeOff, Lock01, User01 } from '@untitledui/icons'
-import { isAxiosError } from 'axios'
 import { useState, type FormEvent } from 'react'
 import { Button as AriaButton } from 'react-aria-components'
 import { Navigate, useLocation, useNavigate } from 'react-router'
 import { Button } from '@/components/base/buttons/button'
 import { Input } from '@/components/base/input/input'
-import { getErrorMessage } from '../../shared/api/errors'
+import { getErrorKind, getErrorMessage } from '../../shared/api/errors'
 import { useAuth } from './useAuth'
 
 export default function LoginPage() {
@@ -35,7 +34,7 @@ export default function LoginPage() {
       await login(username.trim(), password)
       navigate(from, { replace: true })
     } catch (err) {
-      setError(isAxiosError(err) && err.response?.status === 401 ? 'Sai tên đăng nhập hoặc mật khẩu.' : getErrorMessage(err))
+      setError(getErrorKind(err) === 'unauthorized' ? 'Sai tên đăng nhập hoặc mật khẩu.' : getErrorMessage(err))
     } finally {
       setSubmitting(false)
     }

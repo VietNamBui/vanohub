@@ -5,10 +5,10 @@
 """
 
 from django.core.management.base import BaseCommand
+from projects.models import Project
 
 from cvat_integration.client import CvatError
 from cvat_integration.sync import sync_organization, sync_organizations
-from projects.models import Project
 
 
 class Command(BaseCommand):
