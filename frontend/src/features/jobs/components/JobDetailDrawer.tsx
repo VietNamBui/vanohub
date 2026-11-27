@@ -14,7 +14,7 @@ import { ACTION_LABELS, JOB_STATUS_LABELS } from '../constants'
 import type { JobDetail, JobStatus } from '../types'
 import AssignModal from './AssignModal'
 import DeadlineModal from './DeadlineModal'
-import JobStatusTag from './JobStatusTag'
+import JobStatusBadge from './JobStatusBadge'
 
 interface Props {
   jobId: number | null
@@ -67,7 +67,7 @@ export default function JobDetailDrawer({ jobId, onClose, onChanged }: Props) {
       onClose={onClose}
       size={640}
       title={job ? job.name : 'Chi tiết Job'}
-      extra={job && <JobStatusTag status={job.status} escalated={job.is_escalated} locked={job.is_locked} overdue={job.is_overdue} />}
+      extra={job && <JobStatusBadge status={job.status} escalated={job.is_escalated} locked={job.is_locked} overdue={job.is_overdue} />}
       footer={
         job && canManage && (
           <Space wrap style={{ justifyContent: 'flex-end', width: '100%' }}>

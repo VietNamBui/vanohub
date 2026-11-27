@@ -1,4 +1,4 @@
-import { ChevronDown, HelpCircle, Key01, Link03, SearchLg, User01 } from '@untitledui/icons'
+import { ChevronDown, Folder, HelpCircle, Key01, Link03, LogOut01, SearchLg, Settings01, User01 } from '@untitledui/icons'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { Link, Outlet, useMatch, useNavigate } from 'react-router'
 import ChangePasswordDialog from '../features/auth/ChangePasswordDialog'
@@ -118,16 +118,11 @@ export default function MainLayout() {
       <div className="flex min-h-screen flex-col bg-secondary">
         <header className="sticky top-0 z-30 flex h-[72px] items-center gap-4 border-b border-secondary bg-primary px-6">
           <Link to="/projects" className="flex shrink-0 items-center gap-2.5">
-            <span
-              className="flex size-8 items-center justify-center rounded-lg shadow-xs"
-              style={{ background: 'linear-gradient(135deg, #9E77ED 0%, #6941C6 100%)' }}
-            >
-              <svg className="size-4 text-white" viewBox="0 0 18 18" fill="none" stroke="currentColor" strokeWidth="2.1">
-                <rect x="2.5" y="2.5" width="13" height="13" rx="2.5" />
-                <path d="M6 9h6M9 6v6" strokeLinecap="round" />
-              </svg>
-            </span>
-            <span className="text-xl font-bold tracking-tight text-primary">VanoHub</span>
+            <svg viewBox="0 0 32 32" className="size-8 rounded-lg bg-brand-solid shadow-xs" aria-hidden>
+              <path d="M16 7.5 24 12v8l-8 4.5L8 20v-8z" fill="none" stroke="white" strokeWidth="1.8" strokeLinejoin="round" />
+              <path d="M8 12l8 4.5 8-4.5M16 16.5v8" fill="none" stroke="white" strokeWidth="1.8" strokeLinejoin="round" opacity=".7" />
+            </svg>
+            <span className="text-lg font-semibold tracking-tight text-primary">VanoHub</span>
           </Link>
 
           {projectId !== null && (
@@ -140,13 +135,13 @@ export default function MainLayout() {
             <button
               type="button"
               onClick={() => setSearchOpen(true)}
-              className="hidden h-10 w-64 cursor-pointer items-center justify-between rounded-lg border border-primary bg-primary px-3.5 text-sm text-tertiary transition hover:border-secondary md:flex lg:w-80"
+              className="hidden h-10 w-64 cursor-pointer items-center justify-between rounded-lg border border-primary bg-primary px-3.5 text-sm text-tertiary shadow-xs transition hover:bg-primary_hover hover:text-secondary md:flex lg:w-80"
             >
               <span className="flex items-center gap-2">
-                <SearchLg className="size-4 text-tertiary" />
+                <SearchLg className="size-4 text-fg-quaternary" />
                 <span>Tìm kiếm nhanh</span>
               </span>
-              <kbd className="rounded border border-secondary bg-primary px-1.5 py-0.5 text-xs font-medium text-tertiary">
+              <kbd className="rounded border border-secondary bg-secondary px-1.5 py-0.5 text-xs font-medium text-tertiary">
                 ⌘K
               </kbd>
             </button>
@@ -155,7 +150,7 @@ export default function MainLayout() {
               type="button"
               onClick={() => setSearchOpen(true)}
               aria-label="Tìm kiếm nhanh"
-              className="flex size-10 cursor-pointer items-center justify-center rounded-lg text-tertiary hover:bg-primary_hover md:hidden"
+              className="flex size-10 cursor-pointer items-center justify-center rounded-lg text-fg-tertiary transition hover:bg-primary_hover hover:text-fg-secondary md:hidden"
             >
               <SearchLg className="size-5" />
             </button>
@@ -202,7 +197,7 @@ export default function MainLayout() {
 
                   <div className="p-1.5">
                     <MenuButton
-                      icon={<User01 className="size-4 text-secondary" />}
+                      icon={<User01 className="size-4 text-fg-secondary" />}
                       label="Hồ sơ cá nhân"
                       onClick={() => {
                         setMenuOpen(false)
@@ -210,7 +205,7 @@ export default function MainLayout() {
                       }}
                     />
                     <MenuButton
-                      icon={<SettingsIcon />}
+                      icon={<Settings01 className="size-4 text-fg-secondary" />}
                       label="Cài đặt tài khoản"
                       onClick={() => {
                         setMenuOpen(false)
@@ -218,7 +213,7 @@ export default function MainLayout() {
                       }}
                     />
                     <MenuButton
-                      icon={<Link03 className="size-4 text-secondary" />}
+                      icon={<Link03 className="size-4 text-fg-secondary" />}
                       label="Liên kết CVAT"
                       onClick={() => {
                         setMenuOpen(false)
@@ -226,7 +221,7 @@ export default function MainLayout() {
                       }}
                     />
                     <MenuButton
-                      icon={<Key01 className="size-4 text-secondary" />}
+                      icon={<Key01 className="size-4 text-fg-secondary" />}
                       label="Đổi mật khẩu"
                       onClick={() => {
                         setMenuOpen(false)
@@ -237,7 +232,7 @@ export default function MainLayout() {
 
                   <div className="border-t border-secondary p-1.5">
                     <MenuButton
-                      icon={<HelpCircle className="size-4 text-secondary" />}
+                      icon={<HelpCircle className="size-4 text-fg-secondary" />}
                       label="Trung tâm hỗ trợ"
                       onClick={() => {
                         setMenuOpen(false)
@@ -245,7 +240,7 @@ export default function MainLayout() {
                       }}
                     />
                     <MenuButton
-                      icon={<SearchLg className="size-4 text-secondary" />}
+                      icon={<SearchLg className="size-4 text-fg-secondary" />}
                       label="Tìm kiếm nhanh"
                       shortcut="⌘K"
                       onClick={() => {
@@ -254,7 +249,7 @@ export default function MainLayout() {
                       }}
                     />
                     <MenuButton
-                      icon={<ProjectsIcon />}
+                      icon={<Folder className="size-4 text-fg-secondary" />}
                       label="Organization của tôi"
                       onClick={() => {
                         setMenuOpen(false)
@@ -265,7 +260,7 @@ export default function MainLayout() {
 
                   <div className="border-t border-secondary p-1.5">
                     <MenuButton
-                      icon={<LogoutIcon />}
+                      icon={<LogOut01 className="size-4 text-fg-secondary" />}
                       label="Đăng xuất"
                       shortcut="⌥⇧Q"
                       onClick={() => {
@@ -325,31 +320,5 @@ function MenuButton({
       </span>
       {shortcut && <span className="text-xs text-tertiary">{shortcut}</span>}
     </button>
-  )
-}
-
-function SettingsIcon() {
-  return (
-    <svg className="size-4 text-secondary" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.6">
-      <circle cx="10" cy="10" r="2.75" />
-      <path d="M10 3.2v1.6M10 15.2v1.6M3.2 10h1.6M15.2 10h1.6M5.2 5.2l1.1 1.1M13.7 13.7l1.1 1.1M14.8 5.2l-1.1 1.1M6.3 13.7l-1.1 1.1" strokeLinecap="round" />
-    </svg>
-  )
-}
-
-function ProjectsIcon() {
-  return (
-    <svg className="size-4 text-secondary" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.6">
-      <path d="M3.5 6.5A1.5 1.5 0 0 1 5 5h3.2l1.5 1.7H15a1.5 1.5 0 0 1 1.5 1.5v6.3A1.5 1.5 0 0 1 15 16H5a1.5 1.5 0 0 1-1.5-1.5v-8Z" />
-    </svg>
-  )
-}
-
-function LogoutIcon() {
-  return (
-    <svg className="size-4 text-secondary" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.6">
-      <path d="M12.5 14.5v1a1.5 1.5 0 0 1-1.5 1.5H5.5A1.5 1.5 0 0 1 4 15.5v-11A1.5 1.5 0 0 1 5.5 3H11a1.5 1.5 0 0 1 1.5 1.5v1" strokeLinecap="round" />
-      <path d="M9 10h7.5m0 0-2.5-2.5M16.5 10 14 12.5" strokeLinecap="round" strokeLinejoin="round" />
-    </svg>
   )
 }

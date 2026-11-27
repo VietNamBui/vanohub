@@ -1,7 +1,10 @@
 import { AlertTriangle, Bell01, Check, CheckCircle, Clock, InfoCircle, XClose } from '@untitledui/icons'
 import { useEffect, useEffectEvent, useState } from 'react'
 import { useNavigate } from 'react-router'
+import { Tabs } from '@/components/application/tabs/tabs'
 import { Badge } from '@/components/base/badges/badges'
+import { Button } from '@/components/base/buttons/button'
+import { FeaturedIcon } from '@/components/foundations/featured-icon/featured-icon'
 import { useAuth } from '../features/auth/useAuth'
 import { listProjectNotifications, markProjectNotificationsRead } from '../features/projects/api'
 import type { NotificationCategory, ProjectSummary, UnifiedNotification } from '../features/projects/types'
@@ -60,48 +63,18 @@ async function fetchNotifications(projects: ProjectSummary[], userId: number): P
 
 function CategoryIcon({ category }: { category: NotificationCategory }) {
   if (category === 'rework') {
-    return (
-      <span className="flex size-10 shrink-0 items-center justify-center rounded-full bg-warning-secondary">
-        <span className="flex size-7 items-center justify-center rounded-full bg-warning-secondary text-fg-warning-primary">
-          <AlertTriangle className="size-4" />
-        </span>
-      </span>
-    )
+    return <FeaturedIcon icon={AlertTriangle} color="warning" theme="light" size="md" />
   }
   if (category === 'deadline') {
-    return (
-      <span className="flex size-10 shrink-0 items-center justify-center rounded-full bg-warning-secondary">
-        <span className="flex size-7 items-center justify-center rounded-full bg-warning-secondary text-fg-warning-primary">
-          <Clock className="size-4" />
-        </span>
-      </span>
-    )
+    return <FeaturedIcon icon={Clock} color="warning" theme="light" size="md" />
   }
   if (category === 'dispute') {
-    return (
-      <span className="flex size-10 shrink-0 items-center justify-center rounded-full bg-brand-secondary">
-        <span className="flex size-7 items-center justify-center rounded-full bg-brand-secondary text-brand-secondary">
-          <InfoCircle className="size-4" />
-        </span>
-      </span>
-    )
+    return <FeaturedIcon icon={InfoCircle} color="brand" theme="light" size="md" />
   }
   if (category === 'qc_pass') {
-    return (
-      <span className="flex size-10 shrink-0 items-center justify-center rounded-full bg-success-secondary">
-        <span className="flex size-7 items-center justify-center rounded-full bg-success-secondary text-fg-success-primary">
-          <CheckCircle className="size-4" />
-        </span>
-      </span>
-    )
+    return <FeaturedIcon icon={CheckCircle} color="success" theme="light" size="md" />
   }
-  return (
-    <span className="flex size-10 shrink-0 items-center justify-center rounded-full bg-brand-secondary">
-      <span className="flex size-7 items-center justify-center rounded-full bg-brand-secondary text-brand-secondary">
-        <Bell01 className="size-4" />
-      </span>
-    </span>
-  )
+  return <FeaturedIcon icon={Bell01} color="brand" theme="light" size="md" />
 }
 
 /**
@@ -213,57 +186,50 @@ export default function NotificationBell({ projects }: { projects: ProjectSummar
 
           <aside className="relative z-10 flex h-full w-full max-w-[440px] flex-col border-l border-secondary bg-primary shadow-2xl">
             <div className="flex items-center justify-between px-6 pt-6 pb-4">
-              <h2 className="text-xl font-bold text-primary">Thông báo</h2>
-              <div className="flex items-center gap-3">
-                <button
-                  type="button"
-                  onClick={() => void markAllRead()}
-                  className="inline-flex cursor-pointer items-center gap-1.5 text-sm font-semibold text-brand-secondary hover:text-brand-secondary_hover"
+              <h2 className="text-xl font-semibold text-primary">Thông báo</h2>
+              <div className="flex items-center gap-2">
+                <Button
+                  color="link-color"
+                  size="sm"
+                  iconLeading={Check}
+                  onPress={() => void markAllRead()}
                 >
-                  <Check className="size-4" />
                   Đánh dấu đã đọc
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setOpen(false)}
+                </Button>
+                <Button
+                  color="tertiary"
+                  size="xs"
+                  iconLeading={XClose}
                   aria-label="Đóng thông báo"
-                  className="flex size-8 cursor-pointer items-center justify-center rounded-lg text-quaternary hover:bg-primary_hover hover:text-tertiary"
-                >
-                  <XClose className="size-5" />
-                </button>
+                  onPress={() => setOpen(false)}
+                />
               </div>
             </div>
 
-            <div className="flex items-center gap-6 border-b border-secondary px-6">
-              <button
-                type="button"
-                onClick={() => setTab('all')}
-                className={cx(
-                  'relative flex cursor-pointer items-center gap-2 pb-3 text-sm font-semibold transition',
-                  tab === 'all' ? 'text-brand-secondary' : 'text-tertiary hover:text-secondary',
-                )}
-              >
-                Tất cả
-                <Badge size="sm" type="pill-color" color={tab === 'all' ? 'brand' : 'gray'}>
-                  {items.length}
-                </Badge>
-                {tab === 'all' && <span className="absolute inset-x-0 bottom-0 h-0.5 bg-brand-solid" />}
-              </button>
-              <button
-                type="button"
-                onClick={() => setTab('unread')}
-                className={cx(
-                  'relative flex cursor-pointer items-center gap-2 pb-3 text-sm font-semibold transition',
-                  tab === 'unread' ? 'text-brand-secondary' : 'text-tertiary hover:text-secondary',
-                )}
-              >
-                Chưa đọc
-                <Badge size="sm" type="pill-color" color={tab === 'unread' ? 'brand' : 'gray'}>
-                  {unreadCount}
-                </Badge>
-                {tab === 'unread' && <span className="absolute inset-x-0 bottom-0 h-0.5 bg-brand-solid" />}
-              </button>
-            </div>
+            <Tabs selectedKey={tab} onSelectionChange={(key) => setTab(key as 'all' | 'unread')}>
+              <Tabs.List type="underline" size="sm" aria-label="Bộ lọc thông báo" className="gap-6 px-6">
+                <Tabs.Item id="all">
+                  {({ isSelected }) => (
+                    <>
+                      Tất cả
+                      <Badge size="sm" type="pill-color" color={isSelected ? 'brand' : 'gray'}>
+                        {items.length}
+                      </Badge>
+                    </>
+                  )}
+                </Tabs.Item>
+                <Tabs.Item id="unread">
+                  {({ isSelected }) => (
+                    <>
+                      Chưa đọc
+                      <Badge size="sm" type="pill-color" color={isSelected ? 'brand' : 'gray'}>
+                        {unreadCount}
+                      </Badge>
+                    </>
+                  )}
+                </Tabs.Item>
+              </Tabs.List>
+            </Tabs>
 
             <div className="flex-1 overflow-y-auto py-2">
               {error != null && items.length === 0 ? (
@@ -272,9 +238,7 @@ export default function NotificationBell({ projects }: { projects: ProjectSummar
                 <p className="px-6 py-12 text-center text-sm text-tertiary">Đang tải…</p>
               ) : visible.length === 0 ? (
                 <div className="flex flex-col items-center gap-2 px-6 py-14 text-center">
-                  <span className="flex size-10 items-center justify-center rounded-full bg-secondary text-tertiary">
-                    <Bell01 className="size-5" />
-                  </span>
+                  <FeaturedIcon icon={Bell01} color="gray" theme="light" size="md" />
                   <p className="text-sm font-semibold text-secondary">
                     {tab === 'unread' ? 'Không có thông báo chưa đọc' : 'Chưa có thông báo nào'}
                   </p>

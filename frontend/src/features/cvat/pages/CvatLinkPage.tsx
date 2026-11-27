@@ -205,7 +205,7 @@ function SyncNotice({ state }: { state: CvatLinkState }) {
       return (
         <div role="alert" className="mt-5 rounded-xl bg-primary p-4 text-sm ring-1 ring-yellow-200 ring-inset">
           <p className="font-semibold text-warning-primary">Đã liên kết, nhưng chưa đồng bộ được job sang CVAT</p>
-          <p className="mt-0.5 text-tertiary">{state.sync.error} — VanoHub sẽ thử lại ở lần đồng bộ batch tiếp theo. Báo PM nếu lỗi kéo dài.</p>
+          <p className="mt-0.5 text-tertiary">{state.sync.error} — VanoHub sẽ thử lại ở lần đồng bộ task tiếp theo. Báo Project Manager nếu lỗi kéo dài.</p>
         </div>
       )
     }

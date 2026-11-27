@@ -1,10 +1,8 @@
-import { InfoCircle, XClose } from '@untitledui/icons'
 import { useState } from 'react'
-import { Dialog, Modal, ModalOverlay } from '@/components/application/modals/modal'
-import { Button } from '@/components/base/buttons/button'
 import { Input } from '@/components/base/input/input'
 import { NativeSelect } from '@/components/base/select/select-native'
 import { TextArea } from '@/components/base/textarea/textarea'
+import FormDialog from '../../../shared/components/ui/FormDialog'
 import { useAction } from '../../../shared/hooks/useAction'
 import { createAnnotatorRequest } from '../api'
 import type { JobErrorBrief } from '../types'
@@ -21,25 +19,14 @@ interface Props {
   onSubmitted?: () => void
 }
 
-/** Modal "Phản hồi lỗi của QC1" (564px) — chọn lỗi theo frame/object và gửi đến Project Manager. */
+/** Hộp thoại phản hồi lỗi của QC1 — chọn lỗi theo frame/object và gửi đến Project Manager. */
 export default function DisputeErrorModal(props: Props) {
-  return (
-    <ModalOverlay isOpen={props.isOpen} onOpenChange={(open) => !open && props.onClose()} isDismissable>
-      <Modal className="max-w-[564px]">
-        <Dialog aria-label="Phản hồi lỗi của QC1">
-          {props.isOpen && (
-            <DisputeErrorForm
-              key={`${props.jobId}:${props.initialErrorId ?? 'first'}`}
-              {...props}
-            />
-          )}
-        </Dialog>
-      </Modal>
-    </ModalOverlay>
-  )
+  if (!props.isOpen) return null
+  return <DisputeErrorForm key={`${props.jobId}:${props.initialErrorId ?? 'first'}`} {...props} />
 }
 
 function DisputeErrorForm({
+  isOpen,
   projectId,
   jobId,
   jobName,
@@ -55,8 +42,7 @@ function DisputeErrorForm({
   const [details, setDetails] = useState('')
   const [validationError, setValidationError] = useState<string | null>(null)
 
-  async function handleSubmit(e: React.FormEvent) {
-    e.preventDefault()
+  async function handleSubmit() {
     const combinedReason = [reasonSummary.trim(), details.trim()].filter(Boolean).join('\n')
     if (combinedReason.length < 3) {
       setValidationError('Vui lòng nhập lý do phản hồi lỗi.')
@@ -94,30 +80,15 @@ function DisputeErrorForm({
   ]
 
   return (
-    <form onSubmit={handleSubmit} className="flex flex-col gap-5 p-6">
-      <div className="flex items-start justify-between">
-        <span className="flex size-12 items-center justify-center rounded-full bg-[#F9F5FF]">
-          <span className="flex size-9 items-center justify-center rounded-full bg-[#E9D7FE] text-[#6941C6]">
-            <InfoCircle className="size-5" />
-          </span>
-        </span>
-        <button
-          type="button"
-          onClick={onClose}
-          aria-label="Đóng"
-          className="flex size-8 cursor-pointer items-center justify-center rounded-lg text-[#98A2B3] hover:bg-[#F9FAFB] hover:text-[#475467]"
-        >
-          <XClose className="size-5" />
-        </button>
-      </div>
-
-      <div>
-        <h2 className="text-lg font-bold text-[#101828]">Phản hồi lỗi của QC1</h2>
-        <p className="mt-1 text-sm text-[#475467]">
-          {jobName} · Gửi đến Project Manager xem xét và phân xử.
-        </p>
-      </div>
-
+    <FormDialog
+      isOpen={isOpen}
+      onClose={onClose}
+      title="Phản hồi lỗi của QC1"
+      description={`${jobName} · Gửi đến Project Manager xem xét và phân xử.`}
+      submitLabel="Gửi phản hồi"
+      onSubmit={handleSubmit}
+      pending={pending}
+    >
       <div className="flex flex-col gap-4">
         <NativeSelect
           label="Lỗi và vị trí *"
@@ -146,15 +117,6 @@ function DisputeErrorForm({
           onChange={setDetails}
         />
       </div>
-
-      <div className="flex items-center justify-end gap-3 pt-1">
-        <Button color="secondary" size="md" onPress={onClose}>
-          Hủy
-        </Button>
-        <Button type="submit" color="primary" size="md" isLoading={pending}>
-          Gửi phản hồi
-        </Button>
-      </div>
-    </form>
+    </FormDialog>
   )
 }

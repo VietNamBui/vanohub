@@ -97,7 +97,7 @@ export default function Qc1WorkPage() {
                 </Tabs.List>
               </Tabs>
               <form className="min-w-48 flex-1" onSubmit={(e) => { e.preventDefault(); reset(() => setQuery(search.trim())) }}>
-                <Input size="sm" icon={SearchLg} aria-label="Tìm kiếm" placeholder="Tìm job, batch, annotator… (Enter)" value={search} onChange={setSearch} />
+                <Input size="sm" icon={SearchLg} aria-label="Tìm kiếm" placeholder="Tìm job, task, annotator… (Enter)" value={search} onChange={setSearch} />
               </form>
             </div>
 

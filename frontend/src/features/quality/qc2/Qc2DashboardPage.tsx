@@ -27,7 +27,7 @@ const KPI_ROWS: { key: keyof Qc2Window; label: string; format?: (v: number | nul
 ]
 
 /**
- * QC2-01 Tổng quan QC2. QC2 chuyên trách xem số liệu của mình; PM (kiêm QC2) chọn được "Toàn dự án".
+ * QC2-01 Tổng quan QC2. QC2 chuyên trách xem số liệu của mình; PM (kiêm QC2) chọn được "Toàn organization".
  * "Lỗi QC1 bỏ sót" = mọi lỗi QC2 ghi nhận (job đã qua QC1). % lỗi trong job, tốc độ audit: chưa chốt công thức.
  */
 export default function Qc2DashboardPage() {
@@ -45,14 +45,14 @@ export default function Qc2DashboardPage() {
         <div>
           <h1 className="text-display-xs font-semibold text-primary">Tổng quan QC2</h1>
           <p className="mt-1 text-sm text-tertiary">
-            {scope === 'mine' ? 'Số liệu audit của bạn' : 'Số liệu audit toàn dự án'} · {project.name}
+            {scope === 'mine' ? 'Số liệu audit của bạn' : 'Số liệu audit toàn organization'} · {project.name}
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-3">
           {isManager && (
             <Tabs selectedKey={scope} onSelectionChange={(k) => setScope(k as typeof scope)} className="w-auto">
               <Tabs.List type="button-border" size="sm" aria-label="Phạm vi">
-                <Tabs.Item id="project" label="Toàn dự án" />
+                <Tabs.Item id="project" label="Toàn organization" />
                 <Tabs.Item id="mine" label="Của tôi" />
               </Tabs.List>
             </Tabs>

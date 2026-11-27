@@ -44,14 +44,14 @@ export const ACTION_LABELS: Record<string, string> = {
   'qc2.pass': 'QC2 Pass',
   'qc2.reject': 'QC2 Reject',
   'qc2.assign_auditor': 'Phân auditor QC2',
-  'dataset.create': 'Tạo dataset',
-  'dataset.lock': 'Khoá dataset',
-  'dataset.unlock': 'Mở khoá dataset',
-  'batch.create': 'Tạo batch',
-  'batch.lock': 'Khoá batch',
-  'batch.unlock': 'Mở khoá batch',
-  'batch.deadline': 'Đổi deadline batch',
-  'batch.deliver': 'Bàn giao batch',
+  'dataset.create': 'Tạo project',
+  'dataset.lock': 'Khoá project',
+  'dataset.unlock': 'Mở khoá project',
+  'batch.create': 'Tạo task',
+  'batch.lock': 'Khoá task',
+  'batch.unlock': 'Mở khoá task',
+  'batch.deadline': 'Đổi deadline task',
+  'batch.deliver': 'Bàn giao task',
   'audit.create': 'Tạo audit',
   'audit.complete': 'Chốt audit',
   'team.create': 'Tạo team',
@@ -68,7 +68,7 @@ export const ACTION_LABELS: Record<string, string> = {
   'annotator.data_issue': 'Báo dữ liệu bị chặn',
 }
 
-/** Định dạng thời gian còn lại / quá hạn theo thiết kế DH02 · DH04 ("Còn 8 giờ", "Quá hạn 3 giờ"). */
+/** Định dạng thời gian còn lại / quá hạn ("Còn 8 giờ", "Quá hạn 3 giờ"). */
 export function formatDeadlineCountdown(hoursRemaining?: number | null): { text: string; tone: 'error' | 'warning' | 'gray' } | null {
   if (hoursRemaining == null) return null
   if (hoursRemaining < 0) {

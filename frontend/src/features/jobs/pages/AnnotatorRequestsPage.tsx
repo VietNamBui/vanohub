@@ -2,12 +2,13 @@ import { ArrowRight } from '@untitledui/icons'
 import { useState } from 'react'
 import { Link } from 'react-router'
 import { Tabs } from '@/components/application/tabs/tabs'
-import { BadgeWithDot } from '@/components/base/badges/badges'
+import { Badge, BadgeWithDot } from '@/components/base/badges/badges'
 import { Button } from '@/components/base/buttons/button'
 import { TextArea } from '@/components/base/textarea/textarea'
 import { getErrorMessage } from '../../../shared/api/errors'
 import FormDialog from '../../../shared/components/ui/FormDialog'
 import PageState from '../../../shared/components/ui/PageState'
+import SectionCard from '../../../shared/components/ui/SectionCard'
 import { useAction } from '../../../shared/hooks/useAction'
 import { useRequest } from '../../../shared/hooks/useRequest'
 import { useProject } from '../../projects/projectContext'
@@ -23,7 +24,7 @@ const STATUS_BADGE_COLOR: Record<AnnotatorRequestStatus, 'warning' | 'success' |
   rejected: 'error',
 }
 
-/** Trang theo dõi phản hồi lỗi & báo dữ liệu bị chặn (TD13); PM có thể xử lý / từ chối trực tiếp. */
+/** Trang theo dõi phản hồi lỗi & báo dữ liệu bị chặn; Project Manager có thể xử lý / từ chối trực tiếp. */
 export default function AnnotatorRequestsPage() {
   const { projectId, can } = useProject()
   const isManager = can('manage_jobs')
@@ -91,20 +92,18 @@ export default function AnnotatorRequestsPage() {
   }
 
   return (
-    <div className="mx-auto flex max-w-[1160px] flex-col gap-6 px-6 py-7">
+    <div className="mx-auto flex max-w-6xl flex-col gap-5 p-4 md:p-6">
       <AnnotatorBreadcrumb projectId={projectId} items={breadcrumbItems} />
 
       <header>
-        <h1 className="text-[30px] leading-tight font-bold text-[#101828]">{pageTitle}</h1>
-        <p className="mt-1 text-base text-[#475467]">{pageDescription}</p>
+        <h1 className="text-display-xs font-semibold text-primary">{pageTitle}</h1>
+        <p className="mt-1 text-sm text-tertiary">{pageDescription}</p>
       </header>
 
-      <section className="overflow-hidden rounded-xl border border-[#EAECF0] bg-white">
-        <div className="flex flex-wrap items-center justify-between gap-4 border-b border-[#EAECF0] px-6 py-5">
-          <div>
-            <h2 className="text-lg font-bold text-[#101828]">Theo dõi xử lý</h2>
-            <p className="mt-0.5 text-sm text-[#475467]">{openCount} yêu cầu đang mở · TD13</p>
-          </div>
+      <SectionCard
+        title="Theo dõi xử lý"
+        description={`${openCount} yêu cầu đang mở`}
+        actions={
           <Tabs selectedKey={filter} onSelectionChange={(k) => setFilter(k as ReqFilter)} className="w-auto">
             <Tabs.List type="button-gray" size="sm" aria-label="Lọc yêu cầu">
               <Tabs.Item id="all" label="Tất cả" />
@@ -114,30 +113,25 @@ export default function AnnotatorRequestsPage() {
               <Tabs.Item id="resolved" label="Đã giải quyết" />
             </Tabs.List>
           </Tabs>
-        </div>
-
+        }
+        bodyClassName="p-0"
+      >
         {req.error != null ? (
-          <div className="p-6">
-            <PageState kind="error" description={getErrorMessage(req.error)} onRetry={req.retry} />
-          </div>
+          <PageState kind="error" description={getErrorMessage(req.error)} onRetry={req.retry} />
         ) : req.isLoading ? (
-          <div className="p-6">
-            <PageState kind="loading" />
-          </div>
+          <PageState kind="loading" />
         ) : visible.length === 0 ? (
-          <div className="p-8">
-            <PageState
-              kind="empty"
-              title="Chưa có yêu cầu nào"
-              description={
-                isManagerOnly
-                  ? 'Chưa có phản hồi lỗi hay báo cáo vấn đề dữ liệu nào từ Annotator.'
-                  : 'Bạn có thể gửi "Phản hồi lỗi" từ trang Cần sửa hoặc "Báo vấn đề dữ liệu" trong trang Chi tiết Job.'
-              }
-            />
-          </div>
+          <PageState
+            kind="empty"
+            title="Chưa có yêu cầu nào"
+            description={
+              isManagerOnly
+                ? 'Chưa có phản hồi lỗi hay báo cáo vấn đề dữ liệu nào từ Annotator.'
+                : 'Bạn có thể gửi "Phản hồi lỗi" từ trang Cần sửa hoặc "Báo vấn đề dữ liệu" trong trang Chi tiết Job.'
+            }
+          />
         ) : (
-          <ul className="divide-y divide-[#EAECF0]">
+          <ul className="divide-y divide-secondary">
             {visible.map((item) => {
               const isResolved = item.status === 'resolved' || item.status === 'rejected'
               const notePrefix = isResolved ? 'Kết luận' : 'Tiến độ'
@@ -146,18 +140,25 @@ export default function AnnotatorRequestsPage() {
                 : item.progress_note || item.reason
               const jobHref = jobLinkFor(item)
               return (
-                <li key={item.id} className="flex flex-col justify-between gap-4 px-6 py-5 sm:flex-row sm:items-start">
+                <li key={item.id} className="flex flex-col justify-between gap-4 px-5 py-4 sm:flex-row sm:items-start">
                   <div className="min-w-0 flex-1 space-y-1.5">
-                    <div className="text-[15px] font-bold text-[#101828]">
-                      {item.request_type_label} · {item.job_name}
+                    <div className="flex flex-wrap items-center gap-2">
+                      <Badge
+                        size="sm"
+                        type="pill-color"
+                        color={item.request_type === 'error_dispute' ? 'blue' : 'gray'}
+                      >
+                        {item.request_type_label}
+                      </Badge>
+                      <span className="text-sm font-semibold text-primary">{item.job_name}</span>
                     </div>
-                    <p className="text-sm text-[#475467]">{item.title}</p>
+                    <p className="text-sm text-secondary">{item.title}</p>
                     {noteBody && (
-                      <p className="text-sm text-[#344054]">
-                        <span className="font-medium">{notePrefix}</span> · {noteBody}
+                      <p className="text-sm text-tertiary">
+                        <span className="font-medium text-secondary">{notePrefix}</span> · {noteBody}
                       </p>
                     )}
-                    <p className="text-xs text-[#667085]">
+                    <p className="text-xs text-quaternary">
                       {isManager && item.created_by ? `Người gửi · ${item.created_by.full_name} · ` : ''}
                       Người xử lý ·{' '}
                       {item.handler ? `${item.handler.full_name} (${item.handler_role})` : item.handler_role}
@@ -192,7 +193,7 @@ export default function AnnotatorRequestsPage() {
                       {jobHref && (
                         <Link
                           to={jobHref}
-                          className="inline-flex items-center gap-1.5 text-sm font-semibold text-[#6941C6] hover:text-[#53389E]"
+                          className="inline-flex items-center gap-1.5 text-sm font-semibold text-brand-secondary transition hover:text-brand-secondary_hover"
                         >
                           Mở job
                           <ArrowRight className="size-4" />
@@ -205,7 +206,7 @@ export default function AnnotatorRequestsPage() {
             })}
           </ul>
         )}
-      </section>
+      </SectionCard>
 
       <FormDialog
         isOpen={resolving !== null}

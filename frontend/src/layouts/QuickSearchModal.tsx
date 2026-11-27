@@ -1,6 +1,7 @@
-import { AlertTriangle, CheckCircle, SearchLg } from '@untitledui/icons'
+import { AlertTriangle, BarChart01, BookOpen01, CheckCircle, SearchLg } from '@untitledui/icons'
 import { useEffect, useMemo, useState } from 'react'
 import { useNavigate } from 'react-router'
+import { Badge } from '@/components/base/badges/badges'
 import { listJobs, quickSearchAnnotator } from '../features/jobs/api'
 import { JOB_STATUS_LABELS } from '../features/jobs/constants'
 import type { JobStatus } from '../features/jobs/types'
@@ -68,7 +69,7 @@ function capabilitiesFromRoles(roles: Role[]): Capability[] {
   return [...set]
 }
 
-/** Tìm kiếm nhanh (⌘K): tra cứu job theo quyền trong dự án và nhảy nhanh tới các trang được phép. */
+/** Tìm kiếm nhanh (⌘K): tra cứu job theo quyền trong organization và nhảy nhanh tới các trang được phép. */
 export default function QuickSearchModal({ open, projectId, currentProject, onClose }: Props) {
   if (!open) return null
   return <QuickSearchPalette projectId={projectId} currentProject={currentProject} onClose={onClose} />
@@ -262,12 +263,12 @@ function QuickSearchPalette({
   }, [flatTargets, safeActiveIndex, navigate, onClose])
 
   return (
-    <div className="fixed inset-0 z-50 flex items-start justify-center pt-[12vh] px-4" role="dialog" aria-modal="true" aria-label="Tìm kiếm nhanh">
-      <div className="fixed inset-0 bg-[#0C111D]/40 backdrop-blur-[2px]" onClick={onClose} />
+    <div className="fixed inset-0 z-50 flex items-start justify-center px-4 pt-[12vh]" role="dialog" aria-modal="true" aria-label="Tìm kiếm nhanh">
+      <div className="fixed inset-0 bg-overlay/50 backdrop-blur-[2px]" onClick={onClose} />
 
-      <div className="relative z-10 flex w-full max-w-[640px] flex-col overflow-hidden rounded-xl border border-[#EAECF0] bg-white shadow-2xl">
-        <div className="flex items-center gap-3 border-b border-[#EAECF0] px-5 py-3.5">
-          <SearchLg className="size-5 shrink-0 text-[#667085]" />
+      <div className="relative z-10 flex w-full max-w-[640px] flex-col overflow-hidden rounded-xl border border-secondary bg-primary shadow-2xl">
+        <div className="flex items-center gap-3 border-b border-secondary px-5 py-3.5">
+          <SearchLg className="size-5 shrink-0 text-fg-quaternary" />
           <input
             autoFocus
             value={query}
@@ -280,12 +281,12 @@ function QuickSearchPalette({
                 ? 'Tìm mã job, task hoặc chuyển nhanh tới trang…'
                 : 'Chuyển nhanh tới trang…'
             }
-            className="w-full bg-transparent text-base text-[#101828] outline-none placeholder:text-[#667085]"
+            className="w-full bg-transparent text-md text-primary outline-none placeholder:text-placeholder"
           />
           <button
             type="button"
             onClick={onClose}
-            className="shrink-0 cursor-pointer rounded border border-[#EAECF0] bg-white px-2 py-0.5 text-[11px] font-medium text-[#667085] hover:bg-[#F9FAFB]"
+            className="shrink-0 cursor-pointer rounded border border-secondary bg-secondary px-2 py-0.5 text-xs font-medium text-tertiary transition hover:bg-primary_hover hover:text-secondary"
           >
             Esc
           </button>
@@ -294,11 +295,11 @@ function QuickSearchPalette({
         <div className="max-h-[380px] overflow-y-auto p-2">
           {searchMode !== 'none' && (
             <div className="mb-2">
-              <div className="px-3 py-1.5 text-xs font-semibold text-[#667085]">Job</div>
+              <div className="px-3 py-1.5 text-xs font-semibold text-tertiary">Job</div>
               {loading && visibleJobs.length === 0 ? (
-                <p className="px-3 py-2 text-sm text-[#667085]">Đang tìm…</p>
+                <p className="px-3 py-2 text-sm text-tertiary">Đang tìm…</p>
               ) : visibleJobs.length === 0 ? (
-                <p className="px-3 py-2 text-sm text-[#667085]">Không thấy job phù hợp.</p>
+                <p className="px-3 py-2 text-sm text-tertiary">Không thấy job phù hợp.</p>
               ) : (
                 <ul>
                   {visibleJobs.map((job, idx) => (
@@ -311,19 +312,24 @@ function QuickSearchPalette({
                           onClose()
                         }}
                         className={cx(
-                          'flex w-full cursor-pointer items-center justify-between rounded-lg px-3 py-2.5 text-left text-sm transition',
-                          safeActiveIndex === idx ? 'bg-[#F9FAFB] text-[#101828]' : 'text-[#344054] hover:bg-[#F9FAFB]',
+                          'flex w-full cursor-pointer items-center justify-between gap-3 rounded-lg px-3 py-2.5 text-left text-sm transition',
+                          safeActiveIndex === idx ? 'bg-active text-primary' : 'text-secondary hover:bg-primary_hover',
                         )}
                       >
-                        <span className="flex items-center gap-3">
-                          <span className="flex size-5 items-center justify-center text-[#667085]">
-                            {job.status === 'rework' ? <AlertTriangle className="size-4" /> : <CheckCircle className="size-4" />}
+                        <span className="flex min-w-0 items-center gap-2.5">
+                          <span className="flex size-5 shrink-0 items-center justify-center text-fg-tertiary">
+                            {job.status === 'rework' ? (
+                              <AlertTriangle className="size-4 text-fg-warning-primary" />
+                            ) : (
+                              <CheckCircle className="size-4" />
+                            )}
                           </span>
-                          <span className="font-medium text-[#101828]">
-                            {job.name} · {job.statusLabel}
-                          </span>
+                          <span className="truncate font-medium text-primary">{job.name}</span>
+                          <Badge size="sm" type="pill-color" color={job.status === 'rework' ? 'warning' : 'gray'}>
+                            {job.statusLabel}
+                          </Badge>
                         </span>
-                        <span className="text-sm text-[#667085] tabular-nums">{job.meta}</span>
+                        <span className="shrink-0 text-sm text-tertiary tabular-nums">{job.meta}</span>
                       </button>
                     </li>
                   ))}
@@ -333,9 +339,9 @@ function QuickSearchPalette({
           )}
 
           <div>
-            <div className="px-3 py-1.5 text-xs font-semibold text-[#667085]">Trang</div>
+            <div className="px-3 py-1.5 text-xs font-semibold text-tertiary">Trang</div>
             {pages.length === 0 ? (
-              <p className="px-3 py-2 text-sm text-[#667085]">Không có trang khớp từ khoá.</p>
+              <p className="px-3 py-2 text-sm text-tertiary">Không có trang khớp từ khoá.</p>
             ) : (
               <ul>
                 {pages.map((page, idx) => {
@@ -351,7 +357,7 @@ function QuickSearchPalette({
                         }}
                         className={cx(
                           'flex w-full cursor-pointer items-center gap-3 rounded-lg px-3 py-2.5 text-left text-sm transition',
-                          safeActiveIndex === flatIdx ? 'bg-[#F9FAFB] text-[#101828]' : 'text-[#344054] hover:bg-[#F9FAFB]',
+                          safeActiveIndex === flatIdx ? 'bg-active text-primary' : 'text-secondary hover:bg-primary_hover',
                         )}
                       >
                         <PageIcon kind={page.kind} />
@@ -370,21 +376,8 @@ function QuickSearchPalette({
 }
 
 function PageIcon({ kind }: { kind: QuickPage['kind'] }) {
-  if (kind === 'rework') return <AlertTriangle className="size-4 text-[#667085]" />
-  if (kind === 'dashboard') {
-    return (
-      <svg className="size-4 text-[#667085]" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.7">
-        <path d="M4 15V9M10 15V5M16 15v-3" strokeLinecap="round" />
-      </svg>
-    )
-  }
-  if (kind === 'guideline') {
-    return (
-      <svg className="size-4 text-[#667085]" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.7">
-        <path d="M4 4.5A1.5 1.5 0 0 1 5.5 3h9A1.5 1.5 0 0 1 16 4.5v11a1.5 1.5 0 0 1-1.5 1.5h-9A1.5 1.5 0 0 1 4 15.5v-11Z" />
-        <path d="M7.5 7h5M7.5 10h5M7.5 13h3" strokeLinecap="round" />
-      </svg>
-    )
-  }
-  return <CheckCircle className="size-4 text-[#667085]" />
+  if (kind === 'rework') return <AlertTriangle className="size-4 text-fg-warning-primary" />
+  if (kind === 'dashboard') return <BarChart01 className="size-4 text-fg-tertiary" />
+  if (kind === 'guideline') return <BookOpen01 className="size-4 text-fg-tertiary" />
+  return <CheckCircle className="size-4 text-fg-tertiary" />
 }

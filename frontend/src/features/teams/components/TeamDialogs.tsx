@@ -174,7 +174,7 @@ function RemoveDialog({ projectId, onClose, onDone, team, member }: DialogProps 
       isOpen
       destructive
       title="Bỏ khỏi team?"
-      description={`${member.user.full_name} sẽ rời ${team.name}. Vai trò trong dự án và job đang giữ không thay đổi.`}
+      description={`${member.user.full_name} sẽ rời ${team.name}. Vai trò trong organization và job đang giữ không thay đổi.`}
       submitLabel="Bỏ khỏi team"
       onClose={onClose}
       onSubmit={submit}
@@ -204,7 +204,7 @@ function DeleteTeamDialog({ projectId, onClose, onDone, team }: DialogProps & { 
           {team.members.length > 0
             ? `${team.members.length} thành viên sẽ chuyển sang "Chưa có team" (vai trò và job đang giữ không đổi). `
             : 'Team chưa có thành viên. '}
-          Batch đang giao cho team sẽ thành "Chưa giao"; thông báo gửi riêng cho team này bị xoá. Không hoàn tác được.
+          Task đang giao cho team sẽ thành "Chưa giao"; thông báo gửi riêng cho team này bị xoá. Không hoàn tác được.
         </>
       }
       submitLabel="Xoá team"
