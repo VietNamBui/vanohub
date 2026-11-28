@@ -1,0 +1,13 @@
+.git/
+.venv/
+.semgrep/
+**/migrations/
+**/__pycache__/
+*.py[cod]
+.ruff_cache/
+.django-stub-gen/
+frontend/node_modules/
+frontend/dist/
+frontend/coverage/
+issue-logging-management/cvat-dashboard/
+vanohub-docs-starter/

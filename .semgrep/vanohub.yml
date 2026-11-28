@@ -1,0 +1,148 @@
+rules:
+  - id: vanohub.backend.no-removed-roles
+    languages: [python]
+    severity: ERROR
+    message: "VanoHub uses the flat 4-role model (PM, QC2, QC1, Annotator); Director and Team Leader roles were removed."
+    metadata:
+      category: domain-invariant
+      confidence: HIGH
+    pattern-either:
+      - pattern: Role.DIRECTOR
+      - pattern: Role.TEAM_LEADER
+
+  - id: vanohub.backend.cvat-allow-redirects-true
+    languages: [python]
+    severity: ERROR
+    message: "CVAT client calls must not enable HTTP redirects (allow_redirects=True risks forwarding credentials)."
+    metadata:
+      category: security
+      cwe: "CWE-601: URL Redirection to Untrusted Site"
+      confidence: HIGH
+    pattern-either:
+      - pattern: requests.$M(..., allow_redirects=True, ...)
+      - pattern: $SESSION.request(..., allow_redirects=True, ...)
+      - pattern: $SESSION.get(..., allow_redirects=True, ...)
+      - pattern: $SESSION.post(..., allow_redirects=True, ...)
+      - pattern: $SESSION.put(..., allow_redirects=True, ...)
+      - pattern: $SESSION.patch(..., allow_redirects=True, ...)
+      - pattern: $SESSION.delete(..., allow_redirects=True, ...)
+
+  - id: vanohub.backend.cvat-request-missing-allow-redirects-false
+    languages: [python]
+    severity: ERROR
+    message: "CVAT HTTP calls must pass allow_redirects=False explicitly to prevent forwarding Bearer/auth headers on 3xx."
+    metadata:
+      category: security
+      cwe: "CWE-601: URL Redirection to Untrusted Site"
+      confidence: HIGH
+    paths:
+      include:
+        - "/backend/cvat_integration/**"
+        - "/.semgrep/**"
+      exclude:
+        - "**/tests.py"
+        - "**/test_*.py"
+    patterns:
+      - pattern-either:
+          - pattern: self.session.request(...)
+          - pattern: requests.get(...)
+          - pattern: requests.post(...)
+          - pattern: requests.put(...)
+          - pattern: requests.patch(...)
+          - pattern: requests.delete(...)
+      - pattern-not: self.session.request(..., allow_redirects=False, ...)
+      - pattern-not: self.session.request(..., allow_redirects=True, ...)
+      - pattern-not: requests.$M(..., allow_redirects=False, ...)
+      - pattern-not: requests.$M(..., allow_redirects=True, ...)
+
+  - id: vanohub.backend.select-for-update-with-select-related-no-of
+    languages: [python]
+    severity: ERROR
+    message: "select_related(...) combined with select_for_update() without `of=` fails on PostgreSQL when nullable outer joins exist."
+    metadata:
+      category: correctness
+      confidence: HIGH
+    pattern-either:
+      - patterns:
+          - pattern: $QS.select_related(...).select_for_update(...)
+          - pattern-not: $QS.select_related(...).select_for_update(..., of=..., ...)
+      - patterns:
+          - pattern: $QS.select_for_update(...).select_related(...)
+          - pattern-not: $QS.select_for_update(..., of=..., ...).select_related(...)
+      - patterns:
+          - pattern: $QS.select_related(...). ... .select_for_update(...)
+          - pattern-not: $QS.select_related(...). ... .select_for_update(..., of=..., ...)
+      - patterns:
+          - pattern: $QS.select_for_update(...). ... .select_related(...)
+          - pattern-not: $QS.select_for_update(..., of=..., ...). ... .select_related(...)
+
+  - id: vanohub.backend.raw-sql-interpolation
+    languages: [python]
+    severity: ERROR
+    message: "Possible SQL injection: dynamically formatted SQL passed to .execute()/.raw()/RawSQL(). Use parameterized queries."
+    metadata:
+      category: security
+      cwe: "CWE-89: SQL Injection"
+      confidence: HIGH
+    paths:
+      exclude:
+        - "**/tests/**"
+        - "**/test_*.py"
+        - "**/tests.py"
+    pattern-either:
+      - pattern: $OBJ.execute(f"...{$X}...", ...)
+      - pattern: $OBJ.execute("...".format(...), ...)
+      - pattern: $OBJ.execute("..." % ..., ...)
+      - pattern: $OBJ.execute("..." + $X, ...)
+      - pattern: $OBJ.raw(f"...{$X}...", ...)
+      - pattern: $OBJ.raw("...".format(...), ...)
+      - pattern: $OBJ.raw("..." % ..., ...)
+      - pattern: $OBJ.raw("..." + $X, ...)
+      - pattern: RawSQL(f"...{$X}...", ...)
+      - pattern: RawSQL("...".format(...), ...)
+      - pattern: RawSQL("..." % ..., ...)
+      - pattern: RawSQL("..." + $X, ...)
+
+  - id: vanohub.frontend.no-direct-axios
+    languages: [typescript, javascript]
+    severity: ERROR
+    message: "Direct runtime import of 'axios' outside shared/api/ bypasses apiClient auth and token-refresh interceptors."
+    metadata:
+      category: architecture
+      confidence: HIGH
+    paths:
+      exclude:
+        - "/frontend/src/shared/api/**"
+        - "**/*.test.*"
+        - "**/*.spec.*"
+    patterns:
+      - pattern-either:
+          - pattern: import $X from "axios"
+          - pattern: import { ... } from "axios"
+          - pattern: import * as $X from "axios"
+      - pattern-not-regex: "^\\s*import\\s+type\\b"
+
+  - id: vanohub.frontend.no-antd-reintroduction
+    languages: [typescript, javascript]
+    severity: ERROR
+    message: "Ant Design was removed in favor of Untitled UI (React Aria) primitives; do not import antd/@ant-design."
+    metadata:
+      category: architecture
+      confidence: HIGH
+    pattern-regex: "from\\s+['\"](?:antd|@ant-design/[^'\"]+)['\"]"
+
+  - id: vanohub.frontend.no-dangerously-set-inner-html
+    languages: [typescript, javascript]
+    severity: WARNING
+    message: "Usage of dangerouslySetInnerHTML introduces XSS risk unless sanitized with DOMPurify."
+    metadata:
+      category: security
+      cwe: "CWE-79: Cross-site Scripting (XSS)"
+      confidence: MEDIUM
+    paths:
+      exclude:
+        - "**/*.test.*"
+        - "**/*.spec.*"
+    patterns:
+      - pattern: "<$EL ... dangerouslySetInnerHTML={{ __html: $VAL }} ... />"
+      - pattern-not: "<$EL ... dangerouslySetInnerHTML={{ __html: DOMPurify.sanitize(...) }} ... />"
