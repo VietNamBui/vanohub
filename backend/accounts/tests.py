@@ -1,7 +1,10 @@
+import logging
 from typing import Any, cast
+from unittest.mock import patch
 
-from django.db import IntegrityError
-from django.test import TestCase
+from cryptography.fernet import Fernet
+from django.db import DatabaseError, IntegrityError
+from django.test import TestCase, override_settings
 from django.urls import reverse
 from rest_framework.test import APIClient
 
@@ -194,3 +197,166 @@ class AuthApiTests(TestCase):
         for payload in payloads:
             res = self.client.post(reverse("change-password"), payload, format="json")
             self.assertEqual(res.status_code, 400, f"Expected 400 for {payload}, got {res.status_code}")
+
+
+class SecurityAndBoundaryTests(TestCase):
+    client: Any
+
+    def setUp(self):
+        self.client = APIClient()
+        self.project = Project.objects.create(name="SecOrg")
+        self.pm = User.objects.create_user("sec_pm", password="pw-pm")
+        self.pm2 = User.objects.create_user("sec_pm2", password="pw-pm2")
+        self.member = User.objects.create_user("sec_member", password="pw-old")
+        RoleAssignment.objects.create(user=self.pm, role=Role.PROJECT_MANAGER, project=self.project)
+        RoleAssignment.objects.create(user=self.pm2, role=Role.PROJECT_MANAGER, project=self.project)
+        RoleAssignment.objects.create(user=self.member, role=Role.ANNOTATOR, project=self.project)
+        RoleAssignment.objects.create(user=self.member, role=Role.QC1, project=self.project)
+
+    def _login(self, username: str, password: str) -> dict[str, str]:
+        res = self.client.post(reverse("token_obtain_pair"), {"username": username, "password": password}, format="json")
+        self.assertEqual(res.status_code, 200, res.data)
+        return {"access": res.data["access"], "refresh": res.data["refresh"]}
+
+    def test_jwt_revoked_on_password_change_reset_role_removal_and_pm_sync(self):
+        tokens = self._login("sec_member", "pw-old")
+        member_client = APIClient()
+        member_client.credentials(HTTP_AUTHORIZATION=f"Bearer {tokens['access']}")
+        self.assertEqual(member_client.get(reverse("me")).status_code, 200)
+
+        # 1. Tự đổi mật khẩu → thu hồi ngay cả access và refresh token cũ
+        self.assertEqual(
+            member_client.post(
+                reverse("change-password"),
+                {"current_password": "pw-old", "new_password": "NewStrongPassword#2026"},
+                format="json",
+            ).status_code,
+            204,
+        )
+        self.assertEqual(member_client.get(reverse("me")).status_code, 401)
+        self.assertEqual(
+            self.client.post(reverse("token_refresh"), {"refresh": tokens["refresh"]}, format="json").status_code,
+            401,
+        )
+
+        # Đăng nhập lại với mật khẩu mới hoạt động bình thường
+        tokens2 = self._login("sec_member", "NewStrongPassword#2026")
+        member_client.credentials(HTTP_AUTHORIZATION=f"Bearer {tokens2['access']}")
+        self.assertEqual(member_client.get(reverse("me")).status_code, 200)
+
+        # 2. PM reset mật khẩu thành viên → thu hồi ngay JWT của thành viên
+        pm_client = APIClient()
+        pm_client.force_authenticate(self.pm)
+        reset = pm_client.post(f"/api/projects/{self.project.id}/members/{self.member.id}/reset-password/")
+        self.assertEqual(reset.status_code, 200)
+        self.assertEqual(member_client.get(reverse("me")).status_code, 401)
+        self.assertEqual(
+            self.client.post(reverse("token_refresh"), {"refresh": tokens2["refresh"]}, format="json").status_code,
+            401,
+        )
+
+        # 3. Gỡ vai trò thành viên → thu hồi ngay JWT của thành viên
+        tokens3 = self._login("sec_member", reset.data["password"])
+        member_client.credentials(HTTP_AUTHORIZATION=f"Bearer {tokens3['access']}")
+        self.assertEqual(member_client.get(reverse("me")).status_code, 200)
+        del_role = pm_client.delete(f"/api/projects/{self.project.id}/members/{self.member.id}/roles/qc1/")
+        self.assertEqual(del_role.status_code, 200)
+        self.assertEqual(member_client.get(reverse("me")).status_code, 401)
+        self.assertEqual(
+            self.client.post(reverse("token_refresh"), {"refresh": tokens3["refresh"]}, format="json").status_code,
+            401,
+        )
+
+        # 4. Gỡ PM qua PATCH /api/projects/{id}/ → thu hồi ngay JWT của PM bị gỡ
+        pm2_tokens = self._login("sec_pm2", "pw-pm2")
+        pm2_client = APIClient()
+        pm2_client.credentials(HTTP_AUTHORIZATION=f"Bearer {pm2_tokens['access']}")
+        self.assertEqual(pm2_client.get(reverse("me")).status_code, 200)
+        upd = pm_client.patch(
+            reverse("project-detail", args=[self.project.id]),
+            {"pm_ids": [self.pm.id]},
+            format="json",
+        )
+        self.assertEqual(upd.status_code, 200)
+        self.assertEqual(pm2_client.get(reverse("me")).status_code, 401)
+        self.assertEqual(
+            self.client.post(reverse("token_refresh"), {"refresh": pm2_tokens["refresh"]}, format="json").status_code,
+            401,
+        )
+
+    def test_credential_keys_decouple_from_secret_key_with_legacy_fallback(self):
+        legacy_token = credentials.encrypt("TempPass#1")
+        self.assertEqual(credentials.decrypt(legacy_token), "TempPass#1")
+
+        key1 = Fernet.generate_key().decode()
+        key2 = Fernet.generate_key().decode()
+        with override_settings(
+            CREDENTIAL_ENCRYPTION_KEYS=[key1],
+            CREDENTIAL_LEGACY_SECRET_KEY_FALLBACK=True,
+        ):
+            # Vẫn giải mã được token cũ mã hoá bằng SECRET_KEY
+            self.assertEqual(credentials.decrypt(legacy_token), "TempPass#1")
+            new_token = credentials.encrypt("TempPass#2")
+
+        # Khi đổi SECRET_KEY và xoay sang [key2, key1], token mới vẫn đọc được
+        with override_settings(
+            SECRET_KEY="rotated-django-secret-key-value",
+            CREDENTIAL_ENCRYPTION_KEYS=[key2, key1],
+            CREDENTIAL_LEGACY_SECRET_KEY_FALLBACK=True,
+        ):
+            self.assertEqual(credentials.decrypt(new_token), "TempPass#2")
+
+        # Tắt fallback → token cũ mã hoá bằng SECRET_KEY trở thành unreadable (None)
+        with override_settings(
+            CREDENTIAL_ENCRYPTION_KEYS=[key1],
+            CREDENTIAL_LEGACY_SECRET_KEY_FALLBACK=False,
+        ):
+            self.assertIsNone(credentials.decrypt(legacy_token))
+
+    def test_logging_secret_redaction_filter_masks_sensitive_values(self):
+        from config.settings import RedactingFormatter, SecretRedactionFilter
+
+        filt = SecretRedactionFilter()
+        fmt = RedactingFormatter("%(message)s")
+        with override_settings(
+            SECRET_KEY="super-secret-django-key",
+            CVAT_ACCESS_TOKEN="cvat-pat-secret-value",
+            CVAT_PASSWORD="cvat-login-password",
+        ):
+            record = logging.LogRecord(
+                name="cvat_integration",
+                level=logging.WARNING,
+                pathname=__file__,
+                lineno=1,
+                msg="Header Authorization: Bearer %s token=%s password=%s key=%s",
+                args=("eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.signaturevalue", "cvat-pat-secret-value", "cvat-login-password", "super-secret-django-key"),
+                exc_info=None,
+            )
+            filt.filter(record)
+            rendered = fmt.format(record)
+            self.assertNotIn("eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9", rendered)
+            self.assertNotIn("cvat-pat-secret-value", rendered)
+            self.assertNotIn("cvat-login-password", rendered)
+            self.assertNotIn("super-secret-django-key", rendered)
+            self.assertIn("[REDACTED]", rendered)
+
+    def test_project_scoped_overflow_project_id_returns_404(self):
+        pm_client = APIClient()
+        pm_client.force_authenticate(self.pm)
+        for bad_id in ("999999999999", "99999999999999999999999"):
+            res = pm_client.get(f"/api/projects/{bad_id}/jobs/")
+            self.assertEqual(res.status_code, 404, f"Expected 404 for {bad_id}, got {res.status_code}")
+
+    def test_health_endpoint_checks_database_without_auth(self):
+        anon = APIClient()
+        ok = anon.get(reverse("health"))
+        self.assertEqual(ok.status_code, 200)
+        self.assertEqual(ok.json(), {"status": "ok", "database": "ok"})
+        self.assertEqual(ok["Cache-Control"], "no-store")
+        self.assertEqual(anon.post(reverse("health"), {}, format="json").status_code, 405)
+
+        with patch("config.views.connection.cursor", side_effect=DatabaseError("db down")):
+            down = anon.get(reverse("health"))
+        self.assertEqual(down.status_code, 503)
+        self.assertEqual(down.json(), {"status": "error", "database": "unavailable"})
+        self.assertEqual(down["Cache-Control"], "no-store")

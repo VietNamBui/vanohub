@@ -8,6 +8,7 @@ QUY ƯỚC:
 from bisect import bisect_right
 from collections import defaultdict
 from datetime import date, datetime, timedelta
+from decimal import Decimal
 from typing import Any
 
 from django.db.models import (
@@ -53,7 +54,7 @@ from jobs.models import (
 )
 from jobs.serializers import AnnotatorRequestSerializer, JobSerializer, ReviewErrorBriefSerializer
 from jobs.views import order_by_db06_priority
-from projects.models import ActivityLog, Batch, DataStatus, EscalationPolicy
+from projects.models import ActivityLog, Batch, DataStatus, Delivery, EscalationPolicy
 from projects.notifications import user_team_ids
 from quality.models import Audit, AuditSample, ErrorVerdict, ReviewError, ReviewStage, Severity
 from quality.qc2 import ANNOTATOR_EVENTS
@@ -102,6 +103,11 @@ def _pending_defect_rate_by_severity() -> dict[str, Any]:
 
 def _pct(part: int | float, whole: int | float, digits: int = 1) -> float | None:
     return round(part * 100 / whole, digits) if whole else None
+
+
+def _format_decimal(value: Decimal | None) -> str | None:
+    """Định dạng Decimal nhất quán với DRF DecimalField(max_digits=5, decimal_places=2)."""
+    return f"{value:.2f}" if value is not None else None
 
 
 def _local_day_start(day: date) -> datetime:
@@ -394,7 +400,26 @@ class ProjectOverviewView(ProjectScopedViewMixin, APIView):
             and b.job_count > 0
             and b.qc1_passed_count > 0
             and b.blocking_qc2_count == 0
+            and b.locked_jobs == 0
         )
+        deliveries = list(
+            Delivery.objects.filter(project=project).values_list("batch_id", "delivered_at", "batch__deadline")
+        )
+        delivered_batch_ids = {batch_id for batch_id, _, _ in deliveries}
+        due_delivered = [(delivered_at, dl) for _, delivered_at, dl in deliveries if dl is not None]
+        on_time_deliveries = sum(
+            1 for delivered_at, dl in due_delivered if delivered_at is not None and delivered_at <= dl
+        )
+        late_deliveries = len(due_delivered) - on_time_deliveries
+        overdue_undelivered = sum(
+            1
+            for b in batch_rows
+            if b.status != DataStatus.DELIVERED
+            and b.id not in delivered_batch_ids
+            and b.deadline is not None
+            and b.deadline < now
+        )
+        due_deliveries = len(due_delivered) + overdue_undelivered
         pending_qc2_samples = AuditSample.objects.filter(
             audit__project=project,
             audit__status=Audit.Status.IN_PROGRESS,
@@ -496,6 +521,7 @@ class ProjectOverviewView(ProjectScopedViewMixin, APIView):
                 "batches": total_batches,
                 "ready_batches": ready_batches,
                 "delivered_batches": delivered_batches,
+                "overdue_batches": overdue_undelivered,
                 "jobs": total_jobs,
                 "remaining_jobs": remaining_jobs,
                 "escalated": escalated_jobs,
@@ -525,6 +551,14 @@ class ProjectOverviewView(ProjectScopedViewMixin, APIView):
                 "delivered_rate": _metric(
                     _pct(delivered_batches, total_batches),
                     formula="Batch đã bàn giao ÷ tổng batch (TD09)",
+                ),
+                "delivery_on_time_rate": _metric(
+                    _pct(on_time_deliveries, due_deliveries),
+                    formula="Batch bàn giao đúng hạn ÷ (batch đã giao có deadline + batch quá hạn chưa giao) × 100% (DH07)",
+                    on_time_deliveries=on_time_deliveries,
+                    due_deliveries=due_deliveries,
+                    late_deliveries=late_deliveries,
+                    overdue_undelivered=overdue_undelivered,
                 ),
                 "rework_rate": _metric(
                     _pct(totals["reworked"] or 0, total_jobs),
@@ -559,8 +593,8 @@ class ProjectOverviewView(ProjectScopedViewMixin, APIView):
                 ),
             },
             "thresholds": {
-                "quality_cl": project.quality_cl_threshold,
-                "defect_error_rate": project.defect_rate_threshold,
+                "quality_cl": _format_decimal(project.quality_cl_threshold),
+                "defect_error_rate": _format_decimal(project.defect_rate_threshold),
             },
             "alerts": alerts,
         })
@@ -728,6 +762,7 @@ class Qc2SummaryView(ProjectScopedViewMixin, APIView):
             "passed": review_stats["passed"],
             "rejected": review_stats["rejected"],
             "audited_in_period": review_stats["audited_in_period"],
+            "audited_today": review_stats["audited_today"],
             "overdue": queue_stats["overdue"],
             "due_soon": queue_stats["due_soon"],
         }
@@ -1376,6 +1411,7 @@ class AnnotatorAnalyticsView(ProjectScopedViewMixin, APIView):
                 if rw_hrs > 0:
                     measured_objects += rw_measured
 
+            day_measured = (fp_measured if fp_hrs > 0 else 0) + (rw_measured if rw_hrs > 0 else 0)
             daily_productivity.append({
                 "date": d.isoformat(),
                 "label": d.strftime("%d/%m"),
@@ -1383,13 +1419,15 @@ class AnnotatorAnalyticsView(ProjectScopedViewMixin, APIView):
                 "rework_objects": rw,
                 "submitted_objects": sub_d,
                 "unsubmitted_cvat_objects": sync_d,
-                "first_pass_per_hour": round(fp_measured / fp_hrs, 1) if fp_hrs > 0 else 0,
-                "rework_per_hour": round(rw_measured / rw_hrs, 1) if rw_hrs > 0 else 0,
+                "measured_objects": day_measured,
+                "first_pass_per_hour": round(fp_measured / fp_hrs, 1) if fp_hrs > 0 else None,
+                "rework_per_hour": round(rw_measured / rw_hrs, 1) if rw_hrs > 0 else None,
                 "hours": round(hrs, 1),
+                "hours_status": "provisional" if hrs > 0 else "unavailable",
                 "is_off_day": is_off,
             })
 
-        objects_per_hour = round(measured_objects / total_hours) if total_hours > 0 else 0
+        objects_per_hour = round(measured_objects / total_hours) if total_hours > 0 else None
 
         # 3. Dự báo sản lượng tuần hiện tại (DB05 · KPI01)
         avg_daily = round(total_objects / active_days) if active_days > 0 else 0
@@ -1463,10 +1501,27 @@ class AnnotatorAnalyticsView(ProjectScopedViewMixin, APIView):
             "iso_year": iso_year,
             "avg_productivity": {
                 "objects_per_hour": objects_per_hour,
+                "measured_objects": measured_objects,
                 "total_objects": total_objects,
                 "submitted_objects": total_submitted,
                 "unsubmitted_cvat_objects": total_unsubmitted_cvat,
                 "total_hours": round(total_hours, 1),
+                "status": "provisional" if total_hours > 0 else "unavailable",
+                "formula": (
+                    "Sản lượng thuộc các phiên đã nộp có đo thời gian (measured_objects) "
+                    "÷ tổng giờ phiên ước tính (NS03)"
+                ),
+                "hours_provenance": {
+                    "source": "workflow_elapsed_session",
+                    "status": "provisional" if total_hours > 0 else "unavailable",
+                    "unit": "hours",
+                    "clamp_min_minutes": 15,
+                    "clamp_max_minutes": 600,
+                    "description": (
+                        "Ước tính từ khoảng phiên làm việc (ANNOTATING → PENDING_QC1, "
+                        "giới hạn [15 phút, 10 giờ]/phiên, hợp nhất khi WIP ≥ 2)."
+                    ),
+                },
             },
             "forecast": {
                 "estimated_objects": estimated_objects,
@@ -1572,8 +1627,8 @@ class Qc1SummaryView(ProjectScopedViewMixin, APIView):
             }
         else:
             queue_stats = jobs.aggregate(
-                assigned=Count("id", filter=qc1_open),
-                pending=Count("id", filter=Q(status=JobStatus.PENDING_QC1)),
+                assigned=Count("id", filter=qc1_open & Q(qc1_reviewer__isnull=False)),
+                pending=Count("id", filter=Q(status=JobStatus.PENDING_QC1, qc1_reviewer__isnull=False) | pool_q),
                 pool_pending=Count("id", filter=pool_q),
                 reviewing=Count("id", filter=Q(status=JobStatus.QC1_REVIEWING)),
                 qc1_passed=Count("id", filter=Q(status=JobStatus.QC1_PASSED)),
@@ -1648,7 +1703,8 @@ class Qc1SummaryView(ProjectScopedViewMixin, APIView):
                 )
                 | Q(audit_sample__isnull=True, created_at__gte=since, created_at__lte=until)
             )
-            .select_related("job", "audit_sample")
+            .select_related("job", "job__batch", "audit_sample", "category", "reported_by")
+            .order_by("-created_at", "-id")
         )
         matched_escape_errors: list[ReviewError] = []
         for err in qc2_errors_all:
@@ -1662,6 +1718,25 @@ class Qc1SummaryView(ProjectScopedViewMixin, APIView):
         escaped_jobs_count = len(escaped_job_ids)
         qc1_escape_job_rate = _pct(escaped_jobs_count, audited_jobs_count)
         qc2_escape_error_count = len(matched_escape_errors)
+        escape_errors = [
+            {
+                "id": err.id,
+                "job_id": err.job_id,
+                "job_name": err.job.name,
+                "batch_name": err.job.batch.name,
+                "category": err.category.name,
+                "severity": err.severity,
+                "verdict": err.verdict,
+                "frame_number": err.frame_number,
+                "cvat_object_id": err.cvat_object_id,
+                "is_missing_object": err.is_missing_object,
+                "location": err.location,
+                "description": err.description,
+                "reported_by": UserBriefSerializer(err.reported_by).data if err.reported_by else None,
+                "created_at": format_rfc3339_utc(err.created_at),
+            }
+            for err in matched_escape_errors[:20]
+        ]
 
         decision_stats = logs.aggregate(
             passed=Count("id", filter=Q(action="qc1.pass")),
@@ -1674,6 +1749,7 @@ class Qc1SummaryView(ProjectScopedViewMixin, APIView):
             "passed": decision_stats["passed"],
             "rejected": decision_stats["rejected"],
             "reviewed_in_period": decision_stats["reviewed_in_period"],
+            "reviewed_today": decision_stats["reviewed_today"],
         }
 
         # DH06 cho QC1: tỷ lệ hoàn tất kiểm QC1 đúng hạn trong kỳ
@@ -1742,6 +1818,8 @@ class Qc1SummaryView(ProjectScopedViewMixin, APIView):
             "stats": stats,
             "pass_rate": _pct(stats["passed"], stats["passed"] + stats["rejected"]),
             "on_time_pct": on_time_pct,
+            "on_time_count": on_time_count,
+            "on_time_total": on_time_total,
             "first_pass_yield": _metric(
                 fpy["value"],
                 formula="Job đạt QC1 ngay lần đầu ÷ tổng job đã có kết quả QC1 lần đầu (CL01)",
@@ -1756,6 +1834,7 @@ class Qc1SummaryView(ProjectScopedViewMixin, APIView):
             "escaped_jobs": escaped_jobs_count,
             "escaped_jobs_count": escaped_jobs_count,
             "audited_jobs_count": audited_jobs_count,
+            "escape_errors": escape_errors,
             "errors_by_category": [{"category": r["category__name"], "count": r["n"]} for r in by_category],
             "errors_by_severity": by_severity,
             "kpi_target": project.kpi_qc1_target,

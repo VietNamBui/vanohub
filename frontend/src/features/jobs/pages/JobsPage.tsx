@@ -28,7 +28,15 @@ import DeadlineModal from '../components/DeadlineModal'
 import JobDetailDrawer from '../components/JobDetailDrawer'
 import JobStatusTag from '../components/JobStatusTag'
 import { JOB_STATUS_LABELS } from '../constants'
-import { getJobLockReason, nextJobSortOrdering, parseJobUrlFilters, serializeJobUrlFilters } from '../jobHelpers'
+import {
+  getBulkAssignBlockReason,
+  getBulkDeadlineBlockReason,
+  getJobLockReason,
+  getQc2AssignBlockReason,
+  nextJobSortOrdering,
+  parseJobUrlFilters,
+  serializeJobUrlFilters,
+} from '../jobHelpers'
 import type { Job, JobFilters, Stage } from '../types'
 
 const ALL_KEY = '__all__'
@@ -50,7 +58,7 @@ const PAGE_SIZE_OPTIONS: SelectItemType[] = [
 
 /** Danh sách job dùng chung trong organization, lọc theo stage / project / task / cờ. */
 export default function JobsPage() {
-  const { projectId, can } = useProject()
+  const { projectId, project, can } = useProject()
   const [searchParams, setSearchParams] = useSearchParams()
   const spKey = searchParams.toString()
   const urlFilters = useMemo(() => parseJobUrlFilters(searchParams), [searchParams])
@@ -144,11 +152,7 @@ export default function JobsPage() {
         </Tooltip>
       )
     }
-    const reason = !can('manage_audits')
-      ? 'Bạn không có quyền phân auditor'
-      : qc2.result !== 'pending'
-        ? `Mẫu đã có kết quả (${qc2.result === 'pass' ? 'Pass' : 'Reject'})`
-        : null
+    const reason = getQc2AssignBlockReason(can('manage_audits'), job, project.escalation_policy)
     return (
       <AssigneeSelect
         value={qc2.auditor}
@@ -182,7 +186,13 @@ export default function JobsPage() {
     }
   }
 
-  const jobs = data?.results ?? []
+  const jobs = useMemo(() => data?.results ?? [], [data])
+  const selectedJobs = useMemo(() => {
+    const selectedSet = new Set(selected)
+    return jobs.filter((j) => selectedSet.has(j.id))
+  }, [jobs, selected])
+  const bulkAssignReason = getBulkAssignBlockReason(canManage, selectedJobs)
+  const bulkDeadlineReason = getBulkDeadlineBlockReason(canManage, selectedJobs)
   const datasetItems: SelectItemType[] = [
     { id: ALL_KEY, label: 'Tất cả project' },
     ...(datasets ?? []).map((d) => ({ id: String(d.id), label: d.name })),
@@ -358,15 +368,32 @@ export default function JobsPage() {
         {canManage && selected.length > 0 && (
           <div className="flex flex-wrap items-center gap-3 border-b border-secondary bg-brand-primary_alt px-4 py-2.5 text-sm">
             <span className="font-medium text-primary">Đã chọn {selected.length} job</span>
-            <Button size="xs" color="secondary" onPress={() => setBulk('assign')}>
+            <Button
+              size="xs"
+              color="secondary"
+              isDisabled={bulkAssignReason !== null}
+              onPress={() => setBulk('assign')}
+            >
               Giao lại
             </Button>
-            <Button size="xs" color="secondary" onPress={() => setBulk('deadline')}>
+            <Button
+              size="xs"
+              color="secondary"
+              isDisabled={bulkDeadlineReason !== null}
+              onPress={() => setBulk('deadline')}
+            >
               Đặt deadline
             </Button>
             <Button size="xs" color="link-gray" onPress={() => setSelected([])}>
               Bỏ chọn
             </Button>
+            {(bulkAssignReason ?? bulkDeadlineReason) && (
+              <span className="text-xs text-tertiary">
+                {bulkAssignReason && bulkDeadlineReason && bulkAssignReason !== bulkDeadlineReason
+                  ? `${bulkAssignReason} · ${bulkDeadlineReason}`
+                  : (bulkAssignReason ?? bulkDeadlineReason)}
+              </span>
+            )}
           </div>
         )}
 

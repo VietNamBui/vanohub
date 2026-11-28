@@ -10,6 +10,7 @@ import PageState from '../shared/components/ui/PageState'
 import type { Capability } from '../shared/types/capabilities'
 import {
   AccountSettingsPage,
+  ActivityLogPage,
   AnnouncementsPage,
   AnnotatorAnalyticsPage,
   AnnotatorDashboardPage,
@@ -30,6 +31,7 @@ import {
   LoginPage,
   OverviewPage,
   ProjectListPage,
+  ProjectSettingsPage,
   Qc1DashboardPage,
   Qc1WorkPage,
   Qc2DashboardPage,
@@ -89,6 +91,8 @@ export const router = createBrowserRouter([
               guarded('annotator/requests', ['annotate_jobs', 'manage_jobs'], <AnnotatorRequestsPage />),
               guarded('error-categories', 'manage_quality_catalog', <ErrorCategoriesPage />),
               guarded('delivery', 'manage_delivery', <DeliveryPage />),
+              guarded('settings', 'manage_settings', <ProjectSettingsPage />),
+              guarded('activity', 'view_activity', <ActivityLogPage />),
               guarded('guidelines', 'view_guidelines', <GuidelinesPage />),
               guarded('cvat-link', 'view_project', <CvatLinkPage />),
               guarded('announcements', 'view_project', <AnnouncementsPage />),

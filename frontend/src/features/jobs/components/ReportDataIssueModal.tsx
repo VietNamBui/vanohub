@@ -60,6 +60,7 @@ function ReportDataIssueForm({ isOpen, projectId, jobId, jobName, onClose, onSub
     >
       <div className="flex flex-col gap-4">
         <Input
+          name="issue_title"
           label="Tóm tắt vấn đề *"
           placeholder="VD: Point cloud mờ frame 90–96"
           value={title}
@@ -67,6 +68,7 @@ function ReportDataIssueForm({ isOpen, projectId, jobId, jobName, onClose, onSub
         />
 
         <TextArea
+          name="issue_reason"
           label="Mô tả chi tiết & phạm vi frame *"
           placeholder="Ghi rõ frame lỗi, hiện tượng (mất điểm Lidar, lệch calibration, ảnh camera đen)…"
           rows={4}

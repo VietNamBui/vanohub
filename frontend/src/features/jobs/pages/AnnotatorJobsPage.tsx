@@ -18,6 +18,7 @@ import AnnotatorBreadcrumb from '../components/AnnotatorBreadcrumb'
 import AnnotatorJobDrawer from '../components/AnnotatorJobDrawer'
 import JobStatusBadge from '../components/JobStatusBadge'
 import { formatDeadlineCountdown } from '../constants'
+import { isJobEscalationWarnOnly } from '../jobHelpers'
 import type { AnnotatorJobTab } from '../types'
 
 const TABS: { id: AnnotatorJobTab; label: string }[] = [
@@ -55,9 +56,15 @@ export default function AnnotatorJobsPage() {
       }),
   )
 
-  function clearParam(key: 'due_soon' | 'overdue') {
+  function toggleParam(key: 'due_soon' | 'overdue') {
     const next = new URLSearchParams(searchParams)
-    next.delete(key)
+    if (next.get(key) === '1') {
+      next.delete(key)
+    } else {
+      next.set(key, '1')
+      if (key === 'overdue') next.delete('due_soon')
+      if (key === 'due_soon') next.delete('overdue')
+    }
     setSearchParams(next, { replace: true })
     setPage(1)
   }
@@ -123,7 +130,7 @@ export default function AnnotatorJobsPage() {
               </Tabs.List>
             </Tabs>
             <form
-              className="w-56"
+              className="flex w-64 items-center gap-1.5"
               onSubmit={(e) => {
                 e.preventDefault()
                 setQuery(search.trim())
@@ -131,6 +138,7 @@ export default function AnnotatorJobsPage() {
               }}
             >
               <Input
+                name="annotator_search"
                 size="sm"
                 icon={SearchLg}
                 aria-label="Tìm job"
@@ -138,29 +146,52 @@ export default function AnnotatorJobsPage() {
                 value={search}
                 onChange={setSearch}
               />
+              {(search || query) && (
+                <Button
+                  size="sm"
+                  color="tertiary"
+                  onPress={() => {
+                    setSearch('')
+                    setQuery('')
+                    setPage(1)
+                  }}
+                >
+                  Xoá
+                </Button>
+              )}
             </form>
-            {dueSoon && (
-              <BadgeWithButton
-                size="sm"
-                type="pill-color"
-                color="warning"
-                buttonLabel="Bỏ lọc sắp / quá hạn"
-                onButtonClick={() => clearParam('due_soon')}
-              >
-                Sắp / quá hạn
-              </BadgeWithButton>
-            )}
-            {overdue && (
-              <BadgeWithButton
-                size="sm"
-                type="pill-color"
-                color="error"
-                buttonLabel="Bỏ lọc quá hạn"
-                onButtonClick={() => clearParam('overdue')}
-              >
-                Quá hạn
-              </BadgeWithButton>
-            )}
+            <div className="flex flex-wrap items-center gap-1.5">
+              {overdue ? (
+                <BadgeWithButton
+                  size="sm"
+                  type="pill-color"
+                  color="error"
+                  buttonLabel="Bỏ lọc quá hạn"
+                  onButtonClick={() => toggleParam('overdue')}
+                >
+                  Quá hạn
+                </BadgeWithButton>
+              ) : (
+                <Button size="xs" color="secondary" onPress={() => toggleParam('overdue')}>
+                  Quá hạn
+                </Button>
+              )}
+              {dueSoon ? (
+                <BadgeWithButton
+                  size="sm"
+                  type="pill-color"
+                  color="warning"
+                  buttonLabel="Bỏ lọc sắp hạn"
+                  onButtonClick={() => toggleParam('due_soon')}
+                >
+                  Sắp hạn ≤ 24h
+                </BadgeWithButton>
+              ) : (
+                <Button size="xs" color="secondary" onPress={() => toggleParam('due_soon')}>
+                  Sắp hạn
+                </Button>
+              )}
+            </div>
           </div>
         }
         bodyClassName="p-0"
@@ -193,8 +224,7 @@ export default function AnnotatorJobsPage() {
                   const target = job.target_object_count || job.object_count
                   const pct = job.progress_percent ?? 0
                   const countdown = formatDeadlineCountdown(job.hours_remaining)
-                  const isWarnOnlyEscalated =
-                    job.is_escalated && (job.escalation_policy ?? project.escalation_policy ?? 'block') === 'warn_only'
+                  const isWarnOnlyEscalated = isJobEscalationWarnOnly(job, project.escalation_policy)
 
                   return (
                     <tr
@@ -239,9 +269,16 @@ export default function AnnotatorJobsPage() {
                         )}
                       </td>
                       <td className="px-4 py-3.5">
-                        <BadgeWithDot size="sm" type="pill-color" color={job.rework_round > 0 ? 'warning' : 'gray'}>
-                          {job.rework_round}/{job.max_rework_rounds}
-                        </BadgeWithDot>
+                        <div className="flex flex-wrap items-center gap-1.5">
+                          <BadgeWithDot size="sm" type="pill-color" color={job.rework_round > 0 ? 'warning' : 'gray'}>
+                            {job.rework_round}/{job.max_rework_rounds}
+                          </BadgeWithDot>
+                          {(job.open_error_count ?? 0) > 0 && (
+                            <Badge size="sm" type="pill-color" color="error">
+                              {job.open_error_count} lỗi
+                            </Badge>
+                          )}
+                        </div>
                       </td>
                       <td className="px-5 py-3.5 text-right" onClick={(e) => e.stopPropagation()}>
                         <Button

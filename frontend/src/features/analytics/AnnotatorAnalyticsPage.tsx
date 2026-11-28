@@ -15,6 +15,7 @@ import { getAnnotatorAnalytics } from '../jobs/api'
 import AnnotatorBreadcrumb from '../jobs/components/AnnotatorBreadcrumb'
 import type { AnnotatorAnalytics, AnnotatorAnalyticsRange } from '../jobs/types'
 import { useProject } from '../projects/projectContext'
+import { buildContiguousRateRuns, formatAvgProductivitySubtitle } from './analyticsHelpers'
 
 /** Phân tích cá nhân của Annotator: năng suất, dự báo sản lượng và xếp hạng cá nhân. */
 export default function AnnotatorAnalyticsPage() {
@@ -77,9 +78,13 @@ export default function AnnotatorAnalyticsPage() {
         <>
           <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
             <AnalyticsKpiCard
-              title="Năng suất trung bình"
-              value={`${formatNumber(data.avg_productivity.objects_per_hour)} / giờ`}
-              subtitle={`${formatNumber(data.avg_productivity.total_objects)} cuboid ÷ ${data.avg_productivity.total_hours.toFixed(1).replace('.', ',')} giờ`}
+              title="Năng suất trung bình (ước tính)"
+              value={
+                data.avg_productivity.objects_per_hour != null
+                  ? `${formatNumber(data.avg_productivity.objects_per_hour)} / giờ`
+                  : '—'
+              }
+              subtitle={formatAvgProductivitySubtitle(data.avg_productivity)}
               icon={TrendUp01}
             />
 
@@ -93,7 +98,9 @@ export default function AnnotatorAnalyticsPage() {
             <AnalyticsKpiCard
               title="Xếp hạng sản lượng"
               value={`Hạng ${data.ranking.rank} / ${data.ranking.total_annotators}`}
-              subtitle={`trong ${data.ranking.total_annotators} Annotator · kỳ trước hạng ${data.ranking.previous_rank}`}
+              subtitle={`trong ${data.ranking.total_annotators} Annotator · ${
+                data.ranking.previous_rank != null ? `kỳ trước hạng ${data.ranking.previous_rank}` : 'kỳ trước chưa có dữ liệu'
+              }`}
               icon={BarChart02}
             />
           </div>
@@ -103,7 +110,7 @@ export default function AnnotatorAnalyticsPage() {
               className="lg:col-span-6"
               bodyClassName="flex flex-col justify-between"
               title="Năng suất theo ngày"
-              description="Cuboid / giờ làm thực tế, tách lần đầu / rework"
+              description="Cuboid / giờ phiên ước tính (ANNOTATING → Chờ QC1), tách lần đầu / rework"
             >
               <div>
                 <div className="flex items-center gap-5 text-xs text-tertiary">
@@ -121,7 +128,7 @@ export default function AnnotatorAnalyticsPage() {
               </div>
 
               <p className="mt-4 text-xs text-tertiary">
-                Ngày nghỉ không phát sinh sản lượng — không tính vào năng suất trung bình.
+                {data.avg_productivity.hours_provenance.description} Ngày nghỉ không phát sinh sản lượng không tính vào năng suất trung bình.
               </p>
             </SectionCard>
 
@@ -200,7 +207,19 @@ function AnalyticsKpiCard({
 function ProductivityLineChart({ data }: { data: AnnotatorAnalytics['daily_productivity'] }) {
   const active = data.filter((d) => !d.is_off_day)
   const points = active.length > 0 ? active : data
-  const maxRaw = Math.max(200, ...points.map((d) => Math.max(d.first_pass_per_hour, d.rework_per_hour)))
+  const nonNullRates = points.flatMap((d) =>
+    [d.first_pass_per_hour, d.rework_per_hour].filter((v): v is number => v != null),
+  )
+
+  if (nonNullRates.length === 0) {
+    return (
+      <div className="mt-4 flex h-[220px] items-center justify-center rounded-xl border border-dashed border-secondary bg-secondary_subtle px-4 text-center text-sm text-tertiary">
+        Chưa có phiên nộp đủ dữ liệu thời gian ước tính trong kỳ để vẽ biểu đồ.
+      </div>
+    )
+  }
+
+  const maxRaw = Math.max(200, ...nonNullRates)
   const maxY = Math.ceil(maxRaw / 50) * 50
 
   const width = 460
@@ -211,18 +230,13 @@ function ProductivityLineChart({ data }: { data: AnnotatorAnalytics['daily_produ
   const padB = 26
   const plotW = width - padL - padR
   const plotH = height - padT - padB
+  const baselineY = padT + plotH
 
   const xOf = (idx: number) => (points.length <= 1 ? padL + plotW / 2 : padL + (idx * plotW) / (points.length - 1))
   const yOf = (val: number) => padT + plotH - (val / maxY) * plotH
 
-  const fpCoords = points.map((d, i) => `${xOf(i).toFixed(1)},${yOf(d.first_pass_per_hour).toFixed(1)}`)
-  const rwCoords = points.map((d, i) => `${xOf(i).toFixed(1)},${yOf(d.rework_per_hour).toFixed(1)}`)
-
-  const areaPath =
-    points.length > 1
-      ? `M ${fpCoords[0]} L ${fpCoords.join(' L ')} L ${xOf(points.length - 1).toFixed(1)},${(padT + plotH).toFixed(1)} L ${xOf(0).toFixed(1)},${(padT + plotH).toFixed(1)} Z`
-      : ''
-
+  const fpRuns = buildContiguousRateRuns(points, (d) => d.first_pass_per_hour, xOf, yOf)
+  const rwRuns = buildContiguousRateRuns(points, (d) => d.rework_per_hour, xOf, yOf)
   const labelStep = Math.max(1, Math.ceil(points.length / 7))
 
   return (
@@ -248,29 +262,62 @@ function ProductivityLineChart({ data }: { data: AnnotatorAnalytics['daily_produ
           )
         })}
 
-        {areaPath && <path d={areaPath} fill="url(#fpAreaGrad)" />}
-        {fpCoords.length > 1 && (
-          <polyline fill="none" stroke="var(--color-bg-brand-solid)" strokeWidth="2.2" points={fpCoords.join(' ')} />
-        )}
-        {rwCoords.length > 1 && (
-          <polyline fill="none" stroke="var(--color-bg-warning-solid)" strokeWidth="2.2" points={rwCoords.join(' ')} />
+        {fpRuns.map((run) => {
+          if (run.length < 2) return null
+          const coords = run.map((p) => `${p.x.toFixed(1)},${p.y.toFixed(1)}`)
+          const areaD = `M ${coords[0]} L ${coords.join(' L ')} L ${run[run.length - 1].x.toFixed(1)},${baselineY.toFixed(1)} L ${run[0].x.toFixed(1)},${baselineY.toFixed(1)} Z`
+          return (
+            <g key={`fp-seg-${run[0].item.date}`}>
+              <path d={areaD} fill="url(#fpAreaGrad)" />
+              <polyline fill="none" stroke="var(--color-bg-brand-solid)" strokeWidth="2.2" points={coords.join(' ')} />
+            </g>
+          )
+        })}
+
+        {rwRuns.map((run) => {
+          if (run.length < 2) return null
+          const coords = run.map((p) => `${p.x.toFixed(1)},${p.y.toFixed(1)}`).join(' ')
+          return (
+            <polyline
+              key={`rw-seg-${run[0].item.date}`}
+              fill="none"
+              stroke="var(--color-bg-warning-solid)"
+              strokeWidth="2.2"
+              points={coords}
+            />
+          )
+        })}
+
+        {fpRuns.flatMap((run) =>
+          run.map((p) => (
+            <circle key={`fp-${p.item.date}`} cx={p.x} cy={p.y} r="3" fill="var(--color-bg-brand-solid)">
+              <title>{`${p.item.label} · Lần đầu: ${p.value}/giờ (ước tính)`}</title>
+            </circle>
+          )),
         )}
 
-        {points.map((d, i) => (
-          <g key={d.date}>
-            <circle cx={xOf(i)} cy={yOf(d.first_pass_per_hour)} r="3" fill="var(--color-bg-brand-solid)">
-              <title>{`${d.label} · Lần đầu: ${d.first_pass_per_hour}/giờ`}</title>
+        {rwRuns.flatMap((run) =>
+          run.map((p) => (
+            <circle key={`rw-${p.item.date}`} cx={p.x} cy={p.y} r="2.5" fill="var(--color-bg-warning-solid)">
+              <title>{`${p.item.label} · Rework: ${p.value}/giờ (ước tính)`}</title>
             </circle>
-            <circle cx={xOf(i)} cy={yOf(d.rework_per_hour)} r="2.5" fill="var(--color-bg-warning-solid)">
-              <title>{`${d.label} · Rework: ${d.rework_per_hour}/giờ`}</title>
-            </circle>
-            {i % labelStep === 0 && (
-              <text x={xOf(i)} y={height - 6} textAnchor="middle" fontSize="11" fill="var(--color-text-tertiary)">
-                {d.label}
-              </text>
-            )}
-          </g>
-        ))}
+          )),
+        )}
+
+        {points.map((d, i) =>
+          i % labelStep === 0 ? (
+            <text
+              key={`lbl-${d.date}`}
+              x={xOf(i)}
+              y={height - 6}
+              textAnchor="middle"
+              fontSize="11"
+              fill="var(--color-text-tertiary)"
+            >
+              {d.label}
+            </text>
+          ) : null,
+        )}
       </svg>
     </div>
   )

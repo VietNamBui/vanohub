@@ -5,6 +5,7 @@ import { TextArea } from '@/components/base/textarea/textarea'
 import FormDialog from '../../../shared/components/ui/FormDialog'
 import { useAction } from '../../../shared/hooks/useAction'
 import { createAnnotatorRequest } from '../api'
+import { formatErrorLocationSummary } from '../jobHelpers'
 import type { JobErrorBrief } from '../types'
 
 interface Props {
@@ -12,7 +13,6 @@ interface Props {
   projectId: number
   jobId: number
   jobName: string
-  teamLeaderName?: string | null
   errors: JobErrorBrief[]
   initialErrorId?: number | null
   onClose: () => void
@@ -50,8 +50,9 @@ function DisputeErrorForm({
     }
     setValidationError(null)
     const errObj = errors.find((er) => String(er.id) === selectedErrorId)
+    const locSummary = errObj ? formatErrorLocationSummary(errObj) : ''
     const title = errObj
-      ? `Không đồng ý lỗi '${errObj.category}'${errObj.location ? ` (${errObj.location})` : ''}`
+      ? `Không đồng ý lỗi '${errObj.category}'${locSummary ? ` (${locSummary})` : ''}`
       : reasonSummary.trim() || `Phản hồi lỗi QC1 · ${jobName}`
 
     const ok = await run(
@@ -73,10 +74,13 @@ function DisputeErrorForm({
 
   const options = [
     ...(errors.length === 0 ? [{ value: '', label: 'Không chọn lỗi cụ thể (phản hồi chung)' }] : []),
-    ...errors.map((err) => ({
-      value: String(err.id),
-      label: `${err.category}${err.location ? ` · ${err.location}` : ''}`,
-    })),
+    ...errors.map((err) => {
+      const summary = formatErrorLocationSummary(err)
+      return {
+        value: String(err.id),
+        label: `${err.category}${summary ? ` · ${summary}` : ''}`,
+      }
+    }),
   ]
 
   return (
@@ -91,6 +95,7 @@ function DisputeErrorForm({
     >
       <div className="flex flex-col gap-4">
         <NativeSelect
+          name="review_error"
           label="Lỗi và vị trí *"
           value={selectedErrorId}
           onChange={(e) => setSelectedErrorId(e.target.value)}
@@ -98,6 +103,7 @@ function DisputeErrorForm({
         />
 
         <Input
+          name="reason_summary"
           label="Lý do phản hồi *"
           placeholder="VD: Đối tượng bị che khuất hoàn toàn nên đúng quy tắc v2.3…"
           value={reasonSummary}
@@ -110,6 +116,7 @@ function DisputeErrorForm({
         />
 
         <TextArea
+          name="details"
           label="Bằng chứng / ghi chú thêm (không bắt buộc)"
           placeholder="Ghi rõ frame liên quan, mục hướng dẫn áp dụng hoặc ngữ cảnh trên CVAT…"
           rows={3}

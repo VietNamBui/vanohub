@@ -1,12 +1,12 @@
 from datetime import timedelta
 from typing import Any
 
-from django.db import transaction
+from django.db import IntegrityError, transaction
 from django.db.models import Count, Prefetch, Q
 from django.utils import timezone
 from rest_framework import mixins, status, viewsets
 from rest_framework.decorators import action as drf_action
-from rest_framework.exceptions import ValidationError
+from rest_framework.exceptions import NotFound, ValidationError
 from rest_framework.response import Response
 
 from accounts.datetime_utils import parse_int_param
@@ -57,18 +57,31 @@ class TeamViewSet(
         )
 
     def perform_create(self, serializer: Any) -> None:
-        team = serializer.save(project=self.project)
-        ActivityLog.record(project=self.project, actor=self.request.user, action="team.create", target=team)
+        try:
+            with transaction.atomic():
+                team = serializer.save(project=self.project)
+                ActivityLog.record(project=self.project, actor=self.request.user, action="team.create", target=team)
+        except IntegrityError as exc:
+            raise ValidationError({"name": "Dự án đã có team trùng tên."}) from exc
 
     def perform_update(self, serializer: Any) -> None:
-        team = serializer.save()
-        ActivityLog.record(
-            project=self.project,
-            actor=self.request.user,
-            action="team.update",
-            target=team,
-            after={"name": team.name},
-        )
+        instance = serializer.instance
+        try:
+            with transaction.atomic():
+                locked_team = Team.objects.select_for_update().filter(pk=instance.pk, project=self.project).first()
+                if locked_team is None:
+                    raise NotFound("Không tìm thấy team trong organization.")
+                serializer.instance = locked_team
+                team = serializer.save()
+                ActivityLog.record(
+                    project=self.project,
+                    actor=self.request.user,
+                    action="team.update",
+                    target=team,
+                    after={"name": team.name},
+                )
+        except IntegrityError as exc:
+            raise ValidationError({"name": "Dự án đã có team trùng tên."}) from exc
 
     @transaction.atomic
     def perform_destroy(self, instance: Any) -> None:
@@ -77,7 +90,9 @@ class TeamViewSet(
         Thông báo gửi riêng cho team này bị xoá theo — nếu giữ lại, target_team thành NULL
         và thông báo sẽ hiện cho cả dự án (rò rỉ ngoài nhóm nhận).
         """
-        team = instance
+        team = Team.objects.select_for_update().filter(pk=instance.pk, project=self.project).first()
+        if team is None:
+            raise NotFound("Không tìm thấy team trong organization.")
         ActivityLog.record(
             project=self.project,
             actor=self.request.user,
@@ -93,60 +108,75 @@ class TeamViewSet(
 
     @drf_action(detail=True, methods=["post"], url_path="add-member")
     def add_member(self, request: Any, project_id: Any, pk: Any = None) -> Response:
-        team = self.get_object()
+        team_obj = self.get_object()
         data = validated_dict(MemberInputSerializer(data=request.data, context=self.get_serializer_context()))
         user_id = data["user"].pk
         capacity: int = data["capacity"]
-        with transaction.atomic():
-            user = User.objects.select_for_update().get(pk=user_id)
-            has_role_here = RoleAssignment.objects.filter(user=user, project=self.project).exists()
-            if not has_role_here and (
-                user.is_superuser
-                or RoleAssignment.objects.filter(user=user).exclude(project=self.project).exists()
-            ):
-                raise ValidationError({"user": _INVALID_MEMBER_MSG})
-            existing = self._current_membership(user)
-            if existing:
-                raise ValidationError(f"{user} đã thuộc team {existing.team}. Dùng chức năng điều chuyển.")
-            # Thành viên team chưa có vai trò nào trong dự án → mặc định là Annotator.
-            if not has_role_here:
-                RoleAssignment.objects.create(
-                    user=user, role=Role.ANNOTATOR, project=self.project, granted_by=request.user
+        try:
+            with transaction.atomic():
+                team = Team.objects.select_for_update().filter(pk=team_obj.pk, project=self.project).first()
+                if team is None:
+                    raise NotFound("Không tìm thấy team trong organization.")
+                user = User.objects.select_for_update().filter(pk=user_id).first()
+                if user is None:
+                    raise ValidationError({"user": _INVALID_MEMBER_MSG})
+                has_role_here = RoleAssignment.objects.filter(user=user, project=self.project).exists()
+                if not has_role_here and (
+                    user.is_superuser
+                    or RoleAssignment.objects.filter(user=user).exclude(project=self.project).exists()
+                ):
+                    raise ValidationError({"user": _INVALID_MEMBER_MSG})
+                existing = self._current_membership(user)
+                if existing:
+                    raise ValidationError(f"{user} đã thuộc team {existing.team}. Dùng chức năng điều chuyển.")
+                # Thành viên team chưa có vai trò nào trong dự án → mặc định là Annotator.
+                if not has_role_here:
+                    RoleAssignment.objects.create(
+                        user=user, role=Role.ANNOTATOR, project=self.project, granted_by=request.user
+                    )
+                TeamMember.objects.create(team=team, user=user, capacity=capacity)
+                ActivityLog.record(
+                    project=self.project,
+                    actor=request.user,
+                    action="team.add_member",
+                    target=team,
+                    after={"user": user.username},
                 )
-            TeamMember.objects.create(team=team, user=user, capacity=capacity)
-            ActivityLog.record(
-                project=self.project,
-                actor=request.user,
-                action="team.add_member",
-                target=team,
-                after={"user": user.username},
-            )
+        except IntegrityError as exc:
+            raise ValidationError("Thành viên đã thuộc team hoặc dữ liệu xung đột.") from exc
         return Response(self.get_serializer(self.get_object()).data, status=status.HTTP_201_CREATED)
 
     @drf_action(detail=True, methods=["post"], url_path="remove-member")
     def remove_member(self, request: Any, project_id: Any, pk: Any = None) -> Response:
-        team = self.get_object()
+        team_obj = self.get_object()
         data = validated_dict(RemoveMemberSerializer(data=request.data))
         user_id: int = data["user"]
-        deleted, _ = TeamMember.objects.filter(team=team, user_id=user_id).delete()
-        if not deleted:
-            raise ValidationError("Người này không thuộc team.")
-        ActivityLog.record(
-            project=self.project,
-            actor=request.user,
-            action="team.remove_member",
-            target=team,
-            before={"user": user_id},
-        )
+        with transaction.atomic():
+            team = Team.objects.select_for_update().filter(pk=team_obj.pk, project=self.project).first()
+            if team is None:
+                raise NotFound("Không tìm thấy team trong organization.")
+            deleted, _ = TeamMember.objects.filter(team=team, user_id=user_id).delete()
+            if not deleted:
+                raise ValidationError("Người này không thuộc team.")
+            ActivityLog.record(
+                project=self.project,
+                actor=request.user,
+                action="team.remove_member",
+                target=team,
+                before={"user": user_id},
+            )
         return Response(self.get_serializer(self.get_object()).data)
 
     @drf_action(detail=True, methods=["post"], url_path="set-capacity")
     def set_capacity(self, request: Any, project_id: Any, pk: Any = None) -> Response:
-        team = self.get_object()
+        team_obj = self.get_object()
         data = validated_dict(MemberInputSerializer(data=request.data, context=self.get_serializer_context()))
         user: User = data["user"]
         capacity: int = data["capacity"]
         with transaction.atomic():
+            team = Team.objects.select_for_update().filter(pk=team_obj.pk, project=self.project).first()
+            if team is None:
+                raise NotFound("Không tìm thấy team trong organization.")
             member = TeamMember.objects.select_for_update().filter(team=team, user=user).first()
             if member is None:
                 raise ValidationError("Người này không thuộc team.")
@@ -168,26 +198,34 @@ class TeamViewSet(
         """Phân roster & luân chuyển: chuyển một người sang team khác trong cùng dự án."""
         data = validated_dict(TransferSerializer(data=request.data, context=self.get_serializer_context()))
         user_id = data["user"].pk
-        to_team: Team = data["to_team"]
-        with transaction.atomic():
-            user = User.objects.select_for_update().get(pk=user_id)
-            current = self._current_membership(user)
-            if current and current.team_id == to_team.id:
-                raise ValidationError("Người này đã ở team đích.")
-            if not user.get_project_roles(self.project):
-                raise ValidationError("Người này chưa có vai trò nào trong dự án.")
-            capacity = current.capacity if current else 5
-            if current:
-                current.delete()
-            TeamMember.objects.create(team=to_team, user=user, capacity=capacity)
-            ActivityLog.record(
-                project=self.project,
-                actor=request.user,
-                action="team.transfer",
-                target=to_team,
-                before={"team": current.team.name if current else None},
-                after={"team": to_team.name, "user": user.username},
-            )
+        to_team_obj: Team = data["to_team"]
+        try:
+            with transaction.atomic():
+                to_team = Team.objects.select_for_update().filter(pk=to_team_obj.pk, project=self.project).first()
+                if to_team is None:
+                    raise ValidationError({"to_team": "Team đích không thuộc dự án này."})
+                user = User.objects.select_for_update().filter(pk=user_id).first()
+                if user is None:
+                    raise ValidationError({"user": _INVALID_MEMBER_MSG})
+                current = self._current_membership(user)
+                if current and current.team_id == to_team.id:
+                    raise ValidationError("Người này đã ở team đích.")
+                if not user.get_project_roles(self.project):
+                    raise ValidationError("Người này chưa có vai trò nào trong dự án.")
+                capacity = current.capacity if current else 5
+                if current:
+                    current.delete()
+                TeamMember.objects.create(team=to_team, user=user, capacity=capacity)
+                ActivityLog.record(
+                    project=self.project,
+                    actor=request.user,
+                    action="team.transfer",
+                    target=to_team,
+                    before={"team": current.team.name if current else None},
+                    after={"team": to_team.name, "user": user.username},
+                )
+        except IntegrityError as exc:
+            raise ValidationError("Không thể điều chuyển thành viên do xung đột dữ liệu.") from exc
         return Response({"user": user.id, "team": to_team.id})
 
     @drf_action(detail=False)

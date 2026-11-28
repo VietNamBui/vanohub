@@ -15,12 +15,20 @@ import { useAction } from '../../../shared/hooks/useAction'
 import { useRequest } from '../../../shared/hooks/useRequest'
 import { formatDateTime } from '../../../shared/utils/format'
 import { createDelivery, listDeliveries, listDeliveryCandidates, updateDelivery } from '../api'
+import { computeDeliveryDh07Summary, validateDeliveryUpdateInput } from '../projectHelpers'
 import { useProject } from '../projectContext'
-import type { Delivery, DeliveryCandidate } from '../types'
+import type { Delivery, DeliveryCandidate, DueState } from '../types'
 
 const HTTP_URL_RE = /^https?:\/\//i
 
-/** Bàn giao task cho khách hàng khi mọi job đã ở trạng thái Đã duyệt và không còn đợt QC2 mở. */
+function DueStateBadge({ state }: { state: DueState }) {
+  if (state === 'overdue') return <Badge type="pill-color" size="sm" color="error">Quá hạn</Badge>
+  if (state === 'soon') return <Badge type="pill-color" size="sm" color="warning">Sắp hạn</Badge>
+  if (state === 'normal') return <Badge type="pill-color" size="sm" color="gray">Còn hạn</Badge>
+  return <span className="text-xs text-quaternary">Chưa đặt hạn</span>
+}
+
+/** Bàn giao task cho khách hàng khi mọi job đã ở trạng thái Đã duyệt, không có job khoá và không còn mẫu QC2 chờ kiểm. */
 export default function DeliveryPage() {
   const { projectId } = useProject()
   const [version, setVersion] = useState(0)
@@ -32,6 +40,7 @@ export default function DeliveryPage() {
 
   const candidateRows = (candidates.data ?? []).map((c) => ({ ...c, id: c.batch }))
   const historyRows = history.data ?? []
+  const dh07 = computeDeliveryDh07Summary(historyRows, candidateRows)
 
   return (
     <div className="mx-auto flex max-w-7xl flex-col gap-5 p-4 md:p-6">
@@ -43,9 +52,21 @@ export default function DeliveryPage() {
       <div className="flex items-start gap-3 rounded-xl bg-brand-primary_alt p-4 ring-1 ring-brand ring-inset">
         <InfoCircle className="mt-0.5 size-5 shrink-0 text-fg-brand-primary" />
         <p className="text-sm text-secondary">
-          Quy tắc hiện hành: chỉ bàn giao khi mọi job trong task đã ở trạng thái Đã duyệt và task không còn đợt QC2 đang mở.
+          Quy tắc hiện hành: chỉ bàn giao khi Project và Task đang hoạt động, mọi job trong task đã ở trạng thái Đã duyệt, không còn job bị khoá và không còn mẫu QC2 chờ kiểm.
         </p>
       </div>
+
+      {dh07.dueCount > 0 && (
+        <div className="flex flex-wrap items-center gap-3 rounded-xl bg-primary px-4 py-3 text-sm text-secondary ring-1 ring-secondary">
+          <span className="font-semibold text-primary">Tỷ lệ bàn giao đúng hạn (DH07):</span>
+          <Badge type="pill-color" size="sm" color={dh07.rate != null && dh07.rate >= 90 ? 'success' : 'warning'}>
+            {dh07.rate != null ? `${dh07.rate}%` : '—'}
+          </Badge>
+          <span className="text-xs text-tertiary tabular-nums">
+            Đúng hạn: {dh07.onTimeCount}/{dh07.dueCount} · Trễ hạn: {dh07.lateCount} · Quá hạn chưa giao: {dh07.overdueUndeliveredCount}
+          </span>
+        </div>
+      )}
 
       <SectionCard title="Task chờ bàn giao" bodyClassName="p-0">
         {candidates.error != null ? (
@@ -54,8 +75,9 @@ export default function DeliveryPage() {
           <Table aria-label="Task chờ bàn giao" size="sm">
             <Table.Header>
               <Table.Head id="task" label="Task" isRowHeader />
+              <Table.Head id="deadline" label="Deadline" />
               <Table.Head id="approved" label="Đã duyệt" />
-              <Table.Head id="audits" label="Đợt QC2 đang mở" />
+              <Table.Head id="samples" label="Mẫu QC2 chờ kiểm" />
               <Table.Head id="ready" label="Điều kiện" />
               <Table.Head id="actions" />
             </Table.Header>
@@ -65,10 +87,25 @@ export default function DeliveryPage() {
             >
               {(c) => {
                 const percent = c.job_count ? Math.round((c.approved_count * 100) / c.job_count) : 0
+                const pendingSamples = c.pending_qc2_samples ?? c.open_audits
+                const blockReason =
+                  c.status !== 'active' || c.dataset_status !== 'active'
+                    ? 'Project/Task đang khoá'
+                    : c.locked_jobs > 0
+                      ? `${c.locked_jobs} job đang khoá`
+                      : null
                 return (
                   <Table.Row id={c.id}>
                     <Table.Cell className="font-medium text-primary">
                       {c.dataset_name ? `${c.dataset_name} / ${c.batch_name}` : c.batch_name}
+                    </Table.Cell>
+                    <Table.Cell>
+                      <div className="flex flex-col items-start gap-1">
+                        <span className="text-xs whitespace-nowrap text-secondary tabular-nums">
+                          {formatDateTime(c.deadline)}
+                        </span>
+                        <DueStateBadge state={c.due_state} />
+                      </div>
                     </Table.Cell>
                     <Table.Cell>
                       <div className="flex w-44 items-center gap-3">
@@ -79,18 +116,26 @@ export default function DeliveryPage() {
                       </div>
                     </Table.Cell>
                     <Table.Cell className="tabular-nums">
-                      {c.open_audits > 0 ? (
-                        <Badge type="pill-color" size="sm" color="warning">{c.open_audits}</Badge>
-                      ) : (
-                        <span className="text-quaternary">0</span>
-                      )}
+                      <div className="flex flex-col items-start gap-1">
+                        {pendingSamples > 0 ? (
+                          <Badge type="pill-color" size="sm" color="warning">{pendingSamples}</Badge>
+                        ) : (
+                          <span className="text-quaternary">0</span>
+                        )}
+                        {c.in_progress_audits > 0 && (
+                          <span className="text-xs text-tertiary">{c.in_progress_audits} đợt đang mở</span>
+                        )}
+                      </div>
                     </Table.Cell>
                     <Table.Cell>
-                      {c.ready ? (
-                        <Badge type="pill-color" size="sm" color="success">Đủ điều kiện</Badge>
-                      ) : (
-                        <Badge type="pill-color" size="sm" color="gray">Chưa đủ</Badge>
-                      )}
+                      <div className="flex flex-col items-start gap-1">
+                        {c.ready ? (
+                          <Badge type="pill-color" size="sm" color="success">Đủ điều kiện</Badge>
+                        ) : (
+                          <Badge type="pill-color" size="sm" color="gray">Chưa đủ</Badge>
+                        )}
+                        {blockReason && <span className="text-xs text-tertiary">{blockReason}</span>}
+                      </div>
                     </Table.Cell>
                     <Table.Cell className="text-right">
                       <Button
@@ -118,6 +163,8 @@ export default function DeliveryPage() {
           <Table aria-label="Lịch sử bàn giao" size="sm">
             <Table.Header>
               <Table.Head id="task" label="Task" isRowHeader />
+              <Table.Head id="deadline" label="Deadline" />
+              <Table.Head id="on_time" label="Đúng hạn" />
               <Table.Head id="recipient" label="Người nhận" />
               <Table.Head id="output" label="Đường dẫn đầu ra" />
               <Table.Head id="jobs" label="Số job" />
@@ -135,6 +182,16 @@ export default function DeliveryPage() {
                 <Table.Row id={d.id}>
                   <Table.Cell className="font-medium text-primary">
                     {d.dataset_name ? `${d.dataset_name} / ${d.batch_name}` : d.batch_name}
+                  </Table.Cell>
+                  <Table.Cell className="whitespace-nowrap tabular-nums">{formatDateTime(d.deadline)}</Table.Cell>
+                  <Table.Cell>
+                    {d.is_on_time === true ? (
+                      <Badge type="pill-color" size="sm" color="success">Đúng hạn</Badge>
+                    ) : d.is_on_time === false ? (
+                      <Badge type="pill-color" size="sm" color="error">Trễ hạn</Badge>
+                    ) : (
+                      <span className="text-quaternary">—</span>
+                    )}
                   </Table.Cell>
                   <Table.Cell className="max-w-44 truncate text-secondary" title={d.recipient || undefined}>
                     {d.recipient || <span className="text-quaternary">—</span>}
@@ -174,7 +231,7 @@ export default function DeliveryPage() {
                   </Table.Cell>
                   <Table.Cell className="text-right">
                     <Button size="xs" color="link-color" iconLeading={Edit05} onPress={() => setFeedbackFor(d)}>
-                      Ghi phản hồi
+                      Cập nhật
                     </Button>
                   </Table.Cell>
                 </Table.Row>
@@ -309,24 +366,34 @@ function FeedbackDialog({
   onClose: () => void
   onDone: () => void
 }) {
+  const [recipient, setRecipient] = useState(delivery.recipient ?? '')
+  const [outputPath, setOutputPath] = useState(delivery.output_path ?? '')
   const [clientFeedback, setClientFeedback] = useState(delivery.client_feedback ?? '')
   const [note, setNote] = useState(delivery.note ?? '')
+  const [showErrors, setShowErrors] = useState(false)
   const [submitError, setSubmitError] = useState<string | null>(null)
   const { run, pending } = useAction()
   const taskLabel = delivery.dataset_name ? `${delivery.dataset_name} / ${delivery.batch_name}` : delivery.batch_name
 
+  const validation = validateDeliveryUpdateInput({
+    recipient,
+    output_path: outputPath,
+    note,
+    client_feedback: clientFeedback,
+  })
+
   async function submit() {
+    setShowErrors(true)
     setSubmitError(null)
+    if (!validation.valid || !validation.payload) return
+    const payload = validation.payload
     const updated = await run(
       () =>
-        updateDelivery(projectId, delivery.id, {
-          client_feedback: clientFeedback.trim(),
-          note: note.trim(),
-        }).catch((err: unknown) => {
+        updateDelivery(projectId, delivery.id, payload).catch((err: unknown) => {
           setSubmitError(getErrorMessage(err))
           throw err
         }),
-      'Đã lưu phản hồi',
+      'Đã cập nhật thông tin bàn giao',
     )
     if (updated) onDone()
   }
@@ -334,13 +401,33 @@ function FeedbackDialog({
   return (
     <FormDialog
       isOpen
-      title="Phản hồi khách hàng"
+      title="Cập nhật thông tin bàn giao"
       description={taskLabel}
-      submitLabel="Lưu"
+      submitLabel="Lưu thay đổi"
       onClose={onClose}
       onSubmit={submit}
       pending={pending}
     >
+      <Input
+        label="Người nhận / Khách hàng"
+        size="sm"
+        isRequired
+        value={recipient}
+        onChange={setRecipient}
+        isInvalid={showErrors && Boolean(validation.recipientError)}
+        hint={showErrors ? (validation.recipientError ?? undefined) : undefined}
+        placeholder="Tên khách hàng hoặc đơn vị nhận"
+      />
+      <Input
+        label="Đường dẫn đầu ra / Link bàn giao"
+        size="sm"
+        isRequired
+        value={outputPath}
+        onChange={setOutputPath}
+        isInvalid={showErrors && Boolean(validation.outputPathError)}
+        hint={showErrors ? (validation.outputPathError ?? undefined) : undefined}
+        placeholder="VD: s3://bucket/path hoặc https://..."
+      />
       <TextArea
         label="Phản hồi khách hàng"
         rows={4}

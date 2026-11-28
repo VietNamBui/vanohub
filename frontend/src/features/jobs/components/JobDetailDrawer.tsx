@@ -78,13 +78,19 @@ export default function JobDetailDrawer({ jobId, onClose, onChanged }: Props) {
         job && canManage ? (
           <div className="flex flex-wrap items-center justify-end gap-2">
             {job.is_escalated && (
-              <Button size="sm" color="secondary-destructive" onPress={() => setModal('escalation')}>
+              <Button
+                size="sm"
+                color="secondary-destructive"
+                isDisabled={getJobLockReason(canManage, job) !== null}
+                onPress={() => setModal('escalation')}
+              >
                 Xử lý escalation
               </Button>
             )}
             <Button
               size="sm"
               color="secondary"
+              isDisabled={job.status === 'delivered'}
               isLoading={pending}
               onPress={() => act(() => setJobLock(projectId, job.id, !job.is_locked), job.is_locked ? 'Đã mở khoá' : 'Đã khoá job')}
             >

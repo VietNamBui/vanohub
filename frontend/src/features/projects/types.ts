@@ -8,8 +8,18 @@ export interface ProjectSummary {
   id: number
   name: string
   description: string
+  /** CVAT organization ứng với "Organization" này (null nếu tạo nội bộ / demo). */
+  cvat_org_id: number | null
+  cvat_org_slug: string
+  cvat_synced_at: string | null
   created_at: string
   my_roles: Role[] // vai trò có hiệu lực (đã gồm PM → QC2)
+  project_managers: UserBrief[]
+  job_count: number
+  done_count: number
+  overdue_count: number
+  escalated_count: number
+  progress_percent: number
 }
 
 export interface ProjectDetail extends ProjectSummary {
@@ -17,28 +27,50 @@ export interface ProjectDetail extends ProjectSummary {
   member_counts: Partial<Record<Role, number>>
   member_total: number
   my_capabilities: Capability[]
-  /** CVAT organization ứng với "Organization" này (model Project). */
-  cvat_org_id: number | null
-  cvat_org_slug: string
-  escalation_policy?: EscalationPolicy
+  escalation_policy: EscalationPolicy
+  max_rework_rounds: number
+  annotator_wip_limit: number
+}
+
+export interface ProjectWriteInput {
+  name: string
+  description?: string
   max_rework_rounds?: number
+  escalation_policy?: EscalationPolicy
   annotator_wip_limit?: number
+  pm_ids?: number[]
 }
 
 export type SamplingMethod = 'random' | 'stratified'
 export type StratifyBy = 'annotator' | 'qc1_reviewer' | 'dataset'
 
 export interface ProjectSettings {
+  cvat_org_id: number | null
+  cvat_org_slug: string
+  cvat_synced_at: string | null
   max_rework_rounds: number
-  escalation_policy?: EscalationPolicy
-  annotator_wip_limit?: number
+  escalation_policy: EscalationPolicy
+  annotator_wip_limit: number
+  sampling_method: SamplingMethod
   /** % số frame của mỗi job QC2 kiểm (mọi job qua QC1 đều được kiểm). */
   sampling_rate: number
+  stratify_by: StratifyBy
   quality_cl_threshold: string | null
   defect_rate_threshold: string | null
   kpi_annotation_target: number | null
   kpi_qc1_target: number | null
   kpi_qc2_target: number | null
+}
+
+export type ProjectSettingsUpdateInput = Partial<
+  Omit<ProjectSettings, 'cvat_org_id' | 'cvat_org_slug' | 'cvat_synced_at'>
+>
+
+export interface CvatStatus {
+  connected: boolean
+  url: string
+  version?: string
+  detail?: string
 }
 
 export interface Member {
@@ -111,20 +143,22 @@ export interface Batch {
   deadline: string | null
   team: number | null
   team_name: string | null
-  source_missing?: boolean
+  source_missing: boolean
   last_synced_at: string | null
-  last_sync_status?: SyncStatus
-  last_sync_error?: string
-  qc2_confirmed_at?: string | null
-  qc2_confirmed_by?: UserBrief | number | null
+  last_sync_status: SyncStatus
+  last_sync_error: string
+  qc2_confirmed_at: string | null
+  qc2_confirmed_by: UserBrief | null
   created_at: string
   job_count: number
   done_count: number
-  qc1_passed_count?: number
-  blocking_qc2_count?: number
+  qc1_passed_count: number
+  blocking_qc2_count: number
   pending_qc2_count: number
   escalated_count: number
-  ready_for_qc2_confirm?: boolean
+  pending_qc2_samples: number
+  locked_jobs: number
+  ready_for_qc2_confirm: boolean
 }
 
 export interface CvatLabel {
@@ -158,7 +192,9 @@ export interface Delivery {
   id: number
   batch: number
   batch_name: string
-  dataset_name?: string
+  dataset_name: string
+  deadline: string | null
+  is_on_time: boolean | null
   recipient: string
   output_path: string
   note: string
@@ -168,12 +204,22 @@ export interface Delivery {
   job_count: number
 }
 
+export type DueState = 'overdue' | 'soon' | 'normal' | 'none'
+
 export interface DeliveryCandidate {
   batch: number
   batch_name: string
-  dataset_name?: string
+  dataset_name: string
+  status: DataStatus
+  dataset_status: DataStatus
+  deadline: string | null
+  is_overdue: boolean
+  due_state: DueState
   job_count: number
   approved_count: number
+  locked_jobs: number
+  pending_qc2_samples: number
+  in_progress_audits: number
   open_audits: number
   ready: boolean
 }
@@ -222,34 +268,74 @@ export interface Metric {
   formula: string
 }
 
+export interface DeliveryReadinessMetric extends Metric {
+  ready_batches?: number
+  delivered_batches?: number
+  total_batches?: number
+}
+
+export interface DeliveryOnTimeMetric extends Metric {
+  on_time_deliveries?: number
+  due_deliveries?: number
+  late_deliveries?: number
+  overdue_undelivered?: number
+}
+
+export interface RatioMetric extends Metric {
+  passed?: number
+  resolved?: number
+  total?: number
+}
+
 export interface ProjectOverview {
-  counts: { datasets: number; batches: number; jobs: number; escalated: number; overdue: number }
+  counts: {
+    datasets: number
+    batches: number
+    ready_batches: number
+    delivered_batches: number
+    overdue_batches: number
+    jobs: number
+    remaining_jobs: number
+    escalated: number
+    overdue: number
+  }
   by_status: Record<string, number>
   by_stage: Record<'annotation' | 'qc1' | 'qc2' | 'done', number>
-  pending_decisions?: {
-    batches_ready_for_qc2_confirm?: number
-    batches_ready_for_qc2?: number
-    pending_qc2_samples?: number
-    pending_requests?: number
-    escalated_jobs?: number
-    escalated?: number
-    total?: number
+  stage_progress: {
+    annotation_passed: number
+    qc1_passed: number
+    qc2_approved: number
   }
-  metrics: Record<
-    | 'total_objects'
-    | 'total_frames'
-    | 'progress'
-    | 'delivery_readiness'
-    | 'rework_rate'
-    | 'first_pass_yield'
-    | 'qc2_pass_rate'
-    | 'quality_cl'
-    | 'defect_error_rate'
-    | 'estimated_completion'
-    | 'submitted_in_period'
-    | 'active_members',
-    Metric
-  >
+  pending_decisions: {
+    batches_ready_for_qc2_confirm: number
+    batches_ready_for_qc2: number
+    pending_qc2_samples: number
+    pending_requests: number
+    escalated_jobs: number
+    escalated: number
+    total: number
+  }
+  errors_by_category: { category: string; count: number }[]
+  errors_by_severity: { minor: number; major: number; critical: number }
+  metrics: {
+    total_objects: Metric
+    total_frames: Metric
+    progress: Metric
+    remaining_jobs: Metric
+    delivery_readiness: DeliveryReadinessMetric
+    delivered_rate: Metric
+    delivery_on_time_rate: DeliveryOnTimeMetric
+    rework_rate: Metric
+    first_pass_yield: RatioMetric
+    qc2_pass_rate: Metric
+    quality_cl: Metric
+    defect_error_rate: Metric
+    defect_rate_by_severity: Metric
+    dispute_overturn_rate: RatioMetric
+    estimated_completion: Metric
+    submitted_in_period: Metric
+    active_members: Metric
+  }
   thresholds: { quality_cl: string | null; defect_error_rate: string | null }
   alerts: { level: 'error' | 'warning' | 'info'; type: string; job: number; message: string }[]
 }
@@ -263,6 +349,9 @@ export interface TeamRanking {
     jobs: number
     done: number
     objects_done: number
+    objects_produced: number
+    first_pass_objects: number
+    rework_objects: number
     rework_rate: number | null
     escalated: number
     qc2_errors: number
@@ -274,6 +363,9 @@ export interface MemberPerformance {
   jobs: number
   done: number
   objects_done: number
+  first_pass_objects: number
+  rework_objects: number
+  total_objects: number
   rework_rate: number | null
 }
 

@@ -6,7 +6,6 @@ import { Button } from '@/components/base/buttons/button'
 import { Input } from '@/components/base/input/input'
 import { ProgressBarBase } from '@/components/base/progress-indicators/progress-indicators'
 import { TextArea } from '@/components/base/textarea/textarea'
-import { useShell } from '../../../layouts/ShellContext'
 import { getErrorMessage } from '../../../shared/api/errors'
 import FormDialog from '../../../shared/components/ui/FormDialog'
 import PageState from '../../../shared/components/ui/PageState'
@@ -23,9 +22,10 @@ import AnnotatorBreadcrumb from '../components/AnnotatorBreadcrumb'
 import DisputeErrorModal from '../components/DisputeErrorModal'
 import JobStatusBadge from '../components/JobStatusBadge'
 import ReportDataIssueModal from '../components/ReportDataIssueModal'
+import ReviewErrorChips from '../components/ReviewErrorChips'
 import { ACTION_LABELS, formatDeadlineCountdown, JOB_STATUS_LABELS } from '../constants'
-import { splitActiveErrors } from '../jobHelpers'
-import type { JobErrorBrief, JobStatus } from '../types'
+import { isJobEscalationBlocked, isJobEscalationWarnOnly, parseOptionalInt, splitActiveErrors } from '../jobHelpers'
+import type { JobStatus } from '../types'
 
 const SEVERITY_BADGE: Record<string, 'gray' | 'warning' | 'error'> = {
   minor: 'gray',
@@ -44,52 +44,12 @@ function extractChecklist(markdown?: string): string[] {
   return headings.slice(0, 5)
 }
 
-function CuboidErrorChips({ err }: { err: JobErrorBrief }) {
-  const hasAny =
-    err.frame_number != null ||
-    err.cvat_object_id != null ||
-    Boolean(err.is_missing_object) ||
-    err.verdict === 'edge' ||
-    err.verdict === 'fail'
-  if (!hasAny) return null
-  return (
-    <div className="mt-1 flex flex-wrap gap-1">
-      {err.frame_number != null && (
-        <Badge size="sm" type="pill-color" color="gray">
-          Frame #{err.frame_number}
-        </Badge>
-      )}
-      {err.cvat_object_id != null && (
-        <Badge size="sm" type="pill-color" color="blue">
-          Object #{err.cvat_object_id}
-        </Badge>
-      )}
-      {err.is_missing_object && (
-        <Badge size="sm" type="pill-color" color="orange">
-          Thiếu đối tượng
-        </Badge>
-      )}
-      {err.verdict === 'edge' && (
-        <Badge size="sm" type="pill-color" color="warning">
-          Cận biên
-        </Badge>
-      )}
-      {err.verdict === 'fail' && (
-        <Badge size="sm" type="pill-color" color="error">
-          Lỗi
-        </Badge>
-      )}
-    </div>
-  )
-}
-
 /** Trang chi tiết Job chuyên biệt cho Annotator (/projects/:projectId/annotator/jobs/:jobId). */
 export default function AnnotatorJobDetailPage() {
   const { projectId, project } = useProject()
   const { jobId: jobIdParam } = useParams()
   const jobId = Number(jobIdParam)
   const navigate = useNavigate()
-  const { teamLeaderName } = useShell()
   const { run, pending } = useAction()
 
   const [version, setVersion] = useState(0)
@@ -124,12 +84,13 @@ export default function AnnotatorJobDetailPage() {
     if (!job) return
     const trimmed = submitObjects.trim()
     let parsed: number | undefined
-    if (trimmed !== '') {
-      if (!/^\d+$/.test(trimmed)) {
-        setSubmitObjectsError('Vui lòng nhập số nguyên không âm (ví dụ: 120).')
+    if (job.cvat_job_id == null && trimmed !== '') {
+      const objParsed = parseOptionalInt(trimmed, 0)
+      if (!objParsed.valid) {
+        setSubmitObjectsError('Vui lòng nhập số nguyên từ 0 đến 2.147.483.647.')
         return
       }
-      parsed = Number(trimmed)
+      parsed = objParsed.value ?? undefined
     }
     setSubmitObjectsError(null)
     const ok = await run(
@@ -145,12 +106,12 @@ export default function AnnotatorJobDetailPage() {
   const countdown = formatDeadlineCountdown(job?.hours_remaining)
   const target = job ? job.target_object_count || job.object_count : 0
   const pct = job?.progress_percent ?? 0
-  const escalationPolicy = job?.escalation_policy ?? project.escalation_policy ?? 'block'
-  const isEscalatedWarnOnly = Boolean(job?.is_escalated && escalationPolicy === 'warn_only')
-  const isEscalatedBlocked = Boolean(job?.is_escalated && escalationPolicy !== 'warn_only')
+  const isEscalatedWarnOnly = Boolean(job && isJobEscalationWarnOnly(job, project.escalation_policy))
+  const isEscalatedBlocked = Boolean(job && isJobEscalationBlocked(job, project.escalation_policy))
   const isBlocked = Boolean(job?.is_locked || isEscalatedBlocked)
   const canStart = Boolean(job && !isBlocked && (job.status === 'pending_annotation' || job.status === 'rework'))
   const canSubmit = Boolean(job && !isBlocked && job.status === 'annotating')
+  const canReportDataIssue = Boolean(job && job.status !== 'approved' && job.status !== 'delivered')
 
   const { active: activeErrors, history: historyErrors } = job
     ? splitActiveErrors(job, job.errors)
@@ -184,14 +145,16 @@ export default function AnnotatorJobDetailPage() {
               </p>
             </div>
             <div className="flex flex-wrap items-center gap-3">
-              <Button
-                color="secondary"
-                size="md"
-                iconLeading={AlertTriangle}
-                onPress={() => setDataIssueOpen(true)}
-              >
-                Báo vấn đề dữ liệu
-              </Button>
+              {canReportDataIssue && (
+                <Button
+                  color="secondary"
+                  size="md"
+                  iconLeading={AlertTriangle}
+                  onPress={() => setDataIssueOpen(true)}
+                >
+                  Báo vấn đề dữ liệu
+                </Button>
+              )}
               {job.cvat_url ? (
                 <Button
                   color="secondary"
@@ -330,8 +293,13 @@ export default function AnnotatorJobDetailPage() {
                           {activeErrors.map((err) => (
                             <tr key={err.id}>
                               <td className="px-5 py-3.5">
-                                <div className="font-semibold text-primary">{err.category}</div>
-                                <CuboidErrorChips err={err} />
+                                <div className="flex flex-wrap items-center gap-1.5">
+                                  <span className="font-semibold text-primary">{err.category}</span>
+                                  <Badge size="sm" type="color" color="gray">
+                                    {err.stage.toUpperCase()}
+                                  </Badge>
+                                </div>
+                                <ReviewErrorChips err={err} />
                                 {err.location && <div className="mt-1 text-xs text-secondary">{err.location}</div>}
                                 {err.description && <div className="mt-0.5 text-xs text-tertiary">{err.description}</div>}
                               </td>
@@ -377,16 +345,16 @@ export default function AnnotatorJobDetailPage() {
                                   {err.category}
                                 </span>
                                 {err.is_voided ? (
-                                  <Badge size="sm" type="pill-color" color="gray">
-                                    Đã huỷ lỗi
+                                  <Badge size="sm" type="color" color="gray">
+                                    {err.stage.toUpperCase()} · vòng {err.rework_round}
                                   </Badge>
                                 ) : (
                                   <Badge size="sm" type="pill-color" color="gray">
-                                    Vòng {err.rework_round}
+                                    {err.stage.toUpperCase()} · vòng {err.rework_round}
                                   </Badge>
                                 )}
                               </div>
-                              <CuboidErrorChips err={err} />
+                              <ReviewErrorChips err={err} />
                               {err.location && (
                                 <div className={`mt-1 text-xs text-tertiary ${err.is_voided ? 'line-through' : ''}`}>
                                   {err.location}
@@ -484,7 +452,6 @@ export default function AnnotatorJobDetailPage() {
             projectId={projectId}
             jobId={job.id}
             jobName={job.name}
-            teamLeaderName={teamLeaderName}
             errors={activeErrors}
             initialErrorId={disputeErrorId}
             onClose={() => setDisputeOpen(false)}
@@ -513,13 +480,14 @@ export default function AnnotatorJobDetailPage() {
               <Input
                 label="Số object-frame đã hoàn tất (không bắt buộc)"
                 placeholder="Để trống để giữ nguyên số hiện tại"
+                isDisabled={job.cvat_job_id != null}
                 value={submitObjects}
                 onChange={(v) => {
                   setSubmitObjects(v)
                   if (submitObjectsError) setSubmitObjectsError(null)
                 }}
-                isInvalid={!!submitObjectsError}
-                hint={submitObjectsError ?? undefined}
+                isInvalid={job.cvat_job_id == null && !!submitObjectsError}
+                hint={job.cvat_job_id != null ? 'Đồng bộ tự động từ CVAT' : (submitObjectsError ?? undefined)}
               />
               <TextArea
                 label="Ghi chú cho QC1 (không bắt buộc)"

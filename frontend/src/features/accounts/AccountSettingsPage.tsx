@@ -5,11 +5,12 @@ import { Badge } from '@/components/base/badges/badges'
 import { Button } from '@/components/base/buttons/button'
 import { Input } from '@/components/base/input/input'
 import { Toggle } from '@/components/base/toggle/toggle'
+import RoleBadges from '../../shared/components/RoleBadges'
 import SectionCard from '../../shared/components/ui/SectionCard'
 import { useAction } from '../../shared/hooks/useAction'
-import { ROLE_LABELS, type Role } from '../../shared/types/roles'
+import type { Role } from '../../shared/types/roles'
 import { changePassword, updateCurrentUser } from '../auth/api'
-import type { CurrentUser } from '../auth/types'
+import type { CurrentUser, UserProjectScope } from '../auth/types'
 import { useAuth } from '../auth/useAuth'
 import AnnotatorBreadcrumb from '../jobs/components/AnnotatorBreadcrumb'
 
@@ -43,14 +44,16 @@ export default function AccountSettingsPage() {
   const userSyncKey = `${user?.id ?? 0}:${user?.email ?? ''}:${user?.timezone_name ?? ''}:${user?.avatar_url ?? ''}:${getFullName(user)}`
   const notifSyncKey = `${user?.id ?? 0}:${user?.notify_rework}:${user?.notify_deadline}:${user?.notify_request_updates}:${user?.notify_qc_pass}`
 
-  const scopedRoles: Role[] = (user?.role_assignments ?? [])
-    .filter((ra) => projectId === null || ra.project === projectId || ra.project === null)
-    .map((ra) => ra.role)
-  const uniqueRoles = [...new Set(scopedRoles)]
-  const primaryRole = uniqueRoles[0] ? ROLE_LABELS[uniqueRoles[0]] : 'Thành viên'
+  const userProjects: UserProjectScope[] = user?.projects ?? []
+  const scopedProject = projectId !== null ? userProjects.find((p) => p.id === projectId) ?? null : null
+  const fallbackRoles = [...new Set((user?.role_assignments ?? []).filter((ra) => projectId === null || ra.project === projectId).map((ra) => ra.role))]
+  const scopedRoles: Role[] =
+    projectId !== null
+      ? scopedProject?.roles ?? fallbackRoles
+      : [...new Set(userProjects.length > 0 ? userProjects.flatMap((p) => p.roles) : fallbackRoles)]
   const scopedProjectName =
-    user?.role_assignments.find((ra) => ra.project === projectId)?.project_name ||
-    user?.role_assignments.find((ra) => ra.project_name)?.project_name ||
+    scopedProject?.name ||
+    (projectId !== null ? user?.role_assignments.find((ra) => ra.project === projectId)?.project_name : '') ||
     ''
   const cvatLinkPath = projectId ? `/projects/${projectId}/cvat-link` : '/cvat-link'
 
@@ -74,8 +77,10 @@ export default function AccountSettingsPage() {
           <ProfileTab
             key={userSyncKey}
             user={user}
-            primaryRole={primaryRole}
+            projectId={projectId}
+            scopedRoles={scopedRoles}
             scopedProjectName={scopedProjectName}
+            userProjects={userProjects}
             cvatLinkPath={cvatLinkPath}
             onSaved={setUser}
           />
@@ -95,14 +100,18 @@ export default function AccountSettingsPage() {
 
 function ProfileTab({
   user,
-  primaryRole,
+  projectId,
+  scopedRoles,
   scopedProjectName,
+  userProjects,
   cvatLinkPath,
   onSaved,
 }: {
   user: CurrentUser | null
-  primaryRole: string
+  projectId: number | null
+  scopedRoles: Role[]
   scopedProjectName: string
+  userProjects: UserProjectScope[]
   cvatLinkPath: string
   onSaved: (u: CurrentUser) => void
 }) {
@@ -190,19 +199,41 @@ function ProfileTab({
             </div>
           </div>
 
-          <div className="grid grid-cols-1 gap-4 py-5 md:grid-cols-12 md:items-center">
-            <label className="text-sm font-semibold text-secondary md:col-span-4">Vai trò & CVAT</label>
-            <div className="flex flex-wrap items-center gap-3 md:col-span-8">
-              <Badge size="md" type="pill-color" color="gray">
-                {primaryRole}
-              </Badge>
-              {scopedProjectName && <span className="text-sm text-tertiary">{scopedProjectName}</span>}
-              <Badge size="md" type="pill-color" color={user?.cvat_linked ? 'success' : 'warning'}>
-                {user?.cvat_linked ? `CVAT: ${user.cvat_username}` : 'Chưa liên kết CVAT'}
-              </Badge>
-              <Link to={cvatLinkPath} className="text-sm font-semibold text-brand-secondary hover:text-brand-secondary_hover hover:underline">
-                Quản lý liên kết CVAT
-              </Link>
+          <div className="grid grid-cols-1 gap-4 py-5 md:grid-cols-12 md:items-start">
+            <label className="text-sm font-semibold text-secondary md:col-span-4 md:pt-1">Vai trò & CVAT</label>
+            <div className="flex flex-col gap-3 md:col-span-8">
+              {projectId !== null ? (
+                <div className="flex flex-wrap items-center gap-2">
+                  <RoleBadges roles={scopedRoles} />
+                  {scopedProjectName && <span className="text-sm text-tertiary">{scopedProjectName}</span>}
+                </div>
+              ) : userProjects.length > 0 ? (
+                <ul className="flex flex-col gap-2">
+                  {userProjects.map((proj) => (
+                    <li key={proj.id} className="flex flex-wrap items-center gap-2">
+                      <Link
+                        to={`/projects/${proj.id}`}
+                        className="text-sm font-medium text-secondary hover:text-brand-secondary hover:underline"
+                      >
+                        {proj.name}
+                      </Link>
+                      <RoleBadges roles={proj.roles} />
+                    </li>
+                  ))}
+                </ul>
+              ) : (
+                <div className="flex flex-wrap items-center gap-2">
+                  <RoleBadges roles={scopedRoles} />
+                </div>
+              )}
+              <div className="flex flex-wrap items-center gap-3">
+                <Badge size="md" type="pill-color" color={user?.cvat_linked ? 'success' : 'warning'}>
+                  {user?.cvat_linked ? `CVAT: ${user.cvat_username}` : 'Chưa liên kết CVAT'}
+                </Badge>
+                <Link to={cvatLinkPath} className="text-sm font-semibold text-brand-secondary hover:text-brand-secondary_hover hover:underline">
+                  Quản lý liên kết CVAT
+                </Link>
+              </div>
             </div>
           </div>
 

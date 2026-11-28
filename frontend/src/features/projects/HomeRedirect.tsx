@@ -14,7 +14,7 @@ import { getLastProjectId } from './lastProject'
  */
 export default function HomeRedirect() {
   const { user } = useAuth()
-  const isPm = user?.role_assignments.some((a) => a.role === 'project_manager') ?? false
+  const isPm = user?.is_pm ?? user?.role_assignments.some((a) => a.role === 'project_manager') ?? false
   if (isPm) return <Navigate to="/projects" replace />
   return <OpenLastProject />
 }

@@ -1,4 +1,4 @@
-import { ChevronDown, ChevronRight, LinkExternal01, Lock01, LockUnlocked01, SearchLg } from '@untitledui/icons'
+import { AlertTriangle, ChevronDown, ChevronRight, LinkExternal01, Lock01, LockUnlocked01, SearchLg } from '@untitledui/icons'
 import { Fragment, useState } from 'react'
 import { Link } from 'react-router'
 import { Tabs } from '@/components/application/tabs/tabs'
@@ -10,6 +10,7 @@ import PageState from '../../../shared/components/ui/PageState'
 import SectionCard from '../../../shared/components/ui/SectionCard'
 import { useAction } from '../../../shared/hooks/useAction'
 import { useRequest } from '../../../shared/hooks/useRequest'
+import { cvatProjectUrl } from '../../../shared/utils/cvat'
 import { formatDateTime } from '../../../shared/utils/format'
 import { getCvatStatus, getDatasetLabels, listDatasets, setDatasetLock } from '../api'
 import CvatSyncButton from '../components/CvatSyncButton'
@@ -38,11 +39,12 @@ export default function DatasetsPage() {
   const { data, error, isLoading, retry } = useRequest(`datasets:${projectId}:${status}:${version}`, () =>
     listDatasets(projectId, { status }),
   )
-  const { data: cvat } = useRequest('cvat-status', getCvatStatus)
+  const { data: cvat, retry: retryCvat } = useRequest('cvat-status', getCvatStatus)
   const reload = () => setVersion((v) => v + 1)
   const canManage = can('manage_data')
   const linked = org.cvat_org_id != null
   const cvatBase = cvat?.url?.replace(/\/$/, '') ?? ''
+  const cvatDisconnected = cvat?.connected === false
 
   const keyword = search.trim().toLowerCase()
   const rows = (data ?? []).filter((d) => !keyword || d.name.toLowerCase().includes(keyword))
@@ -57,12 +59,27 @@ export default function DatasetsPage() {
             Tạo project và task trên CVAT; bấm Đồng bộ để cập nhật.
           </p>
         </div>
-        {canManage && linked && <CvatSyncButton projectId={projectId} onDone={reload} />}
+        {canManage && linked && <CvatSyncButton projectId={projectId} onDone={reload} disabled={cvatDisconnected} />}
       </header>
 
       {!linked && (
         <div className="rounded-xl bg-secondary p-4 text-sm text-tertiary">
           Organization này chưa gắn với CVAT organization (dữ liệu demo / tạo tay) — không đồng bộ được từ CVAT.
+        </div>
+      )}
+
+      {linked && cvatDisconnected && (
+        <div
+          role="alert"
+          className="flex flex-wrap items-center justify-between gap-3 rounded-xl bg-warning-primary px-4 py-3 text-sm text-warning-primary ring-1 ring-utility-yellow-200 ring-inset"
+        >
+          <div className="flex items-start gap-2.5">
+            <AlertTriangle className="mt-0.5 size-4 shrink-0 text-fg-warning-primary" aria-hidden="true" />
+            <span>{cvat?.detail || 'Không kết nối được tới máy chủ CVAT.'}</span>
+          </div>
+          <Button size="xs" color="secondary" onPress={retryCvat}>
+            Kiểm tra lại
+          </Button>
         </div>
       )}
 
@@ -99,6 +116,7 @@ export default function DatasetsPage() {
                 {rows.map((d) => {
                   const percent = d.job_count ? Math.round((d.done_count * 100) / d.job_count) : 0
                   const expanded = open === d.id
+                  const projectHref = d.cvat_project_id ? cvatProjectUrl(cvatBase, d.cvat_project_id, org.cvat_org_slug) : ''
                   return (
                     <Fragment key={d.id}>
                       <tr className="border-t border-secondary">
@@ -114,8 +132,8 @@ export default function DatasetsPage() {
                           {d.cvat_project_id && (
                             <div className="text-xs text-tertiary">
                               CVAT project #{d.cvat_project_id}
-                              {cvatBase && (
-                                <a href={`${cvatBase}/projects/${d.cvat_project_id}`} target="_blank" rel="noreferrer"
+                              {projectHref && (
+                                <a href={projectHref} target="_blank" rel="noreferrer"
                                   className="ml-1.5 inline-flex items-center gap-0.5 text-brand-secondary hover:underline">
                                   Mở <LinkExternal01 className="size-3" />
                                 </a>

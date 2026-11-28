@@ -1,4 +1,4 @@
-import { CheckCircle, Edit05, LinkExternal01, Lock01, LockUnlocked01, SearchLg } from '@untitledui/icons'
+import { AlertTriangle, CheckCircle, Edit05, LinkExternal01, Lock01, LockUnlocked01, SearchLg } from '@untitledui/icons'
 import { useState } from 'react'
 import { Link, useSearchParams } from 'react-router'
 import { Table } from '@/components/application/table/table'
@@ -16,6 +16,7 @@ import PageState from '../../../shared/components/ui/PageState'
 import SectionCard from '../../../shared/components/ui/SectionCard'
 import { useAction } from '../../../shared/hooks/useAction'
 import { useRequest } from '../../../shared/hooks/useRequest'
+import { cvatTaskUrl } from '../../../shared/utils/cvat'
 import { formatDateTime } from '../../../shared/utils/format'
 import { listTeams } from '../../teams/api'
 import { confirmBatchQc2, getCvatStatus, listBatches, listDatasets, setBatchLock } from '../api'
@@ -45,10 +46,12 @@ export default function BatchesPage() {
   )
   const { data: datasets } = useRequest(`datasets:${projectId}:all`, () => listDatasets(projectId))
   const { data: teams } = useRequest(`teams:${projectId}`, () => listTeams(projectId))
-  const { data: cvat } = useRequest('cvat-status', getCvatStatus)
+  const { data: cvat, retry: retryCvat } = useRequest('cvat-status', getCvatStatus)
   const reload = () => setVersion((v) => v + 1)
   const canManage = can('manage_data')
+  const linked = org.cvat_org_id != null
   const cvatBase = cvat?.url?.replace(/\/$/, '') ?? ''
+  const cvatDisconnected = cvat?.connected === false
 
   const keyword = search.trim().toLowerCase()
   const rows = (data ?? []).filter((b) => !keyword || [b.name, b.dataset_name, b.team_name ?? ''].some((s) => s.toLowerCase().includes(keyword)))
@@ -62,8 +65,23 @@ export default function BatchesPage() {
             Task trên CVAT của organization {org.name}. Đặt deadline, team phụ trách và xác nhận chuyển QC2 cho từng task.
           </p>
         </div>
-        {canManage && org.cvat_org_id != null && <CvatSyncButton projectId={projectId} onDone={reload} />}
+        {canManage && linked && <CvatSyncButton projectId={projectId} onDone={reload} disabled={cvatDisconnected} />}
       </header>
+
+      {linked && cvatDisconnected && (
+        <div
+          role="alert"
+          className="flex flex-wrap items-center justify-between gap-3 rounded-xl bg-warning-primary px-4 py-3 text-sm text-warning-primary ring-1 ring-utility-yellow-200 ring-inset"
+        >
+          <div className="flex items-start gap-2.5">
+            <AlertTriangle className="mt-0.5 size-4 shrink-0 text-fg-warning-primary" aria-hidden="true" />
+            <span>{cvat?.detail || 'Không kết nối được tới máy chủ CVAT.'}</span>
+          </div>
+          <Button size="xs" color="secondary" onPress={retryCvat}>
+            Kiểm tra lại
+          </Button>
+        </div>
+      )}
 
       <SectionCard bodyClassName="p-0">
         <div className="flex flex-wrap items-center gap-3 border-b border-secondary p-4">
@@ -113,6 +131,8 @@ export default function BatchesPage() {
                 const percent = b.job_count ? Math.round((b.done_count * 100) / b.job_count) : 0
                 const editable = canManage && b.status === 'active'
                 const qc1PassedCount = b.qc1_passed_count ?? 0
+                const taskHref = b.cvat_task_id ? cvatTaskUrl(cvatBase, b.cvat_task_id, org.cvat_org_slug) : ''
+                const hasSyncError = b.last_sync_status === 'error' || Boolean(b.last_sync_error)
                 return (
                   <Table.Row id={b.id}>
                     <Table.Cell>
@@ -125,12 +145,17 @@ export default function BatchesPage() {
                             Thiếu nguồn CVAT
                           </Badge>
                         )}
+                        {hasSyncError && (
+                          <Badge type="pill-color" size="sm" color="error">
+                            Lỗi đồng bộ
+                          </Badge>
+                        )}
                       </div>
                       <div className="text-xs text-tertiary">
                         {b.dataset_name}
-                        {b.cvat_task_id && cvatBase && (
+                        {b.cvat_task_id && taskHref && (
                           <a
-                            href={`${cvatBase}/tasks/${b.cvat_task_id}`}
+                            href={taskHref}
                             target="_blank"
                             rel="noreferrer"
                             className="ml-1.5 inline-flex items-center gap-0.5 text-brand-secondary hover:underline"
@@ -138,7 +163,16 @@ export default function BatchesPage() {
                             CVAT #{b.cvat_task_id} <LinkExternal01 className="size-3" />
                           </a>
                         )}
+                        {b.cvat_task_id && !taskHref && (
+                          <span className="ml-1.5 text-quaternary">CVAT #{b.cvat_task_id}</span>
+                        )}
+                        {b.last_synced_at && !hasSyncError && (
+                          <span className="ml-2 text-quaternary">· Đồng bộ {formatDateTime(b.last_synced_at)}</span>
+                        )}
                       </div>
+                      {hasSyncError && b.last_sync_error && (
+                        <p className="mt-1 max-w-md text-xs text-error-primary">{b.last_sync_error}</p>
+                      )}
                     </Table.Cell>
                     <Table.Cell className="tabular-nums">{b.job_count}</Table.Cell>
                     <Table.Cell>

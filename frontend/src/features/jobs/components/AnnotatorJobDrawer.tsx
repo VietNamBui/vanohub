@@ -10,8 +10,10 @@ import { useRequest } from '../../../shared/hooks/useRequest'
 import { formatDateTime, formatNumber } from '../../../shared/utils/format'
 import { getAnnotatorJob } from '../api'
 import { ACTION_LABELS, formatDeadlineCountdown, JOB_STATUS_LABELS } from '../constants'
+import { splitActiveErrors } from '../jobHelpers'
 import type { JobStatus } from '../types'
 import JobStatusBadge from './JobStatusBadge'
+import ReviewErrorChips from './ReviewErrorChips'
 
 interface Props {
   projectId: number
@@ -62,11 +64,17 @@ export default function AnnotatorJobDrawer({ projectId, jobId, onClose }: Props)
                   escalated={job.is_escalated}
                   overdue={job.is_overdue}
                   locked={job.is_locked}
+                  sourceMissing={job.source_missing}
                 />
                 {job.rework_round > 0 && (
-                  <Badge size="sm" type="pill-color" color="warning">
-                    Vòng sửa {job.rework_round}/{job.max_rework_rounds}
-                  </Badge>
+                  <>
+                    <Badge size="sm" type="pill-color" color="warning">
+                      Vòng sửa {job.rework_round}/{job.max_rework_rounds}
+                    </Badge>
+                    <Badge size="sm" type="pill-color" color="brand">
+                      {job.rework_scope === 'full' ? 'Sửa toàn job' : 'Sửa một phần'}
+                    </Badge>
+                  </>
                 )}
               </>
             )}
@@ -140,21 +148,92 @@ export default function AnnotatorJobDrawer({ projectId, jobId, onClose }: Props)
               </section>
 
               <section className="border-t border-secondary pt-5">
-                <h3 className="text-sm font-semibold text-primary">Lỗi đã ghi theo object-frame</h3>
-                {job.errors.length === 0 ? (
-                  <p className="mt-2 text-sm text-tertiary">Chưa có lỗi nào được ghi nhận.</p>
-                ) : (
-                  <ul className="mt-3 flex flex-col gap-2.5">
-                    {job.errors.map((e) => (
-                      <li key={e.id} className="flex items-center justify-between gap-3">
-                        <BadgeWithDot size="sm" type="pill-color" color={SEVERITY_COLOR[e.severity] ?? 'warning'}>
-                          {e.category}
-                        </BadgeWithDot>
-                        <span className="text-xs text-tertiary">{e.location || `Vòng ${e.rework_round}`}</span>
-                      </li>
-                    ))}
-                  </ul>
-                )}
+                {(() => {
+                  const { active: activeErrors, history: historyErrors } = splitActiveErrors(job, job.errors)
+                  return (
+                    <>
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <h3 className="text-sm font-semibold text-primary">Lỗi đã ghi theo object-frame</h3>
+                        {job.errors.length > 0 && (
+                          <span className="text-xs text-tertiary">
+                            {activeErrors.length} cần sửa
+                            {historyErrors.length > 0 ? ` · ${historyErrors.length} lịch sử / đã huỷ` : ''}
+                          </span>
+                        )}
+                      </div>
+                      {job.errors.length === 0 ? (
+                        <p className="mt-2 text-sm text-tertiary">Chưa có lỗi nào được ghi nhận.</p>
+                      ) : (
+                        <div className="mt-3 flex flex-col gap-3">
+                          {activeErrors.length === 0 ? (
+                            <p className="text-xs text-tertiary">Không còn lỗi đang mở cho vòng hiện tại.</p>
+                          ) : (
+                            <ul className="flex flex-col gap-2.5">
+                              {activeErrors.map((e) => (
+                                <li
+                                  key={e.id}
+                                  className="rounded-lg bg-secondary p-3 ring-1 ring-secondary ring-inset"
+                                >
+                                  <div className="flex flex-wrap items-center justify-between gap-2">
+                                    <BadgeWithDot size="sm" type="pill-color" color={SEVERITY_COLOR[e.severity] ?? 'warning'}>
+                                      {e.category}
+                                    </BadgeWithDot>
+                                    <span className="text-xs text-tertiary">
+                                      {e.stage.toUpperCase()} · vòng {e.rework_round}
+                                    </span>
+                                  </div>
+                                  <ReviewErrorChips err={e} />
+                                  {e.location && <p className="mt-1 text-xs text-secondary">{e.location}</p>}
+                                  {e.description && <p className="mt-0.5 text-xs text-tertiary">{e.description}</p>}
+                                </li>
+                              ))}
+                            </ul>
+                          )}
+
+                          {historyErrors.length > 0 && (
+                            <div className="border-t border-secondary pt-3">
+                              <p className="mb-2 text-xs font-semibold text-quaternary">
+                                Lịch sử lỗi các vòng trước & lỗi đã huỷ ({historyErrors.length})
+                              </p>
+                              <ul className="flex flex-col gap-2">
+                                {historyErrors.map((e) => (
+                                  <li
+                                    key={e.id}
+                                    className="rounded-lg p-2.5 opacity-70 ring-1 ring-secondary ring-inset"
+                                  >
+                                    <div className="flex flex-wrap items-center justify-between gap-2">
+                                      <span
+                                        className={`text-xs font-medium ${
+                                          e.is_voided ? 'text-tertiary line-through' : 'text-secondary'
+                                        }`}
+                                      >
+                                        {e.category}
+                                      </span>
+                                      <span className="text-xs text-quaternary">
+                                        {e.stage.toUpperCase()} · vòng {e.rework_round}
+                                      </span>
+                                    </div>
+                                    <ReviewErrorChips err={e} />
+                                    {e.location && (
+                                      <p className={`mt-1 text-xs text-tertiary ${e.is_voided ? 'line-through' : ''}`}>
+                                        {e.location}
+                                      </p>
+                                    )}
+                                    {e.description && (
+                                      <p className={`mt-0.5 text-xs text-tertiary ${e.is_voided ? 'line-through' : ''}`}>
+                                        {e.description}
+                                      </p>
+                                    )}
+                                  </li>
+                                ))}
+                              </ul>
+                            </div>
+                          )}
+                        </div>
+                      )}
+                    </>
+                  )
+                })()}
               </section>
 
               <p className="text-xs text-tertiary">

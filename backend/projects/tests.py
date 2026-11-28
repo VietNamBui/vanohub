@@ -2,7 +2,9 @@ from datetime import timedelta
 from typing import Any
 from unittest.mock import patch
 
+from django.db import IntegrityError, connection
 from django.test import TestCase
+from django.test.utils import CaptureQueriesContext
 from django.urls import reverse
 from django.utils import timezone
 from rest_framework.test import APIClient
@@ -11,7 +13,7 @@ from accounts.models import Role, RoleAssignment, User
 from accounts.testing import ProjectFixture, make_user
 from cvat_integration import sync
 from cvat_integration.models import CvatAccount
-from jobs.models import Job, JobStatus
+from jobs.models import DailyOutputRecord, Job, JobStatus
 from quality.models import Audit, AuditSample
 from teams.models import Team
 
@@ -336,15 +338,26 @@ class CvatSyncTests(TestCase):
 
     def test_sync_never_overrides_jobs_already_in_qc2(self):
         self._linked_fixture()
-        job = self.f.job(status=JobStatus.APPROVED, cvat_job_id=201)
+        approved_job = self.f.job(status=JobStatus.APPROVED, cvat_job_id=201)
+        active_job = self.f.job(status=JobStatus.ANNOTATING, cvat_job_id=202)
         sync.sync_organization(
             self.f.project,
             actor=self.f.pm,
-            client=FakeCvat([{"id": 201, "stage": "annotation", "state": "new"}]),
+            client=FakeCvat(
+                [
+                    {"id": 201, "stage": "annotation", "state": "new"},
+                    {"id": 202, "stage": "annotation", "state": "in progress"},
+                ]
+            ),
             count_objects=True,
         )
-        job.refresh_from_db()
-        self.assertEqual((job.status, job.object_count), (JobStatus.APPROVED, 7))
+        approved_job.refresh_from_db()
+        active_job.refresh_from_db()
+        # Sau QC1 (APPROVED): đồng bộ CVAT không ghi đè status hay object_count và không cộng DailyOutputRecord
+        self.assertEqual((approved_job.status, approved_job.object_count), (JobStatus.APPROVED, 0))
+        self.assertFalse(DailyOutputRecord.objects.filter(job=approved_job).exists())
+        # Job còn trong SYNCABLE_STATUSES vẫn được cập nhật object_count từ CVAT
+        self.assertEqual((active_job.status, active_job.object_count), (JobStatus.ANNOTATING, 7))
 
     def test_cvat_rejection_increments_rework_round(self):
         self._linked_fixture()
@@ -844,3 +857,297 @@ class DeliveryNotificationsAndHardeningTests(TestCase):
         batch_lock = self.pm.post(self.f.url(f"batches/{self.f.batch.id}/lock/?status=active"))
         self.assertEqual(batch_lock.status_code, 200, batch_lock.data)
         self.assertEqual(batch_lock.data["status"], "locked")
+
+
+class Phase1HardeningAndP2Tests(TestCase):
+    def setUp(self):
+        self.f = ProjectFixture()
+        self.pm = self.f.client(self.f.pm)
+        self.qc2 = self.f.client(self.f.qc2)
+
+    def test_superuser_visibility_and_capabilities_consistent_without_polluting_membership(self):
+        su = User.objects.create_superuser("global_su", "su@example.com", "pw")
+        su_client = self.f.client(su)
+
+        listed = su_client.get(reverse("project-list"))
+        self.assertEqual(listed.status_code, 200)
+        self.assertEqual([p["id"] for p in listed.data], [self.f.project.id])
+        self.assertEqual(listed.data[0]["my_roles"], [Role.PROJECT_MANAGER, Role.QC2])
+
+        detail = su_client.get(reverse("project-detail", args=[self.f.project.id]))
+        self.assertEqual(detail.status_code, 200)
+        # Không đếm khống superuser vào member_total của org
+        self.assertEqual(detail.data["member_total"], 5)
+        self.assertEqual(su.get_project_roles(self.f.project), set())
+
+        me = su_client.get(reverse("me"))
+        self.assertEqual(me.status_code, 200)
+        self.assertEqual(len(me.data["projects"]), 1)
+        self.assertEqual(me.data["projects"][0]["direct_roles"], [])
+        self.assertIn(Role.PROJECT_MANAGER, me.data["projects"][0]["roles"])
+
+        self.assertEqual(su_client.get(self.f.url("settings/")).status_code, 200)
+        self.assertEqual(su_client.get(self.f.url(f"members/{self.f.ann1.id}/credential/")).status_code, 200)
+
+    def test_delivery_put_with_and_without_batch_succeeds_and_candidates_clarify_fields(self):
+        now = timezone.now()
+        self.f.batch.deadline = now - timedelta(hours=2)
+        self.f.batch.save(update_fields=["deadline"])
+        self.f.job(status=JobStatus.APPROVED)
+        Audit.objects.create(
+            project=self.f.project,
+            batch=self.f.batch,
+            status=Audit.Status.IN_PROGRESS,
+            method=SamplingMethod.RANDOM,
+            sampling_rate=50,
+            seed=1,
+            eligible_count=1,
+        )
+
+        cand = self.pm.get(self.f.url("deliveries/candidates/"))
+        self.assertEqual(cand.status_code, 200, cand.data)
+        row = cand.data[0]
+        self.assertEqual(row["pending_qc2_samples"], 0)
+        self.assertEqual(row["in_progress_audits"], 1)
+        self.assertEqual(row["open_audits"], 0)
+        self.assertTrue(row["is_overdue"])
+        self.assertEqual(row["due_state"], "overdue")
+        self.assertTrue(row["ready"])
+
+        created = self.pm.post(
+            self.f.url("deliveries/"),
+            {"batch": self.f.batch.id, "recipient": "Client A", "output_path": "s3://out/a"},
+            format="json",
+        )
+        self.assertEqual(created.status_code, 201, created.data)
+        self.assertFalse(created.data["is_on_time"])
+        delivery_id = created.data["id"]
+
+        # PUT không gửi batch → 200
+        put_no_batch = self.pm.put(
+            self.f.url(f"deliveries/{delivery_id}/"),
+            {"recipient": "Client B", "output_path": "s3://out/b", "note": "n1", "client_feedback": "good"},
+            format="json",
+        )
+        self.assertEqual(put_no_batch.status_code, 200, put_no_batch.data)
+        self.assertEqual(put_no_batch.data["recipient"], "Client B")
+        self.assertEqual(put_no_batch.data["batch"], self.f.batch.id)
+
+        # PUT có kèm batch (kể cả batch khác) → batch chỉ đọc, không lỗi 400 và không đổi batch
+        other_batch = Batch.objects.create(project=self.f.project, dataset=self.f.dataset, name="Other")
+        put_with_batch = self.pm.put(
+            self.f.url(f"deliveries/{delivery_id}/"),
+            {"batch": other_batch.id, "recipient": "Client C", "output_path": "s3://out/c"},
+            format="json",
+        )
+        self.assertEqual(put_with_batch.status_code, 200, put_with_batch.data)
+        self.assertEqual(put_with_batch.data["batch"], self.f.batch.id)
+        self.assertEqual(put_with_batch.data["recipient"], "Client C")
+
+    def test_confirm_qc2_notifications_unpin_on_audit_finish_and_delivery(self):
+        j1 = self.f.job(status=JobStatus.QC1_PASSED, annotator=self.f.ann1, frame_count=10)
+        j2 = self.f.job(status=JobStatus.QC1_PASSED, annotator=self.f.ann2, frame_count=10)
+        self.assertEqual(
+            self.pm.post(self.f.url(f"batches/{self.f.batch.id}/confirm-qc2/"), {}, format="json").status_code,
+            200,
+        )
+        # Đổi tên batch để kiểm tra unpin dựa trên FK batch không phụ thuộc tên
+        self.f.batch.name = "Renamed Task"
+        self.f.batch.save(update_fields=["name"])
+        pinned = UserNotification.objects.filter(
+            project=self.f.project,
+            batch=self.f.batch,
+            category=UserNotification.Category.REVIEW_NEEDED,
+            is_pinned_pending=True,
+        )
+        self.assertTrue(pinned.exists())
+
+        s1 = AuditSample.objects.get(job=j1, result=AuditSample.Result.PENDING)
+        s2 = AuditSample.objects.get(job=j2, result=AuditSample.Result.PENDING)
+        self.assertEqual(self.qc2.post(self.f.url(f"audit-samples/{s1.id}/pass/"), {}, format="json").status_code, 200)
+        # Còn s2 pending → vẫn ghim
+        self.assertTrue(pinned.exists())
+        self.assertEqual(self.qc2.post(self.f.url(f"audit-samples/{s2.id}/pass/"), {}, format="json").status_code, 200)
+        # Hết mẫu pending & hết PENDING_QC2 → tự gỡ ghim
+        self.assertFalse(pinned.exists())
+
+        # Trường hợp còn thông báo ghim trên batch khác khi bàn giao → bàn giao cũng tự gỡ ghim
+        b2 = Batch.objects.create(project=self.f.project, dataset=self.f.dataset, name="B2")
+        self.f.job(batch=b2, status=JobStatus.APPROVED)
+        n_b2 = UserNotification.objects.create(
+            recipient=self.f.qc2,
+            project=self.f.project,
+            batch=b2,
+            category=UserNotification.Category.REVIEW_NEEDED,
+            title="Task B2 đã được xác nhận chuyển QC2",
+            is_pinned_pending=True,
+        )
+        self.assertEqual(
+            self.pm.post(
+                self.f.url("deliveries/"),
+                {"batch": b2.id, "recipient": "C", "output_path": "s3://b2"},
+                format="json",
+            ).status_code,
+            201,
+        )
+        n_b2.refresh_from_db()
+        self.assertFalse(n_b2.is_pinned_pending)
+
+    def test_members_post_sets_no_store_and_handles_integrity_errors_cleanly(self):
+        res = self.pm.post(
+            self.f.url("members/"),
+            {"full_name": "Lê Thị Mai", "username": "lemai01", "roles": ["annotator"]},
+            format="json",
+        )
+        self.assertEqual(res.status_code, 201, res.data)
+        self.assertEqual(res["Cache-Control"], "no-store")
+
+        # Giả lập đụng độ username ở lớp DB khi race condition xảy ra
+        with patch.object(User, "save", side_effect=IntegrityError("duplicate username")):
+            dup = self.pm.post(
+                self.f.url("members/"),
+                {"full_name": "Lê Thị Mai", "username": "lemai_race", "roles": ["annotator"]},
+                format="json",
+            )
+            self.assertEqual(dup.status_code, 400)
+
+        # Auto-generated username thử lại qua savepoint khi đụng độ lần đầu
+        real_save = User.save
+        calls = {"n": 0}
+
+        def save_fail_once(user_self, *args, **kwargs):
+            if calls["n"] == 0:
+                calls["n"] += 1
+                raise IntegrityError("race")
+            return real_save(user_self, *args, **kwargs)
+
+        with patch.object(User, "save", autospec=True, side_effect=save_fail_once):
+            retried = self.pm.post(
+                self.f.url("members/"),
+                {"full_name": "Phạm Văn An", "roles": ["annotator"]},
+                format="json",
+            )
+            self.assertEqual(retried.status_code, 201, retried.data)
+            self.assertEqual(retried["Cache-Control"], "no-store")
+
+        # _sync_pms IntegrityError trả 400 thay vì 500
+        with patch.object(RoleAssignment.objects, "get_or_create", side_effect=IntegrityError("fk")):
+            other_pm = make_user("other_pm_err")
+            err = self.pm.patch(
+                reverse("project-detail", args=[self.f.project.id]),
+                {"pm_ids": [self.f.pm.id, other_pm.id]},
+                format="json",
+            )
+            self.assertEqual(err.status_code, 400)
+
+    def test_locks_acquired_for_dataset_batch_settings_delivery_and_reset_password(self):
+        with CaptureQueriesContext(connection) as q_ds:
+            self.assertEqual(self.pm.post(self.f.url(f"datasets/{self.f.dataset.id}/lock/")).status_code, 200)
+        self.assertTrue(any("projects_dataset" in q["sql"] and "FOR UPDATE" in q["sql"] for q in q_ds))
+        self.assertEqual(self.pm.post(self.f.url(f"datasets/{self.f.dataset.id}/unlock/")).status_code, 200)
+
+        self.f.job(status=JobStatus.ANNOTATING)
+        with CaptureQueriesContext(connection) as q_batch_upd:
+            self.assertEqual(
+                self.pm.patch(
+                    self.f.url(f"batches/{self.f.batch.id}/"),
+                    {"deadline": "2026-12-05T00:00:00Z"},
+                    format="json",
+                ).status_code,
+                200,
+            )
+        for_upd_batch = [q["sql"] for q in q_batch_upd if "FOR UPDATE" in q["sql"]]
+        self.assertTrue(any("projects_batch" in s for s in for_upd_batch))
+        self.assertTrue(any("jobs_job" in s for s in for_upd_batch))
+
+        with CaptureQueriesContext(connection) as q_batch_lock:
+            self.assertEqual(self.pm.post(self.f.url(f"batches/{self.f.batch.id}/lock/")).status_code, 200)
+        self.assertTrue(any("projects_batch" in q["sql"] and "FOR UPDATE" in q["sql"] for q in q_batch_lock))
+        self.assertEqual(self.pm.post(self.f.url(f"batches/{self.f.batch.id}/unlock/")).status_code, 200)
+
+        with CaptureQueriesContext(connection) as q_settings:
+            self.assertEqual(
+                self.pm.patch(self.f.url("settings/"), {"sampling_rate": 25}, format="json").status_code,
+                200,
+            )
+        self.assertTrue(any("projects_project" in q["sql"] and "FOR UPDATE" in q["sql"] for q in q_settings))
+
+        with CaptureQueriesContext(connection) as q_reset:
+            self.assertEqual(self.pm.post(self.f.url(f"members/{self.f.ann1.id}/reset-password/")).status_code, 200)
+        self.assertTrue(any("accounts_user" in q["sql"] and "FOR UPDATE" in q["sql"] for q in q_reset))
+
+        Job.objects.filter(batch=self.f.batch).update(status=JobStatus.APPROVED)
+        with CaptureQueriesContext(connection) as q_del:
+            self.assertEqual(
+                self.pm.post(
+                    self.f.url("deliveries/"),
+                    {"batch": self.f.batch.id, "recipient": "Client", "output_path": "s3://p"},
+                    format="json",
+                ).status_code,
+                201,
+            )
+        del_locks = [q["sql"] for q in q_del if "FOR UPDATE" in q["sql"]]
+        self.assertGreaterEqual(len(del_locks), 3)
+        self.assertIn("projects_dataset", del_locks[0])
+        self.assertIn("projects_batch", del_locks[1])
+        self.assertIn("jobs_job", del_locks[2])
+
+    def test_project_serializer_id_oracles_uniform_for_foreign_and_missing_ids(self):
+        other = ProjectFixture(name="proj_oracle")
+        other_team = Team.objects.create(project=other.project, name="Other Team")
+        foreign_team_id = other_team.id
+        missing_team_id = foreign_team_id + 99999
+        foreign_batch_id = other.batch.id
+        missing_batch_id = foreign_batch_id + 99999
+
+        # CreateMemberSerializer.team
+        r_f_mem = self.pm.post(
+            self.f.url("members/"),
+            {"full_name": "Oracle A", "roles": [Role.ANNOTATOR], "team": foreign_team_id},
+            format="json",
+        )
+        r_m_mem = self.pm.post(
+            self.f.url("members/"),
+            {"full_name": "Oracle B", "roles": [Role.ANNOTATOR], "team": missing_team_id},
+            format="json",
+        )
+        self.assertEqual(r_f_mem.status_code, 400)
+        self.assertEqual(r_m_mem.status_code, 400)
+        self.assertEqual(r_f_mem.data, r_m_mem.data)
+
+        # BatchSerializer.team
+        r_f_batch = self.pm.patch(self.f.url(f"batches/{self.f.batch.id}/"), {"team": foreign_team_id}, format="json")
+        r_m_batch = self.pm.patch(self.f.url(f"batches/{self.f.batch.id}/"), {"team": missing_team_id}, format="json")
+        self.assertEqual(r_f_batch.status_code, 400)
+        self.assertEqual(r_m_batch.status_code, 400)
+        self.assertEqual(r_f_batch.data, r_m_batch.data)
+
+        # AnnouncementSerializer.target_team
+        r_f_ann = self.pm.post(
+            self.f.url("announcements/"),
+            {"content": "Thong bao", "target_team": foreign_team_id},
+            format="json",
+        )
+        r_m_ann = self.pm.post(
+            self.f.url("announcements/"),
+            {"content": "Thong bao", "target_team": missing_team_id},
+            format="json",
+        )
+        self.assertEqual(r_f_ann.status_code, 400)
+        self.assertEqual(r_m_ann.status_code, 400)
+        self.assertEqual(r_f_ann.data, r_m_ann.data)
+
+        # DeliverySerializer.batch
+        r_f_del = self.pm.post(
+            self.f.url("deliveries/"),
+            {"batch": foreign_batch_id, "recipient": "Client", "output_path": "s3://out"},
+            format="json",
+        )
+        r_m_del = self.pm.post(
+            self.f.url("deliveries/"),
+            {"batch": missing_batch_id, "recipient": "Client", "output_path": "s3://out"},
+            format="json",
+        )
+        self.assertEqual(r_f_del.status_code, 400)
+        self.assertEqual(r_m_del.status_code, 400)
+        self.assertEqual(r_f_del.data, r_m_del.data)

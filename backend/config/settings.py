@@ -10,9 +10,12 @@ For the full list of settings and their values, see
 https://docs.djangoproject.com/en/6.1/ref/settings/
 """
 
+import logging
 import os
+import re
 from datetime import timedelta
 from pathlib import Path
+from typing import Any
 
 from dotenv import load_dotenv
 
@@ -38,6 +41,8 @@ def _env_list(name: str, default: str = '') -> list[str]:
 
 # SECURITY WARNING: keep the secret key used in production secret!
 SECRET_KEY = os.environ['DJANGO_SECRET_KEY']
+CREDENTIAL_ENCRYPTION_KEYS = _env_list('CREDENTIAL_ENCRYPTION_KEYS')
+CREDENTIAL_LEGACY_SECRET_KEY_FALLBACK = _env_bool('CREDENTIAL_LEGACY_SECRET_KEY_FALLBACK', True)
 
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = _env_bool('DJANGO_DEBUG', False)
@@ -190,7 +195,7 @@ CSRF_COOKIE_SECURE = not DEBUG
 # - Mặc định mọi API đều yêu cầu đăng nhập; API nào mở công khai phải tự khai báo.
 REST_FRAMEWORK = {
     'DEFAULT_AUTHENTICATION_CLASSES': [
-        'rest_framework_simplejwt.authentication.JWTAuthentication',
+        'accounts.authentication.VanoHubJWTAuthentication',
         *(['rest_framework.authentication.SessionAuthentication'] if DEBUG else []),
     ],
     'DEFAULT_PERMISSION_CLASSES': [
@@ -218,6 +223,8 @@ REST_FRAMEWORK = {
 SIMPLE_JWT = {
     'ACCESS_TOKEN_LIFETIME': timedelta(minutes=30),
     'REFRESH_TOKEN_LIFETIME': timedelta(days=1),
+    'TOKEN_OBTAIN_SERIALIZER': 'accounts.serializers.VanoHubTokenObtainPairSerializer',
+    'TOKEN_REFRESH_SERIALIZER': 'accounts.serializers.VanoHubTokenRefreshSerializer',
 }
 
 
@@ -233,6 +240,11 @@ CVAT_HOST_HEADER = os.getenv('CVAT_HOST_HEADER', '')
 CVAT_USERNAME = os.getenv('CVAT_USERNAME', '')
 CVAT_PASSWORD = os.getenv('CVAT_PASSWORD', '')
 CVAT_REQUIRE_HTTPS = _env_bool('CVAT_REQUIRE_HTTPS', False)
+CVAT_MAX_RESPONSE_BYTES = int(os.getenv('CVAT_MAX_RESPONSE_BYTES', str(50 * 1024 * 1024)))
+CVAT_MAX_REQUEST_DURATION = float(os.getenv('CVAT_MAX_REQUEST_DURATION', '120'))
+CVAT_SYNC_COOLDOWN_SECONDS = int(os.getenv('CVAT_SYNC_COOLDOWN_SECONDS', '10'))
+CVAT_OUTBOX_ON_COMMIT_LIMIT = int(os.getenv('CVAT_OUTBOX_ON_COMMIT_LIMIT', '20'))
+CVAT_OUTBOX_ON_COMMIT_TIMEOUT = int(os.getenv('CVAT_OUTBOX_ON_COMMIT_TIMEOUT', '5'))
 
 
 # CORS: cho phép frontend Vite (khác cổng) gọi API.
@@ -240,3 +252,136 @@ CORS_ALLOWED_ORIGINS = _env_list(
     'CORS_ALLOWED_ORIGINS',
     'http://localhost:5173,http://127.0.0.1:5173' if DEBUG else '',
 )
+
+
+# Logging & Secret Redaction
+_AUTH_HEADER_RE = re.compile(
+    r'(?i)(authorization\s*[:=]\s*[\'"]?(?:bearer|token|basic)\s+)([^\s\'",;}\]]+)'
+)
+_AUTH_VALUE_RE = re.compile(r'(?i)(\bauthorization\b\s*[:=]\s*[\'"]?)([^\'",;}\]\s]+)')
+_BEARER_RE = re.compile(r'(?i)\b(bearer\s+)([A-Za-z0-9._~+/=-]{8,})')
+_JWT_RE = re.compile(r'\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b')
+_KV_SECRET_RE = re.compile(
+    r'(?i)([\'"]?\b(?:password|current_password|new_password|initial_password_encrypted|'
+    r'secret_key|django_secret_key|cvat_access_token|cvat_password|postgres_password|'
+    r'credential_encryption_keys|access_token|refresh_token)\b[\'"]?\s*[:=]\s*)'
+    r'(\'[^\']*\'|"[^"]*"|[^\s,;}\]]+)'
+)
+
+
+def _iter_secret_literals() -> list[str]:
+    from django.conf import settings as django_settings
+
+    candidates: list[str] = [
+        os.getenv('POSTGRES_PASSWORD', ''),
+    ]
+    if django_settings.configured:
+        for attr in ('SECRET_KEY', 'CVAT_ACCESS_TOKEN', 'CVAT_PASSWORD'):
+            val = getattr(django_settings, attr, '')
+            if isinstance(val, str):
+                candidates.append(val)
+        extra_keys = getattr(django_settings, 'CREDENTIAL_ENCRYPTION_KEYS', ())
+        for key in extra_keys:
+            if isinstance(key, str):
+                candidates.append(key)
+    else:
+        for attr in ('SECRET_KEY', 'CVAT_ACCESS_TOKEN', 'CVAT_PASSWORD'):
+            val = globals().get(attr, '')
+            if isinstance(val, str):
+                candidates.append(val)
+        for key in globals().get('CREDENTIAL_ENCRYPTION_KEYS', ()):
+            if isinstance(key, str):
+                candidates.append(key)
+    return sorted({c for c in candidates if len(c) >= 6}, key=len, reverse=True)
+
+
+def redact_secrets(text: str) -> str:
+    if not text:
+        return text
+    redacted = _AUTH_HEADER_RE.sub(r'\g<1>[REDACTED]', text)
+    redacted = _BEARER_RE.sub(r'\g<1>[REDACTED]', redacted)
+    redacted = _AUTH_VALUE_RE.sub(r'\g<1>[REDACTED]', redacted)
+    redacted = _JWT_RE.sub('[REDACTED_JWT]', redacted)
+    redacted = _KV_SECRET_RE.sub(r'\g<1>[REDACTED]', redacted)
+    for secret in _iter_secret_literals():
+        if secret in redacted:
+            redacted = redacted.replace(secret, '[REDACTED]')
+    return redacted
+
+
+def _redact_value(value: Any) -> Any:
+    if isinstance(value, str):
+        return redact_secrets(value)
+    if isinstance(value, tuple):
+        return tuple(_redact_value(v) for v in value)
+    if isinstance(value, list):
+        return [_redact_value(v) for v in value]
+    if isinstance(value, dict):
+        return {k: _redact_value(v) for k, v in value.items()}
+    return value
+
+
+class SecretRedactionFilter(logging.Filter):
+    """Che giấu token Bearer, header Authorization, mật khẩu và secret trước khi ghi log."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if record.args:
+            try:
+                formatted = record.getMessage()
+            except Exception:
+                record.msg = _redact_value(record.msg)
+                record.args = _redact_value(record.args)
+            else:
+                record.msg = redact_secrets(formatted)
+                record.args = None
+        else:
+            record.msg = _redact_value(record.msg)
+        if record.exc_text:
+            record.exc_text = redact_secrets(record.exc_text)
+        return True
+
+
+class RedactingFormatter(logging.Formatter):
+    def format(self, record: logging.LogRecord) -> str:
+        return redact_secrets(super().format(record))
+
+
+_LOG_LEVEL = os.getenv('DJANGO_LOG_LEVEL', 'INFO')
+
+LOGGING = {
+    'version': 1,
+    'disable_existing_loggers': False,
+    'filters': {
+        'redact_secrets': {
+            '()': SecretRedactionFilter,
+        },
+    },
+    'formatters': {
+        'standard': {
+            '()': RedactingFormatter,
+            'format': '[%(asctime)s] %(levelname)s %(name)s: %(message)s',
+        },
+    },
+    'handlers': {
+        'console': {
+            'class': 'logging.StreamHandler',
+            'formatter': 'standard',
+            'filters': ['redact_secrets'],
+        },
+    },
+    'root': {
+        'handlers': ['console'],
+        'level': _LOG_LEVEL,
+    },
+    'loggers': {
+        'django': {'level': os.getenv('DJANGO_FRAMEWORK_LOG_LEVEL', 'WARNING'), 'propagate': True},
+        'django.request': {'level': 'WARNING', 'filters': ['redact_secrets'], 'propagate': True},
+        'accounts': {'level': _LOG_LEVEL, 'filters': ['redact_secrets'], 'propagate': True},
+        'projects': {'level': _LOG_LEVEL, 'filters': ['redact_secrets'], 'propagate': True},
+        'teams': {'level': _LOG_LEVEL, 'filters': ['redact_secrets'], 'propagate': True},
+        'jobs': {'level': _LOG_LEVEL, 'filters': ['redact_secrets'], 'propagate': True},
+        'quality': {'level': _LOG_LEVEL, 'filters': ['redact_secrets'], 'propagate': True},
+        'analytics': {'level': _LOG_LEVEL, 'filters': ['redact_secrets'], 'propagate': True},
+        'cvat_integration': {'level': _LOG_LEVEL, 'filters': ['redact_secrets'], 'propagate': True},
+    },
+}

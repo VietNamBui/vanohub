@@ -21,7 +21,7 @@ from accounts.models import Role, RoleAssignment, User
 from accounts.permissions import Cap, ProjectScopedViewMixin
 from accounts.validation import validated_dict
 from cvat_integration.assignee import schedule_assignee_push
-from projects.models import ActivityLog, Batch, DataStatus, EscalationPolicy, UserNotification
+from projects.models import ActivityLog, Batch, DataStatus, EscalationPolicy, Project, UserNotification
 from projects.notifications import notify_assigned, notify_review_needed, project_users_with_roles
 from projects.views import StandardPagination
 from quality.models import Audit, AuditSample, ReviewError
@@ -249,9 +249,20 @@ def submit_annotation(job_id, *, project, actor, note="", object_count=None):
     job.status = JobStatus.PENDING_QC1
     job.submitted_at = timezone.now()
     update_fields = ["status", "submitted_at", "last_counted_objects", "round_credited_objects", "updated_at"]
+    manual_object_count_applied = False
     if object_count is not None:
-        job.object_count = object_count
-        update_fields.append("object_count")
+        if (
+            isinstance(object_count, bool)
+            or not isinstance(object_count, int)
+            or object_count < 0
+            or object_count > PG_INT32_MAX
+        ):
+            raise ValidationError({"object_count": f"Số object phải là số nguyên từ 0 đến {PG_INT32_MAX}."})
+        # Job liên kết CVAT dùng số đếm đồng bộ từ CVAT làm nguồn chuẩn (tránh ghi đè tay khi nộp).
+        if job.cvat_job_id is None:
+            job.object_count = object_count
+            update_fields.append("object_count")
+            manual_object_count_applied = True
 
     # Tính sản lượng cuboid ghi bổ sung vào DailyOutputRecord:
     # - Không cộng đúp phần đã ghi qua đồng bộ CVAT trước QC.
@@ -310,7 +321,7 @@ def submit_annotation(job_id, *, project, actor, note="", object_count=None):
         "credited_objects": credited,
         "deadline": _iso(job.deadline),
     }
-    if object_count is not None and object_count != prev_objects:
+    if manual_object_count_applied and object_count != prev_objects:
         before["object_count"] = prev_objects
 
     ActivityLog.record(
@@ -345,28 +356,51 @@ def assign_job(job, data, actor, project, *, push_cvat=True):
             f"Không thể đổi annotator hoặc người QC1 khi job ở trạng thái {job.get_status_display()}."
         )
 
+    lock_user_ids = sorted({
+        user.pk
+        for field in ("annotator", "qc1_reviewer")
+        if (user := data.get(field)) is not None
+    })
+    locked_users: dict[int, User] = {}
+    if lock_user_ids:
+        locked_users = {
+            u.pk: u
+            for u in User.objects.select_for_update().filter(pk__in=lock_user_ids).order_by("id")
+        }
+
+    resolved_data = dict(data)
+    for field, role, label in (
+        ("annotator", Role.ANNOTATOR, "Annotator"),
+        ("qc1_reviewer", Role.QC1, "Người QC1"),
+    ):
+        if field in resolved_data and resolved_data[field] is not None:
+            locked_user = locked_users.get(resolved_data[field].pk)
+            if not locked_user or not locked_user.is_active or role not in locked_user.get_project_roles(project):
+                raise ValidationError(f"{label} phải là người có vai trò {Role(role).label} trong organization.")
+            resolved_data[field] = locked_user
+
     from quality.qc2 import get_stage_history
 
     annotator_ids, qc1_ids, qc2_ids = get_stage_history(job)
-    new_annotator = data.get("annotator", job.annotator)
-    new_qc1 = data.get("qc1_reviewer", job.qc1_reviewer)
+    new_annotator = resolved_data.get("annotator", job.annotator)
+    new_qc1 = resolved_data.get("qc1_reviewer", job.qc1_reviewer)
     new_ann_id = new_annotator.pk if new_annotator else None
     new_qc1_id = new_qc1.pk if new_qc1 else None
 
     if new_ann_id and new_ann_id == new_qc1_id:
         raise ValidationError("Luật bốn mắt: người QC1 không được là annotator của chính job đó.")
-    if "annotator" in data and new_ann_id and new_ann_id in (qc1_ids | qc2_ids):
+    if "annotator" in resolved_data and new_ann_id and new_ann_id in (qc1_ids | qc2_ids):
         raise ValidationError("Luật bốn mắt: người này đã tham gia QC1 hoặc QC2 job này.")
-    if "qc1_reviewer" in data and new_qc1_id and new_qc1_id in (annotator_ids | qc2_ids):
+    if "qc1_reviewer" in resolved_data and new_qc1_id and new_qc1_id in (annotator_ids | qc2_ids):
         raise ValidationError("Luật bốn mắt: người này đã annotate hoặc QC2 job này.")
 
     before: dict[str, int | None] = {}
     after: dict[str, int | None] = {}
     for field in ("annotator", "qc1_reviewer"):
-        if field in data:
+        if field in resolved_data:
             before[field] = getattr(job, f"{field}_id")
-            setattr(job, field, data[field])
-            after[field] = data[field].pk if data[field] else None
+            setattr(job, field, resolved_data[field])
+            after[field] = resolved_data[field].pk if resolved_data[field] else None
     if after:
         job.save(update_fields=[*after.keys(), "updated_at"])
     ActivityLog.record(
@@ -377,7 +411,7 @@ def assign_job(job, data, actor, project, *, push_cvat=True):
         job=job,
         before=before,
         after=after,
-        note=data.get("note", ""),
+        note=resolved_data.get("note", ""),
     )
     if "annotator" in after and after["annotator"] and after["annotator"] != before.get("annotator"):
         notify_assigned(project, job, job.annotator, role_label="Annotator", actor=actor)
@@ -535,6 +569,10 @@ class JobViewSet(ProjectScopedViewMixin, mixins.ListModelMixin, mixins.RetrieveM
             ensure_editable(job)
             if not job.is_escalated:
                 raise ValidationError("Job không ở trạng thái Escalated.")
+            if job.status in ASSIGN_LOCKED_STATUSES:
+                raise ValidationError(
+                    f"Không thể xử lý escalation khi job ở trạng thái {job.get_status_display()}."
+                )
             if "annotator" in res_data:
                 assign_data = validated_dict(
                     AssignSerializer(
@@ -782,16 +820,20 @@ class AnnotatorJobViewSet(
     def claim(self, request, project_id):
         """Nhận job mới từ hàng chờ chưa phân công (tôn trọng giới hạn số job đang giữ)."""
         user = request.user
-        wip_limit = self.project.annotator_wip_limit
-        team_ids = list(
-            TeamMember.objects.filter(user=user, team__project=self.project).values_list("team_id", flat=True)
-        )
 
         with transaction.atomic():
-            # Khoá dòng User để tuần tự hoá các yêu cầu claim đồng thời của cùng một annotator.
-            User.objects.select_for_update().get(pk=user.pk)
+            # Khoá dòng User để tuần tự hoá các yêu cầu claim đồng thời của cùng một annotator,
+            # sau đó mới đọc vai trò, WIP limit và team_ids bên trong cùng giao dịch.
+            locked_user = User.objects.select_for_update().get(pk=user.pk)
+            project = Project.objects.only("id", "annotator_wip_limit").get(pk=self.project.pk)
+            if Role.ANNOTATOR not in locked_user.get_project_roles(project):
+                raise PermissionDenied("Bạn không còn vai trò Annotator trong organization.")
+            wip_limit = project.annotator_wip_limit
+            team_ids = list(
+                TeamMember.objects.filter(user=locked_user, team__project=project).values_list("team_id", flat=True)
+            )
             active_count = Job.objects.filter(
-                project=self.project, annotator=user, status__in=ACTIVE_ANNOTATOR_STATUSES
+                project=project, annotator=locked_user, status__in=ACTIVE_ANNOTATOR_STATUSES
             ).count()
             if active_count >= wip_limit:
                 raise ValidationError(
@@ -802,7 +844,7 @@ class AnnotatorJobViewSet(
                 Job.objects.select_for_update(of=("self",), skip_locked=True)
                 .select_related("batch", "dataset")
                 .filter(
-                    project=self.project,
+                    project=project,
                     annotator__isnull=True,
                     status=JobStatus.PENDING_ANNOTATION,
                     is_locked=False,
@@ -810,14 +852,14 @@ class AnnotatorJobViewSet(
                     batch__status=DataStatus.ACTIVE,
                     dataset__status=DataStatus.ACTIVE,
                 )
-                .exclude(qc1_reviewer=user)
+                .exclude(qc1_reviewer=locked_user)
                 .exclude(
                     events__action__in=["qc1.start", "qc1.pass", "qc1.reject"],
-                    events__actor=user,
+                    events__actor=locked_user,
                 )
-                .exclude(audit_samples__auditor=user)
-                .exclude(audit_samples__reviewed_by=user)
-                .exclude(review_errors__reported_by=user)
+                .exclude(audit_samples__auditor=locked_user)
+                .exclude(audit_samples__reviewed_by=locked_user)
+                .exclude(review_errors__reported_by=locked_user)
             )
             if team_ids:
                 # Chặn chặt theo team: chỉ nhận job thuộc task của team mình hoặc task chung (chưa gán team).
@@ -839,16 +881,16 @@ class AnnotatorJobViewSet(
             if job is None:
                 raise ValidationError("Hiện không còn job mới sẵn sàng để nhận trong organization.")
 
-            job.annotator = user
+            job.annotator = locked_user
             job.save(update_fields=["annotator", "updated_at"])
             ActivityLog.record(
                 project=self.project,
-                actor=user,
+                actor=locked_user,
                 action="job.assign",
                 target=job,
                 job=job,
                 before={"annotator": None},
-                after={"annotator": user.pk, "event": "annotator.claim"},
+                after={"annotator": locked_user.pk, "event": "annotator.claim"},
                 note="Tự nhận job từ hàng chờ",
             )
             schedule_assignee_push([job.pk])

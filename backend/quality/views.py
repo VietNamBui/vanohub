@@ -1,7 +1,7 @@
 from datetime import timedelta
 from typing import Any
 
-from django.db import transaction
+from django.db import IntegrityError, transaction
 from django.db.models import Count, F, Prefetch, Q
 from django.db.models.functions import Greatest
 from django.utils import timezone
@@ -64,22 +64,35 @@ class ErrorCategoryViewSet(
         return queryset
 
     def perform_create(self, serializer: Any) -> None:
-        category = serializer.save(project=self.project)
-        ActivityLog.record(
-            project=self.project,
-            actor=self.request.user,
-            action="error_category.create",
-            target=category,
-        )
+        try:
+            with transaction.atomic():
+                category = serializer.save(project=self.project)
+                ActivityLog.record(
+                    project=self.project,
+                    actor=self.request.user,
+                    action="error_category.create",
+                    target=category,
+                )
+        except IntegrityError as exc:
+            raise ValidationError({"name": "Danh mục đã có loại lỗi trùng tên."}) from exc
 
     def perform_update(self, serializer: Any) -> None:
-        category = serializer.save()
-        ActivityLog.record(
-            project=self.project,
-            actor=self.request.user,
-            action="error_category.update",
-            target=category,
-        )
+        instance = serializer.instance
+        try:
+            with transaction.atomic():
+                locked = ErrorCategory.objects.select_for_update().filter(pk=instance.pk, project=self.project).first()
+                if locked is None:
+                    raise NotFound("Không tìm thấy loại lỗi.")
+                serializer.instance = locked
+                category = serializer.save()
+                ActivityLog.record(
+                    project=self.project,
+                    actor=self.request.user,
+                    action="error_category.update",
+                    target=category,
+                )
+        except IntegrityError as exc:
+            raise ValidationError({"name": "Danh mục đã có loại lỗi trùng tên."}) from exc
 
 
 class AuditViewSet(
@@ -205,6 +218,32 @@ class AuditSampleViewSet(
             sample.auditor = self.request.user
         sample.save(update_fields=["result", "reviewed_by", "reviewed_at", "comment", "auditor"])
 
+    def _unpin_qc2_notifications(self, job: Job) -> None:
+        UserNotification.objects.filter(
+            project=self.project,
+            job=job,
+            category=UserNotification.Category.REVIEW_NEEDED,
+            is_pinned_pending=True,
+        ).update(is_pinned_pending=False)
+        batch = job.batch
+        has_pending_qc2 = (
+            AuditSample.objects.filter(audit__batch=batch, result=AuditSample.Result.PENDING).exists()
+            or Job.objects.filter(batch=batch, status=JobStatus.PENDING_QC2).exists()
+        )
+        if not has_pending_qc2:
+            UserNotification.objects.filter(
+                project=self.project,
+                category=UserNotification.Category.REVIEW_NEEDED,
+                is_pinned_pending=True,
+            ).filter(
+                Q(batch=batch)
+                | Q(
+                    job__isnull=True,
+                    batch__isnull=True,
+                    title=f"Task {batch.name} đã được xác nhận chuyển QC2",
+                )
+            ).update(is_pinned_pending=False)
+
     @action(detail=True, methods=["post"], url_path="pass")
     def pass_(self, request: Any, project_id: Any, pk: Any = None) -> Response:
         with transaction.atomic():
@@ -214,6 +253,7 @@ class AuditSampleViewSet(
             self._finish(sample, AuditSample.Result.PASS, data["comment"])
             job.status = JobStatus.APPROVED
             job.save(update_fields=["status", "updated_at"])
+            self._unpin_qc2_notifications(job)
             schedule_assignee_push([job.pk])
             ActivityLog.record(
                 project=self.project,
@@ -281,6 +321,7 @@ class AuditSampleViewSet(
                     "updated_at",
                 ]
             )
+            self._unpin_qc2_notifications(job)
             schedule_assignee_push([job.pk])
             ActivityLog.record(
                 project=self.project,
@@ -323,8 +364,10 @@ class AuditSampleViewSet(
                 raise ValidationError("Mẫu đã có kết quả.")
             ensure_editable(job)
             ensure_not_escalated(job)
+            if job.status != JobStatus.PENDING_QC2:
+                raise ValidationError("Job không còn ở trạng thái Chờ QC2.")
             data = validated_dict(AssignAuditorSerializer(data=request.data))
-            auditor = User.objects.filter(pk=data["auditor"], is_active=True).first()
+            auditor = User.objects.select_for_update().filter(pk=data["auditor"], is_active=True).first()
             if not auditor or Role.QC2 not in auditor.get_project_roles(self.project):
                 raise ValidationError("Auditor phải có quyền QC2 trong dự án.")
             if auditor.id in four_eyes_conflicts(job):

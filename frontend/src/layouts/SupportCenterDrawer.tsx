@@ -41,7 +41,6 @@ const FAQS: FaqItem[] = [
 interface Props {
   open: boolean
   projectId: number | null
-  teamLeaderName: string | null
   onClose: () => void
 }
 

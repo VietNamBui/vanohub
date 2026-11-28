@@ -12,6 +12,7 @@ import {
   formatShortDate,
   formatShortDateTime,
   formatTimeFirstDateTime,
+  formatViPercent,
   getCurrentHourVN,
   parseDateTimeLocalVN,
 } from './format'
@@ -58,6 +59,9 @@ describe('format utilities (fixed Asia/Ho_Chi_Minh UTC+7)', () => {
     expect(formatDateTime('not-a-date')).toBe('—')
     expect(formatPercent(null)).toBe('—')
     expect(formatPercent(87.5)).toBe('87.5%')
+    expect(formatViPercent(null)).toBe('—')
+    expect(formatViPercent(85.7)).toBe('85,7%')
+    expect(formatViPercent(80)).toBe('80%')
     expect(formatNumber(null)).toBe('—')
     expect(formatRelative(null)).toBe('—')
     expect(formatRelative(new Date(Date.now() - 5 * 60_000).toISOString())).toContain('phút')

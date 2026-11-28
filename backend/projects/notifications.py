@@ -68,6 +68,7 @@ def notify_review_needed(
     body: str,
     action_url: str,
     job: Any = None,
+    batch: Any = None,
     actor: Any = None,
 ) -> list[UserNotification]:
     seen: set[int] = set()
@@ -82,6 +83,7 @@ def notify_review_needed(
             UserNotification.objects.create(
                 recipient=recipient,
                 project=project,
+                batch=batch,
                 job=job,
                 category=UserNotification.Category.REVIEW_NEEDED,
                 title=title[:200],
@@ -180,6 +182,7 @@ def notify_batch_ready_for_qc2(project: Any, batch: Any, *, actor: Any = None) -
         title=f"Task {batch.name} sẵn sàng xác nhận chuyển QC2",
         body=f"{passed_count} job đã đạt QC1 (100% task) — cần PM xác nhận chuyển lên QC2.",
         action_url=f"/projects/{project.id}/batches",
+        batch=batch,
         actor=actor,
     )
 

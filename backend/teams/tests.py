@@ -1,6 +1,9 @@
 from datetime import timedelta
+from unittest.mock import patch
 
+from django.db import IntegrityError, connection
 from django.test import TestCase
+from django.test.utils import CaptureQueriesContext
 from django.utils import timezone
 
 from accounts.models import Role, User
@@ -154,3 +157,65 @@ class TeamRolesInPayloadTests(TestCase):
         data = f.client(f.pm).get(f.url(f"teams/{team.id}/")).data
         roles = {m["user"]["username"]: m["roles"] for m in data["members"]}
         self.assertEqual(roles, {f.ann1.username: [Role.ANNOTATOR], f.qc1.username: [Role.QC1]})
+
+
+class TeamConcurrencyAndIntegrityTests(TestCase):
+    def setUp(self):
+        self.f = ProjectFixture()
+        self.pm = self.f.client(self.f.pm)
+        self.team_a = Team.objects.create(project=self.f.project, name="Team A")
+        self.team_b = Team.objects.create(project=self.f.project, name="Team B")
+
+    def test_duplicate_team_integrity_error_returns_400(self):
+        with patch.object(Team, "save", side_effect=IntegrityError("unique_team_name_per_project")):
+            res = self.pm.post(self.f.url("teams/"), {"name": "Team Race"}, format="json")
+            self.assertEqual(res.status_code, 400)
+
+        with patch.object(Team, "save", side_effect=IntegrityError("unique_team_name_per_project")):
+            upd = self.pm.patch(self.f.url(f"teams/{self.team_a.id}/"), {"name": "Team Race"}, format="json")
+            self.assertEqual(upd.status_code, 400)
+
+    def test_add_member_and_transfer_lock_team_before_user(self):
+        with CaptureQueriesContext(connection) as q_add:
+            res = self.pm.post(
+                self.f.url(f"teams/{self.team_a.id}/add-member/"),
+                {"user": self.f.ann1.id},
+                format="json",
+            )
+        self.assertEqual(res.status_code, 201, res.data)
+        locks = [q["sql"] for q in q_add if "FOR UPDATE" in q["sql"]]
+        self.assertGreaterEqual(len(locks), 2)
+        self.assertIn("teams_team", locks[0])
+        self.assertIn("accounts_user", locks[1])
+
+        with CaptureQueriesContext(connection) as q_tr:
+            tr = self.pm.post(
+                self.f.url("teams/transfer/"),
+                {"user": self.f.ann1.id, "to_team": self.team_b.id},
+                format="json",
+            )
+        self.assertEqual(tr.status_code, 200, tr.data)
+        tr_locks = [q["sql"] for q in q_tr if "FOR UPDATE" in q["sql"]]
+        self.assertGreaterEqual(len(tr_locks), 2)
+        self.assertIn("teams_team", tr_locks[0])
+        self.assertIn("accounts_user", tr_locks[1])
+
+    def test_transfer_to_team_id_oracle_uniform_for_foreign_and_missing_ids(self):
+        other = ProjectFixture(name="team_oracle")
+        other_team = Team.objects.create(project=other.project, name="Other Team")
+        foreign_team_id = other_team.id
+        missing_team_id = foreign_team_id + 99999
+
+        r_foreign = self.pm.post(
+            self.f.url("teams/transfer/"),
+            {"user": self.f.ann1.id, "to_team": foreign_team_id},
+            format="json",
+        )
+        r_missing = self.pm.post(
+            self.f.url("teams/transfer/"),
+            {"user": self.f.ann1.id, "to_team": missing_team_id},
+            format="json",
+        )
+        self.assertEqual(r_foreign.status_code, 400)
+        self.assertEqual(r_missing.status_code, 400)
+        self.assertEqual(r_foreign.data, r_missing.data)

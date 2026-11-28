@@ -1,14 +1,28 @@
 import type { ReactNode } from 'react'
-import { Navigate } from 'react-router'
+import { Navigate, useNavigate } from 'react-router'
 import StateView from '../../shared/components/StateView'
 import type { Capability } from '../../shared/types/capabilities'
 import { useProject } from './projectContext'
 
 /** Chặn trang nếu thiếu capability (chỉ là lớp UI — API vẫn tự kiểm tra quyền). */
 export function RequireCap({ cap, children }: { cap: Capability | Capability[]; children: ReactNode }) {
-  const { can } = useProject()
+  const { project, projectId, can } = useProject()
+  const navigate = useNavigate()
   const ok = Array.isArray(cap) ? cap.some(can) : can(cap)
-  if (!ok) return <StateView kind="forbidden" description="Liên hệ PM nếu bạn cần quyền truy cập." />
+  if (!ok) {
+    const isPm = project.my_roles.includes('project_manager')
+    return (
+      <StateView
+        kind="forbidden"
+        description={
+          isPm
+            ? 'Tài khoản PM không có vai trò thực hiện màn hình này trong organization hiện tại.'
+            : 'Liên hệ PM nếu bạn cần quyền truy cập.'
+        }
+        action={{ label: 'Về trang mặc định', onClick: () => navigate(`/projects/${projectId}`) }}
+      />
+    )
+  }
   return <>{children}</>
 }
 

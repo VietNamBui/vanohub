@@ -157,8 +157,25 @@ class AuditSerializer(serializers.ModelSerializer):
         ]
 
 
+_INVALID_CATEGORY_MSG = "Loại lỗi không hợp lệ hoặc không thuộc dự án này."
+
+
+class _ProjectErrorCategoryField(serializers.PrimaryKeyRelatedField):
+    default_error_messages = {
+        **serializers.PrimaryKeyRelatedField.default_error_messages,
+        "does_not_exist": _INVALID_CATEGORY_MSG,
+        "incorrect_type": _INVALID_CATEGORY_MSG,
+    }
+
+    def get_queryset(self):
+        project = self.context.get("project")
+        if project is None:
+            return ErrorCategory.objects.none()
+        return ErrorCategory.objects.filter(project=project, is_active=True)
+
+
 class _BaseErrorInputSerializer(serializers.Serializer):
-    category = serializers.PrimaryKeyRelatedField(queryset=ErrorCategory.objects.filter(is_active=True))
+    category = _ProjectErrorCategoryField(queryset=ErrorCategory.objects.none())
     severity = serializers.ChoiceField(choices=Severity.choices, required=False)
     verdict = serializers.ChoiceField(choices=ErrorVerdict.choices, required=False, default=ErrorVerdict.FAIL)
     frame_number = serializers.IntegerField(

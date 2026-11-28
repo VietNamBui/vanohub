@@ -27,7 +27,7 @@ class Command(BaseCommand):
         )
         for project in Project.objects.filter(cvat_org_id__isnull=False):
             try:
-                summary = sync_organization(project, None, count_objects=count_objects)
+                summary = sync_organization(project, None, count_objects=count_objects, cooldown_seconds=0)
                 self.stdout.write(f"  {project.name}: {summary}")
             except CvatError as exc:
                 self.stderr.write(f"  {project.name}: LỖI {exc}")

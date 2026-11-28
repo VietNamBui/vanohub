@@ -148,6 +148,8 @@ function QuickSearchPalette({
             { id: 'p-qc1-dash', label: 'Tổng quan QC1', path: `${base}/qc1/dashboard`, kind: 'dashboard', keywords: 'qc1 dashboard', cap: ['perform_qc1', 'view_dashboard'] },
             { id: 'p-qc1-work', label: 'Job kiểm tra QC1', path: `${base}/qc1/work`, kind: 'page', keywords: 'qc1 work', cap: 'perform_qc1' },
             { id: 'p-delivery', label: 'Bàn giao', path: `${base}/delivery`, kind: 'page', keywords: 'delivery deliveries ban giao', cap: 'manage_delivery' },
+            { id: 'p-settings-org', label: 'Cấu hình organization', path: `${base}/settings`, kind: 'page', keywords: 'settings config rework sampling kpi cau hinh organization', cap: 'manage_settings' },
+            { id: 'p-activity', label: 'Nhật ký hoạt động', path: `${base}/activity`, kind: 'page', keywords: 'activity log audit trail nhat ky hoat dong', cap: 'view_activity' },
             { id: 'p-err-cat', label: 'Danh mục lỗi', path: `${base}/error-categories`, kind: 'page', keywords: 'error categories danh muc loi', cap: 'manage_quality_catalog' },
             { id: 'p-guide', label: 'Guidelines', path: `${base}/guidelines`, kind: 'guideline', keywords: 'guidelines huong dan', cap: 'view_guidelines' },
             { id: 'p-ann', label: 'Thông báo', path: `${base}/announcements`, kind: 'page', keywords: 'announcements thong bao', cap: 'view_project' },

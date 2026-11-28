@@ -11,6 +11,7 @@ import type {
   Job,
   JobDetail,
   JobFilters,
+  JobWithErrors,
   QueueStage,
 } from '../types'
 
@@ -67,7 +68,15 @@ export const getJobQueue = async (projectId: number, batch?: number) =>
 // --- Không gian làm việc Annotator ---
 export const listAnnotatorJobs = async (
   projectId: number,
-  params: { tab?: AnnotatorJobTab; search?: string; page?: number; page_size?: number; overdue?: boolean; due_soon?: boolean } = {},
+  params: {
+    tab?: AnnotatorJobTab
+    search?: string
+    page?: number
+    page_size?: number
+    overdue?: boolean
+    due_soon?: boolean
+    include_errors?: boolean
+  } = {},
 ) =>
   (
     await apiClient.get<Paginated<Job>>(p(projectId, 'annotator/jobs/'), {
@@ -78,6 +87,23 @@ export const listAnnotatorJobs = async (
         page_size: params.page_size,
         overdue: params.overdue ? 1 : undefined,
         due_soon: params.due_soon ? 1 : undefined,
+        include_errors: params.include_errors ? 1 : undefined,
+      }),
+    })
+  ).data
+
+export const listAnnotatorJobsWithErrors = async (
+  projectId: number,
+  params: { tab?: AnnotatorJobTab; search?: string; page?: number; page_size?: number } = {},
+) =>
+  (
+    await apiClient.get<Paginated<JobWithErrors>>(p(projectId, 'annotator/jobs/'), {
+      params: cleanParams({
+        tab: params.tab === 'all' ? undefined : params.tab,
+        search: params.search,
+        page: params.page,
+        page_size: params.page_size,
+        include_errors: 1,
       }),
     })
   ).data

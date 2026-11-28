@@ -35,6 +35,8 @@ export interface Job {
   is_overdue: boolean
   due_state?: DueState
   hours_remaining?: number | null
+  overdue_hours?: number
+  is_on_time?: boolean | null
   rework_round: number
   total_rework_rounds?: number
   first_qc1_result?: '' | 'pass' | 'reject'
@@ -81,9 +83,12 @@ export interface JobErrorBrief {
 
 export type ReviewErrorBrief = JobErrorBrief
 
-export interface JobDetail extends Job {
-  timeline: ActivityLog[]
+export interface JobWithErrors extends Job {
   errors: JobErrorBrief[]
+}
+
+export interface JobDetail extends JobWithErrors {
+  timeline: ActivityLog[]
 }
 
 export interface JobFilters {
@@ -176,6 +181,8 @@ export interface AnnotatorDailyResult {
   label: string
   first_pass_objects: number
   rework_objects: number
+  submitted_objects?: number
+  unsubmitted_cvat_objects?: number
   total_objects: number
   target_objects: number
   is_off_day: boolean
@@ -196,20 +203,20 @@ export interface AnnotatorDashboard {
   objects_done: number
   submitted_in_period: AnnotatorMetric
   rework_rate: AnnotatorMetric
-  first_pass_yield: AnnotatorMetric
+  first_pass_yield: AnnotatorMetric & { passed?: number; total?: number }
   kpi_target: number | null
   errors_by_category: { category: string; count: number }[]
+  errors_by_severity?: Partial<Record<'minor' | 'major' | 'critical', number>>
   due_soon: {
     id: number
     name: string
     batch_name: string
     status: JobStatus
-    deadline: string
+    deadline: string | null
     is_overdue: boolean
   }[]
   meta: {
     team_name: string | null
-    team_leader_name: string | null
     project_name: string
     last_cvat_sync_at: string | null
     wip_limit: number
@@ -218,10 +225,16 @@ export interface AnnotatorDashboard {
   }
   kpi_summary: {
     actual_objects: number
+    today_first_pass?: number
+    today_rework?: number
+    today_submitted_objects?: number
+    today_unsubmitted_cvat_objects?: number
     target_objects: number | null
     achievement_pct: number | null
     shortfall: number
+    surplus?: number
     rework_jobs_count: number
+    pending_rework_errors?: number
     max_rework_round_active: number
     max_rework_rounds: number
     due_soon_count: number
@@ -249,9 +262,22 @@ export interface AnnotatorAnalytics {
   week_label: string
   iso_year: number
   avg_productivity: {
-    objects_per_hour: number
+    objects_per_hour: number | null
+    measured_objects: number
     total_objects: number
+    submitted_objects: number
+    unsubmitted_cvat_objects: number
     total_hours: number
+    status: 'provisional' | 'unavailable'
+    formula: string
+    hours_provenance: {
+      source: 'workflow_elapsed_session'
+      status: 'provisional' | 'unavailable'
+      unit: 'hours'
+      clamp_min_minutes: number
+      clamp_max_minutes: number
+      description: string
+    }
   }
   forecast: {
     estimated_objects: number
@@ -262,16 +288,20 @@ export interface AnnotatorAnalytics {
   ranking: {
     rank: number
     total_annotators: number
-    previous_rank: number
+    previous_rank: number | null
   }
   daily_productivity: {
     date: string
     label: string
     first_pass_objects: number
     rework_objects: number
-    first_pass_per_hour: number
-    rework_per_hour: number
+    submitted_objects: number
+    unsubmitted_cvat_objects: number
+    measured_objects: number
+    first_pass_per_hour: number | null
+    rework_per_hour: number | null
     hours: number
+    hours_status: 'provisional' | 'unavailable'
     is_off_day: boolean
   }[]
   weekly_forecast_series: {

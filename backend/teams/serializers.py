@@ -18,6 +18,7 @@ else:
     _ModelMetaBase = object
 
 _INVALID_MEMBER_MSG = "Người dùng không hợp lệ hoặc không thuộc organization này."
+_INVALID_TO_TEAM_MSG = "Team đích không hợp lệ hoặc không thuộc dự án này."
 
 
 class TeamMemberSerializer(serializers.ModelSerializer):
@@ -99,7 +100,13 @@ class TransferSerializer(serializers.Serializer):
             "incorrect_type": _INVALID_MEMBER_MSG,
         },
     )
-    to_team = serializers.PrimaryKeyRelatedField(queryset=Team.objects.all())
+    to_team = serializers.PrimaryKeyRelatedField(
+        queryset=Team.objects.none(),
+        error_messages={
+            "does_not_exist": _INVALID_TO_TEAM_MSG,
+            "incorrect_type": _INVALID_TO_TEAM_MSG,
+        },
+    )
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
@@ -107,8 +114,10 @@ class TransferSerializer(serializers.Serializer):
         if project is not None:
             user_field = cast(serializers.PrimaryKeyRelatedField, self.fields["user"])
             user_field.queryset = User.objects.filter(role_assignments__project=project).distinct()
+            to_team_field = cast(serializers.PrimaryKeyRelatedField, self.fields["to_team"])
+            to_team_field.queryset = Team.objects.filter(project=project)
 
     def validate_to_team(self, team: Team) -> Team:
         if team.project_id != self.context["project"].id:
-            raise serializers.ValidationError("Team đích không thuộc dự án này.")
+            raise serializers.ValidationError(_INVALID_TO_TEAM_MSG)
         return team

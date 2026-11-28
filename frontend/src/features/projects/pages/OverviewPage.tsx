@@ -12,6 +12,7 @@ import PageState from '../../../shared/components/ui/PageState'
 import SectionCard from '../../../shared/components/ui/SectionCard'
 import StatCard from '../../../shared/components/ui/StatCard'
 import { useRequest } from '../../../shared/hooks/useRequest'
+import { formatDateTime } from '../../../shared/utils/format'
 import { STAGE_LABELS } from '../../jobs/constants'
 import { getOverview } from '../api'
 import { useProject } from '../projectContext'
@@ -43,6 +44,13 @@ export default function OverviewPage() {
           <div className="mt-1.5 flex flex-wrap items-center gap-2 text-sm text-tertiary">
             <span>Vai trò của bạn:</span>
             <RoleBadges roles={project.my_roles} />
+            {project.cvat_synced_at ? (
+              <span className="text-xs text-tertiary">
+                · Đồng bộ CVAT gần nhất: {formatDateTime(project.cvat_synced_at)}
+              </span>
+            ) : project.cvat_org_id != null ? (
+              <span className="text-xs text-tertiary">· Chưa đồng bộ CVAT</span>
+            ) : null}
           </div>
         </div>
         <Tabs selectedKey={period} onSelectionChange={(k) => setPeriod(k as Period)} className="w-auto">
@@ -88,6 +96,106 @@ export default function OverviewPage() {
             <MetricCard label="Rework rate" metric={data.metrics.rework_rate} suffix="%" />
             <MetricCard label="Delivery readiness" metric={data.metrics.delivery_readiness} suffix="%" />
           </div>
+
+          {(data.thresholds.quality_cl != null || data.thresholds.defect_error_rate != null) && (
+            <div className="flex flex-wrap items-center gap-2 rounded-xl bg-primary px-4 py-3 text-sm text-tertiary ring-1 ring-secondary">
+              <span className="font-medium text-secondary">Ngưỡng mục tiêu:</span>
+              {data.thresholds.quality_cl != null && (
+                <Badge type="pill-color" size="sm" color="brand">
+                  Quality CL ≥ {data.thresholds.quality_cl}%
+                </Badge>
+              )}
+              {data.thresholds.defect_error_rate != null && (
+                <Badge type="pill-color" size="sm" color="gray">
+                  Defect error rate ≤ {data.thresholds.defect_error_rate}%
+                </Badge>
+              )}
+              <Link to="../settings" relative="path" className="ml-auto text-xs font-semibold text-brand-secondary hover:underline">
+                Điều chỉnh cấu hình
+              </Link>
+            </div>
+          )}
+
+          {(() => {
+            const decisions = data.pending_decisions
+            const batchesReady = decisions.batches_ready_for_qc2_confirm ?? decisions.batches_ready_for_qc2 ?? 0
+            const escalatedJobs = decisions.escalated_jobs ?? decisions.escalated ?? 0
+            const totalDecisions =
+              decisions.total ??
+              batchesReady + decisions.pending_qc2_samples + decisions.pending_requests + escalatedJobs
+            const decisionRows = [
+              {
+                key: 'qc2-confirm',
+                label: 'Task sẵn sàng xác nhận QC2',
+                count: batchesReady,
+                to: '../batches',
+                action: 'Mở Tasks',
+                tone: batchesReady > 0 ? ('brand' as const) : ('gray' as const),
+              },
+              {
+                key: 'qc2-samples',
+                label: 'Mẫu QC2 chờ kiểm tra',
+                count: decisions.pending_qc2_samples,
+                to: '../qc2/work',
+                action: 'Kiểm tra QC2',
+                tone: decisions.pending_qc2_samples > 0 ? ('warning' as const) : ('gray' as const),
+              },
+              {
+                key: 'requests',
+                label: 'Yêu cầu từ Annotator',
+                count: decisions.pending_requests,
+                to: '../annotator/requests',
+                action: 'Xử lý yêu cầu',
+                tone: decisions.pending_requests > 0 ? ('warning' as const) : ('gray' as const),
+              },
+              {
+                key: 'escalated',
+                label: 'Job bị Escalated',
+                count: escalatedJobs,
+                to: '../jobs?escalated=1',
+                action: 'Xem job',
+                tone: escalatedJobs > 0 ? ('error' as const) : ('gray' as const),
+              },
+            ]
+            return (
+              <SectionCard
+                title={
+                  <span className="inline-flex items-center gap-2">
+                    Việc cần quyết định (TD13)
+                    <Badge
+                      type="pill-color"
+                      size="sm"
+                      color={escalatedJobs > 0 ? 'error' : totalDecisions > 0 ? 'warning' : 'gray'}
+                    >
+                      {totalDecisions}
+                    </Badge>
+                  </span>
+                }
+              >
+                <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4">
+                  {decisionRows.map((item) => (
+                    <Link
+                      key={item.key}
+                      to={item.to}
+                      relative="path"
+                      className="group flex flex-col justify-between gap-2 rounded-xl bg-secondary p-4 ring-1 ring-secondary transition hover:bg-primary_hover hover:ring-brand"
+                    >
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="text-display-xs font-semibold text-primary tabular-nums">{item.count}</span>
+                        <Badge type="pill-color" size="sm" color={item.tone}>
+                          {item.count > 0 ? 'Cần xử lý' : 'Ổn định'}
+                        </Badge>
+                      </div>
+                      <span className="text-sm font-medium text-secondary">{item.label}</span>
+                      <span className="inline-flex items-center gap-1 text-xs font-semibold text-brand-secondary group-hover:underline">
+                        {item.action} <ArrowRight className="size-3.5" />
+                      </span>
+                    </Link>
+                  ))}
+                </div>
+              </SectionCard>
+            )
+          })()}
 
           <div className="grid grid-cols-1 gap-5 lg:grid-cols-12">
             <SectionCard title="Tiến độ theo stage" className="lg:col-span-7">
@@ -139,7 +247,7 @@ export default function OverviewPage() {
                 <StatCard value={data.counts.batches} label="Task" />
                 <StatCard value={data.counts.jobs} label="Job" />
               </div>
-              <div className="mt-3 grid grid-cols-2 gap-3">
+              <div className="mt-3 grid grid-cols-3 gap-3">
                 <StatCard
                   value={data.counts.escalated}
                   label="Escalated"
@@ -147,21 +255,61 @@ export default function OverviewPage() {
                 />
                 <StatCard
                   value={data.counts.overdue}
-                  label="Quá hạn"
+                  label="Job quá hạn"
                   tone={data.counts.overdue > 0 ? 'error' : undefined}
                 />
+                <StatCard
+                  value={data.counts.overdue_batches}
+                  label="Task quá hạn"
+                  tone={data.counts.overdue_batches > 0 ? 'error' : undefined}
+                />
               </div>
+              <p className="mt-3 text-xs text-tertiary">
+                Task sẵn sàng bàn giao: {data.counts.ready_batches} · Đã bàn giao: {data.counts.delivered_batches} · Job còn lại: {data.counts.remaining_jobs}
+              </p>
             </SectionCard>
           </div>
 
-          <div className="grid grid-cols-2 gap-3 lg:grid-cols-3">
+          <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
             <MetricCard label="Job nộp trong kỳ" metric={data.metrics.submitted_in_period} />
             <MetricCard label="Thành viên đang hoạt động" metric={data.metrics.active_members} />
             <MetricCard label="First pass yield" metric={data.metrics.first_pass_yield} suffix="%" />
             <MetricCard label="QC2 pass rate" metric={data.metrics.qc2_pass_rate} suffix="%" />
+            <MetricCard label="Bàn giao đúng hạn (DH07)" metric={data.metrics.delivery_on_time_rate} suffix="%" />
             <MetricCard label="Defect error rate" metric={data.metrics.defect_error_rate} suffix="%" />
+            <MetricCard label="Tỷ lệ đảo ngược khiếu nại" metric={data.metrics.dispute_overturn_rate} suffix="%" />
             <MetricCard label="Ước tính hoàn thành" metric={data.metrics.estimated_completion} />
           </div>
+
+          {(data.errors_by_category.length > 0 ||
+            data.errors_by_severity.minor + data.errors_by_severity.major + data.errors_by_severity.critical > 0) && (
+            <SectionCard title="Phân bố lỗi QC (CL04)">
+              <div className="flex flex-wrap items-center gap-2">
+                <Badge type="pill-color" size="sm" color="error">
+                  Nghiêm trọng: {data.errors_by_severity.critical}
+                </Badge>
+                <Badge type="pill-color" size="sm" color="warning">
+                  Trung bình: {data.errors_by_severity.major}
+                </Badge>
+                <Badge type="pill-color" size="sm" color="gray">
+                  Nhẹ: {data.errors_by_severity.minor}
+                </Badge>
+              </div>
+              {data.errors_by_category.length > 0 && (
+                <ul className="mt-3 flex flex-wrap gap-2">
+                  {data.errors_by_category.map((item) => (
+                    <li
+                      key={item.category}
+                      className="inline-flex items-center gap-1.5 rounded-lg bg-secondary px-3 py-1.5 text-sm text-secondary"
+                    >
+                      <span>{item.category}</span>
+                      <span className="font-semibold text-primary tabular-nums">{item.count}</span>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </SectionCard>
+          )}
 
           <SectionCard
             title={

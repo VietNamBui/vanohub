@@ -7,11 +7,34 @@ import { Button } from '@/components/base/buttons/button'
 import { FeaturedIcon } from '@/components/foundations/featured-icon/featured-icon'
 import { useAuth } from '../features/auth/useAuth'
 import { listProjectNotifications, markProjectNotificationsRead } from '../features/projects/api'
+import { canMarkNotificationRead, sortUnifiedNotifications } from '../features/projects/projectHelpers'
 import type { NotificationCategory, ProjectSummary, UnifiedNotification } from '../features/projects/types'
 import { formatDateTime, formatRelative } from '../shared/utils/format'
 import { cx } from '@/utils/cx'
 
 const POLL_MS = 60_000
+
+const CATEGORY_LABELS: Record<NotificationCategory, string> = {
+  escalated: 'Escalated',
+  rework: 'Rework',
+  deadline: 'Hạn nộp',
+  review_needed: 'Cần kiểm',
+  assigned: 'Giao việc',
+  dispute: 'Khiếu nại',
+  qc_pass: 'Đạt QC',
+  announcement: 'Thông báo',
+}
+
+const CATEGORY_ORDER: NotificationCategory[] = [
+  'escalated',
+  'rework',
+  'deadline',
+  'review_needed',
+  'assigned',
+  'dispute',
+  'qc_pass',
+  'announcement',
+]
 
 interface ScopedNotification extends UnifiedNotification {
   projectId: number
@@ -19,46 +42,58 @@ interface ScopedNotification extends UnifiedNotification {
   scopedKey: string
 }
 
-interface FeedState {
-  scope: string
+interface FeedSnapshot {
   items: ScopedNotification[]
+  allCount: number
+  unreadCount: number
+}
+
+interface FeedState extends FeedSnapshot {
+  scope: string
   error: unknown
 }
 
-async function fetchNotifications(projects: ProjectSummary[], userId: number): Promise<ScopedNotification[]> {
-  if (!projects.length || !userId) return []
+async function fetchNotifications(projects: ProjectSummary[], userId: number): Promise<FeedSnapshot> {
+  if (!projects.length || !userId) return { items: [], allCount: 0, unreadCount: 0 }
   if (projects.length === 1) {
     const project = projects[0]
     const feed = await listProjectNotifications(project.id)
-    return feed.items.map((item) => ({
-      ...item,
-      projectId: project.id,
-      projectName: project.name,
-      scopedKey: `${project.id}:${item.id}`,
-    }))
-  }
-  const results = await Promise.allSettled(
-    projects.map(async (project) => {
-      const feed = await listProjectNotifications(project.id)
-      return feed.items.map<ScopedNotification>((item) => ({
+    return {
+      allCount: feed.all_count,
+      unreadCount: feed.unread_count,
+      items: feed.items.map((item) => ({
         ...item,
         projectId: project.id,
         projectName: project.name,
         scopedKey: `${project.id}:${item.id}`,
-      }))
+      })),
+    }
+  }
+  const results = await Promise.allSettled(
+    projects.map(async (project) => {
+      const feed = await listProjectNotifications(project.id)
+      return {
+        allCount: feed.all_count,
+        unreadCount: feed.unread_count,
+        items: feed.items.map<ScopedNotification>((item) => ({
+          ...item,
+          projectId: project.id,
+          projectName: project.name,
+          scopedKey: `${project.id}:${item.id}`,
+        })),
+      }
     }),
   )
-  const fulfilled = results.filter((r): r is PromiseFulfilledResult<ScopedNotification[]> => r.status === 'fulfilled')
+  const fulfilled = results.filter((r): r is PromiseFulfilledResult<FeedSnapshot> => r.status === 'fulfilled')
   if (fulfilled.length === 0 && results.length > 0) {
     const firstRejected = results.find((r): r is PromiseRejectedResult => r.status === 'rejected')
     throw firstRejected?.reason ?? new Error('Không tải được thông báo.')
   }
-  return fulfilled
-    .flatMap((r) => r.value)
-    .sort((a, b) => {
-      if (a.is_pinned_pending !== b.is_pinned_pending) return a.is_pinned_pending ? -1 : 1
-      return b.created_at.localeCompare(a.created_at)
-    })
+  return {
+    allCount: fulfilled.reduce((sum, r) => sum + r.value.allCount, 0),
+    unreadCount: fulfilled.reduce((sum, r) => sum + r.value.unreadCount, 0),
+    items: sortUnifiedNotifications(fulfilled.flatMap((r) => r.value.items)),
+  }
 }
 
 function CategoryIcon({ category }: { category: NotificationCategory }) {
@@ -95,8 +130,9 @@ export default function NotificationBell({ projects }: { projects: ProjectSummar
   const userId = user?.id ?? 0
   const [open, setOpen] = useState(false)
   const [tab, setTab] = useState<'all' | 'unread'>('all')
+  const [categoryFilter, setCategoryFilter] = useState<'all' | NotificationCategory>('all')
   const [refreshTick, setRefreshTick] = useState(0)
-  const [feed, setFeed] = useState<FeedState>({ scope: '', items: [], error: null })
+  const [feed, setFeed] = useState<FeedState>({ scope: '', items: [], allCount: 0, unreadCount: 0, error: null })
   const scopeKey = projects.map((p) => p.id).join(',')
   const fullScope = `${scopeKey}:${userId}`
   const multiProject = projects.length > 1
@@ -106,13 +142,15 @@ export default function NotificationBell({ projects }: { projects: ProjectSummar
   useEffect(() => {
     let ignore = false
     loadFeed().then(
-      (items) => {
-        if (!ignore) setFeed({ scope: fullScope, items, error: null })
+      (snapshot) => {
+        if (!ignore) setFeed({ scope: fullScope, ...snapshot, error: null })
       },
       (error: unknown) => {
         if (!ignore) {
           setFeed((prev) =>
-            prev.scope === fullScope ? { ...prev, error } : { scope: fullScope, items: [], error },
+            prev.scope === fullScope
+              ? { ...prev, error }
+              : { scope: fullScope, items: [], allCount: 0, unreadCount: 0, error },
           )
         }
       },
@@ -139,25 +177,36 @@ export default function NotificationBell({ projects }: { projects: ProjectSummar
   const isLoading = feed.scope !== fullScope
   const error = feed.scope === fullScope ? feed.error : null
   const items = feed.scope === fullScope ? feed.items : []
-  const unreadCount = items.filter((i) => !i.is_read).length
-  const visible = tab === 'unread' ? items.filter((i) => !i.is_read) : items
+  const allCount = feed.scope === fullScope ? feed.allCount : 0
+  const unreadCount = feed.scope === fullScope ? feed.unreadCount : 0
+  const tabItems = tab === 'unread' ? items.filter((i) => !i.is_read) : items
+  const availableCategories = CATEGORY_ORDER.filter(
+    (cat) => cat === categoryFilter || items.some((item) => item.category === cat),
+  )
+  const visible = categoryFilter === 'all' ? tabItems : tabItems.filter((i) => i.category === categoryFilter)
 
   async function markAllRead() {
-    setFeed((prev) => ({
-      ...prev,
-      items: prev.items.map((item) => (item.is_pinned_pending ? item : { ...item, is_read: true })),
-    }))
+    setFeed((prev) => {
+      const marked = prev.items.filter((item) => canMarkNotificationRead(item)).length
+      return {
+        ...prev,
+        unreadCount: Math.max(0, prev.unreadCount - marked),
+        items: prev.items.map((item) => (canMarkNotificationRead(item) ? { ...item, is_read: true } : item)),
+      }
+    })
     try {
       await Promise.allSettled(projects.map((p) => markProjectNotificationsRead(p.id)))
+      setRefreshTick((t) => t + 1)
     } catch {
       // ignore optimistic failure
     }
   }
 
   async function handleItemClick(item: ScopedNotification) {
-    if (!item.is_pinned_pending && !item.is_read) {
+    if (canMarkNotificationRead(item)) {
       setFeed((prev) => ({
         ...prev,
+        unreadCount: Math.max(0, prev.unreadCount - 1),
         items: prev.items.map((it) => (it.scopedKey === item.scopedKey ? { ...it, is_read: true } : it)),
       }))
       try {
@@ -222,7 +271,7 @@ export default function NotificationBell({ projects }: { projects: ProjectSummar
                     <>
                       Tất cả
                       <Badge size="sm" type="pill-color" color={isSelected ? 'brand' : 'gray'}>
-                        {items.length}
+                        {allCount}
                       </Badge>
                     </>
                   )}
@@ -240,6 +289,47 @@ export default function NotificationBell({ projects }: { projects: ProjectSummar
               </Tabs.List>
             </Tabs>
 
+            {availableCategories.length > 0 && (
+              <div
+                className="flex flex-wrap items-center gap-1.5 border-b border-secondary px-6 py-2.5"
+                role="group"
+                aria-label="Lọc theo loại thông báo"
+              >
+                <button
+                  type="button"
+                  onClick={() => setCategoryFilter('all')}
+                  aria-pressed={categoryFilter === 'all'}
+                  className={cx(
+                    'cursor-pointer rounded-full px-2.5 py-1 text-xs font-medium transition',
+                    categoryFilter === 'all'
+                      ? 'bg-brand-solid text-white'
+                      : 'bg-secondary text-secondary hover:bg-primary_hover',
+                  )}
+                >
+                  Tất cả loại
+                </button>
+                {availableCategories.map((cat) => {
+                  const active = categoryFilter === cat
+                  return (
+                    <button
+                      key={cat}
+                      type="button"
+                      onClick={() => setCategoryFilter(active ? 'all' : cat)}
+                      aria-pressed={active}
+                      className={cx(
+                        'cursor-pointer rounded-full px-2.5 py-1 text-xs font-medium transition',
+                        active
+                          ? 'bg-brand-solid text-white'
+                          : 'bg-secondary text-secondary hover:bg-primary_hover',
+                      )}
+                    >
+                      {CATEGORY_LABELS[cat]}
+                    </button>
+                  )
+                })}
+              </div>
+            )}
+
             <div className="flex-1 overflow-y-auto py-2">
               {error != null && items.length === 0 ? (
                 <p className="px-6 py-12 text-center text-sm text-error-primary">Không tải được thông báo.</p>
@@ -249,7 +339,11 @@ export default function NotificationBell({ projects }: { projects: ProjectSummar
                 <div className="flex flex-col items-center gap-2 px-6 py-14 text-center">
                   <FeaturedIcon icon={Bell01} color="gray" theme="light" size="md" />
                   <p className="text-sm font-semibold text-secondary">
-                    {tab === 'unread' ? 'Không có thông báo chưa đọc' : 'Chưa có thông báo nào'}
+                    {categoryFilter !== 'all'
+                      ? `Không có thông báo loại "${CATEGORY_LABELS[categoryFilter]}"`
+                      : tab === 'unread'
+                        ? 'Không có thông báo chưa đọc'
+                        : 'Chưa có thông báo nào'}
                   </p>
                   <p className="text-xs text-tertiary">Các thông báo của organization về rework, hạn nộp và phản hồi sẽ hiện ở đây.</p>
                 </div>
@@ -298,7 +392,9 @@ export default function NotificationBell({ projects }: { projects: ProjectSummar
             </div>
 
             <footer className="border-t border-secondary px-6 py-4 text-xs text-tertiary">
-              Các thông báo cần xử lý sẽ được giữ nổi bật cho tới khi hoàn tất.
+              {allCount > items.length
+                ? `Hiển thị ${items.length}/${allCount} thông báo gần nhất. Các thông báo cần xử lý sẽ được giữ nổi bật cho tới khi hoàn tất.`
+                : 'Các thông báo cần xử lý sẽ được giữ nổi bật cho tới khi hoàn tất.'}
             </footer>
           </aside>
         </div>

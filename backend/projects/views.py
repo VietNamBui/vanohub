@@ -3,7 +3,7 @@ from datetime import timedelta
 from typing import Any, cast
 
 from django.db import IntegrityError, transaction
-from django.db.models import Count, Max, Prefetch, Q
+from django.db.models import Count, F, Max, Prefetch, Q
 from django.utils import timezone
 from rest_framework import mixins, status, viewsets
 from rest_framework.decorators import action
@@ -24,7 +24,7 @@ from cvat_integration.sync import dataset_labels, sync_organization
 from jobs.models import ACTIVE_ANNOTATOR_STATUSES, OPEN_STATUSES, STAGE_STATUSES, Job, JobStatus
 from quality.models import Audit, AuditSample
 from quality.qc2 import ensure_qc2_sample
-from teams.models import TeamMember
+from teams.models import Team, TeamMember
 
 from .models import (
     ActivityLog,
@@ -107,7 +107,18 @@ class ProjectViewSet(
         return queryset
 
     def get_queryset(self) -> Any:
-        return self._base_queryset().filter(role_assignments__user=self.request.user).distinct()
+        queryset = self._base_queryset()
+        if getattr(self.request.user, "is_superuser", False):
+            return queryset
+        return queryset.filter(role_assignments__user=self.request.user).distinct()
+
+    def get_object(self) -> Any:
+        lookup_url_kwarg = self.lookup_url_kwarg or self.lookup_field
+        try:
+            parse_int_param(self.kwargs.get(lookup_url_kwarg), "pk")
+        except ValidationError as exc:
+            raise NotFound("Không tìm thấy organization.") from exc
+        return super().get_object()
 
     def get_serializer_class(self) -> Any:
         if self.action in {"create", "update", "partial_update"}:
@@ -129,21 +140,33 @@ class ProjectViewSet(
             )
 
     def _sync_pms(self, project, pm_ids, actor):
-        target_ids = set(pm_ids)
+        target_ids = sorted(set(pm_ids))
         if not target_ids:
             raise ValidationError({"pm_ids": "Mỗi organization phải có ít nhất một Project Manager."})
-        current_ids = set(
-            RoleAssignment.objects.filter(project=project, role=Role.PROJECT_MANAGER).values_list("user_id", flat=True)
+        active_ids = set(
+            User.objects.filter(pk__in=target_ids, is_active=True).values_list("id", flat=True)
         )
-        to_remove = current_ids - target_ids
-        to_add = target_ids - current_ids
+        missing = [uid for uid in target_ids if uid not in active_ids]
+        if missing:
+            raise ValidationError({"pm_ids": f"Không tìm thấy tài khoản hoạt động với ID: {missing}."})
+        current_ids = set(
+            RoleAssignment.objects.select_for_update()
+            .filter(project=project, role=Role.PROJECT_MANAGER)
+            .values_list("user_id", flat=True)
+        )
+        to_remove = sorted(current_ids - set(target_ids))
+        to_add = [uid for uid in target_ids if uid not in current_ids]
         if to_remove:
             RoleAssignment.objects.filter(
                 project=project, role=Role.PROJECT_MANAGER, user_id__in=to_remove
             ).delete()
+            User.objects.filter(pk__in=to_remove).update(token_version=F("token_version") + 1)
         for uid in to_add:
-            RoleAssignment.objects.create(
-                project=project, user_id=uid, role=Role.PROJECT_MANAGER, granted_by=actor
+            RoleAssignment.objects.get_or_create(
+                project=project,
+                user_id=uid,
+                role=Role.PROJECT_MANAGER,
+                defaults={"granted_by": actor},
             )
 
     def create(self, request, *args, **kwargs):
@@ -153,16 +176,19 @@ class ProjectViewSet(
         pm_ids = validated.pop("pm_ids", None)
         if pm_ids is None:
             pm_ids = [cast(Any, request.user).pk]
-        with transaction.atomic():
-            project = cast(Project, serializer.save(created_by=request.user))
-            self._sync_pms(project, pm_ids, request.user)
-            ActivityLog.record(
-                project=project,
-                actor=request.user,
-                action="project.create",
-                target=project,
-                after={"name": project.name, "pm_ids": pm_ids},
-            )
+        try:
+            with transaction.atomic():
+                project = cast(Project, serializer.save(created_by=request.user))
+                self._sync_pms(project, pm_ids, request.user)
+                ActivityLog.record(
+                    project=project,
+                    actor=request.user,
+                    action="project.create",
+                    target=project,
+                    after={"name": project.name, "pm_ids": pm_ids},
+                )
+        except IntegrityError as exc:
+            raise ValidationError("Không thể tạo organization do xung đột dữ liệu.") from exc
         fresh = self._base_queryset().get(pk=project.pk)
         return Response(
             ProjectDetailSerializer(fresh, context=self.get_serializer_context()).data,
@@ -171,21 +197,29 @@ class ProjectViewSet(
 
     def update(self, request, *args, **kwargs):
         partial = kwargs.pop("partial", False)
-        project = self.get_object()
-        self._require_project_pm(project)
-        serializer = ProjectWriteSerializer(project, data=request.data, partial=partial)
+        target = self.get_object()
+        self._require_project_pm(target)
+        serializer = ProjectWriteSerializer(target, data=request.data, partial=partial)
         pm_ids = validated_dict(serializer).pop("pm_ids", None)
-        with transaction.atomic():
-            project = cast(Project, serializer.save())
-            if pm_ids is not None:
-                self._sync_pms(project, pm_ids, request.user)
-            ActivityLog.record(
-                project=project,
-                actor=request.user,
-                action="project.update",
-                target=project,
-                after={"name": project.name, **({"pm_ids": pm_ids} if pm_ids is not None else {})},
-            )
+        try:
+            with transaction.atomic():
+                project = Project.objects.select_for_update().filter(pk=target.pk).first()
+                if project is None:
+                    raise NotFound("Không tìm thấy organization.")
+                self._require_project_pm(project)
+                serializer.instance = project
+                project = cast(Project, serializer.save())
+                if pm_ids is not None:
+                    self._sync_pms(project, pm_ids, request.user)
+                ActivityLog.record(
+                    project=project,
+                    actor=request.user,
+                    action="project.update",
+                    target=project,
+                    after={"name": project.name, **({"pm_ids": pm_ids} if pm_ids is not None else {})},
+                )
+        except IntegrityError as exc:
+            raise ValidationError("Không thể cập nhật organization do xung đột dữ liệu.") from exc
         fresh = self._base_queryset().get(pk=project.pk)
         return Response(ProjectDetailSerializer(fresh, context=self.get_serializer_context()).data)
 
@@ -203,21 +237,24 @@ class ProjectSettingsView(ProjectScopedViewMixin, APIView):
         return Response(ProjectSettingsSerializer(self.project).data)
 
     def patch(self, request, project_id):
-        before = dict(ProjectSettingsSerializer(self.project).data)
-        serializer = ProjectSettingsSerializer(self.project, data=request.data, partial=True)
-        validated_dict(serializer)
-        serializer.save()
-        after = dict(serializer.data)
-        changed = {k: v for k, v in after.items() if before.get(k) != v}
-        if changed:
-            ActivityLog.record(
-                project=self.project,
-                actor=request.user,
-                action="project.settings",
-                target=self.project,
-                before={k: before[k] for k in changed},
-                after=changed,
-            )
+        with transaction.atomic():
+            project = Project.objects.select_for_update().get(pk=self.project.pk)
+            before = dict(ProjectSettingsSerializer(project).data)
+            serializer = ProjectSettingsSerializer(project, data=request.data, partial=True)
+            validated_dict(serializer)
+            serializer.save()
+            after = dict(serializer.data)
+            changed = {k: v for k, v in after.items() if before.get(k) != v}
+            if changed:
+                ActivityLog.record(
+                    project=project,
+                    actor=request.user,
+                    action="project.settings",
+                    target=project,
+                    before={k: before[k] for k in changed},
+                    after=changed,
+                )
+        self._project = project
         return Response(after)
 
 
@@ -265,21 +302,63 @@ class ProjectMembersView(ProjectScopedViewMixin, APIView):
 
     def post(self, request, project_id):
         data = validated_dict(CreateMemberSerializer(data=request.data, context={"project": self.project}))
-        team = data.get("team")
+        explicit_username = (data.get("username") or "").strip()
+        team_obj = data.get("team")
         with transaction.atomic():
-            user = User(
-                username=data.get("username") or credentials.unique_username(data["full_name"], User),
-                first_name=data["full_name"],
-                email=data.get("email", ""),
-            )
-            password = credentials.set_initial_password(user)
-            user.save()
-            RoleAssignment.objects.bulk_create([
-                RoleAssignment(user=user, role=role, project=self.project, granted_by=request.user)
-                for role in data["roles"]
-            ])
-            if team:
-                TeamMember.objects.create(team=team, user=user)
+            team = None
+            if team_obj is not None:
+                team = Team.objects.select_for_update().filter(pk=team_obj.pk, project=self.project).first()
+                if team is None:
+                    raise ValidationError({"team": "Team không thuộc organization này."})
+
+            user: User | None = None
+            password = ""
+            if explicit_username:
+                user_candidate = User(
+                    username=explicit_username,
+                    first_name=data["full_name"],
+                    email=data.get("email", ""),
+                )
+                password = credentials.set_initial_password(user_candidate)
+                try:
+                    with transaction.atomic():
+                        user_candidate.save()
+                    user = user_candidate
+                except IntegrityError as exc:
+                    raise ValidationError({"username": "Tên tài khoản đã tồn tại."}) from exc
+            else:
+                for _ in range(10):
+                    candidate = credentials.unique_username(data["full_name"], User)
+                    user_try = User(
+                        username=candidate,
+                        first_name=data["full_name"],
+                        email=data.get("email", ""),
+                    )
+                    password_try = credentials.set_initial_password(user_try)
+                    try:
+                        with transaction.atomic():
+                            user_try.save()
+                        user = user_try
+                        password = password_try
+                        break
+                    except IntegrityError:
+                        continue
+                if user is None:
+                    raise ValidationError(
+                        {"username": "Không thể tạo tên tài khoản duy nhất, vui lòng nhập thủ công."}
+                    )
+
+            try:
+                with transaction.atomic():
+                    RoleAssignment.objects.bulk_create([
+                        RoleAssignment(user=user, role=role, project=self.project, granted_by=request.user)
+                        for role in data["roles"]
+                    ])
+                    if team is not None:
+                        TeamMember.objects.create(team=team, user=user)
+            except IntegrityError as exc:
+                raise ValidationError("Dữ liệu thành viên xung đột với bản ghi hiện có.") from exc
+
             ActivityLog.record(
                 project=self.project,
                 actor=request.user,
@@ -287,7 +366,7 @@ class ProjectMembersView(ProjectScopedViewMixin, APIView):
                 target=user,
                 after={"roles": data["roles"], "team": team.name if team else None},
             )
-        return Response(
+        response = Response(
             {
                 "user": UserBriefSerializer(user).data,
                 "username": user.username,
@@ -297,10 +376,19 @@ class ProjectMembersView(ProjectScopedViewMixin, APIView):
             },
             status=status.HTTP_201_CREATED,
         )
+        response["Cache-Control"] = "no-store"
+        return response
 
 
 def _roles_payload(user_id: int, direct: set[str]) -> dict[str, Any]:
     return {"user": user_id, "roles": sorted(expand_roles(direct)), "direct_roles": sorted(direct)}
+
+
+def _parse_user_pk(user_id: Any) -> int:
+    try:
+        return parse_int_param(user_id, "user_id")
+    except ValidationError as exc:
+        raise NotFound("Người này không thuộc organization.") from exc
 
 
 class ProjectMemberRolesView(ProjectScopedViewMixin, APIView):
@@ -310,9 +398,10 @@ class ProjectMemberRolesView(ProjectScopedViewMixin, APIView):
 
     def post(self, request, project_id, user_id):
         project = self.project
+        parsed_user_id = _parse_user_pk(user_id)
         try:
             with transaction.atomic():
-                user = User.objects.select_for_update().filter(pk=user_id).first()
+                user = User.objects.select_for_update().filter(pk=parsed_user_id).first()
                 if user is None:
                     raise NotFound("Người này không thuộc organization.")
                 current = set(
@@ -333,7 +422,7 @@ class ProjectMemberRolesView(ProjectScopedViewMixin, APIView):
                 )
         except IntegrityError as exc:
             raise ValidationError({"role": "Người này đã có vai trò này."}) from exc
-        return Response(_roles_payload(user_id, current | {role}), status=status.HTTP_201_CREATED)
+        return Response(_roles_payload(parsed_user_id, current | {role}), status=status.HTTP_201_CREATED)
 
 
 def _role_removal_blocker(project, user, role):
@@ -363,8 +452,9 @@ class ProjectMemberRoleDetailView(ProjectScopedViewMixin, APIView):
 
     def delete(self, request, project_id, user_id, role):
         project = self.project
+        parsed_user_id = _parse_user_pk(user_id)
         with transaction.atomic():
-            user = User.objects.select_for_update().filter(pk=user_id).first()
+            user = User.objects.select_for_update().filter(pk=parsed_user_id).first()
             if user is None:
                 raise NotFound("Người này không thuộc organization.")
             assignments = RoleAssignment.objects.filter(project=project, user=user)
@@ -387,6 +477,8 @@ class ProjectMemberRoleDetailView(ProjectScopedViewMixin, APIView):
             deleted, _ = assignments.filter(role=role).delete()
             if deleted == 0:
                 raise ValidationError("Người này không có vai trò này.")
+            user.token_version += 1
+            user.save(update_fields=["token_version"])
             ActivityLog.record(
                 project=project,
                 actor=request.user,
@@ -394,11 +486,12 @@ class ProjectMemberRoleDetailView(ProjectScopedViewMixin, APIView):
                 target=user,
                 before={"role": role},
             )
-        return Response(_roles_payload(user_id, current - {role}))
+        return Response(_roles_payload(parsed_user_id, current - {role}))
 
 
 def _project_member(project, user_id):
-    user = User.objects.filter(pk=user_id, role_assignments__project=project).distinct().first()
+    parsed_user_id = _parse_user_pk(user_id)
+    user = User.objects.filter(pk=parsed_user_id, role_assignments__project=project).distinct().first()
     if user is None:
         raise NotFound("Người này không thuộc organization.")
     return user
@@ -439,13 +532,18 @@ class MemberResetPasswordView(ProjectScopedViewMixin, APIView):
     required_capabilities = {"*": Cap.MANAGE_TEAM}
 
     def post(self, request, project_id, user_id):
-        user = _project_member(self.project, user_id)
-        if user.pk == request.user.pk:
-            raise ValidationError("Tự đổi mật khẩu của mình ở menu tài khoản.")
-        _ensure_credential_target_manageable(request.user, self.project, user)
-        password = credentials.set_initial_password(user)
-        user.save(update_fields=["password", "initial_password_encrypted"])
-        ActivityLog.record(project=self.project, actor=request.user, action="member.reset_password", target=user)
+        parsed_user_id = _parse_user_pk(user_id)
+        with transaction.atomic():
+            user = User.objects.select_for_update().filter(pk=parsed_user_id).first()
+            if user is None or not RoleAssignment.objects.filter(project=self.project, user=user).exists():
+                raise NotFound("Người này không thuộc organization.")
+            if user.pk == request.user.pk:
+                raise ValidationError("Tự đổi mật khẩu của mình ở menu tài khoản.")
+            _ensure_credential_target_manageable(request.user, self.project, user)
+            password = credentials.set_initial_password(user)
+            user.token_version += 1
+            user.save(update_fields=["password", "initial_password_encrypted", "token_version"])
+            ActivityLog.record(project=self.project, actor=request.user, action="member.reset_password", target=user)
         response = Response({"username": user.username, "password": password, "status": "initial"})
         response["Cache-Control"] = "no-store"
         return response
@@ -526,19 +624,30 @@ class DatasetViewSet(
         except CvatError as exc:
             return Response({"labels": [], "detail": str(exc)})
 
-    @action(detail=True, methods=["post"])
-    def lock(self, request, project_id, pk=None):
-        dataset = self.get_object()
-        _set_status(dataset, DataStatus.LOCKED, project=self.project, actor=request.user, action="dataset.lock")
+    def _set_dataset_status(self, request, pk, new_status, action_name):
+        try:
+            dataset_pk = parse_int_param(pk, "pk")
+        except ValidationError as exc:
+            raise NotFound("Không tìm thấy project trong organization.") from exc
+        with transaction.atomic():
+            dataset = (
+                Dataset.objects.select_for_update(of=("self",))
+                .filter(pk=dataset_pk, project=self.project)
+                .first()
+            )
+            if dataset is None:
+                raise NotFound("Không tìm thấy project trong organization.")
+            _set_status(dataset, new_status, project=self.project, actor=request.user, action=action_name)
         fresh = self._base_queryset().get(pk=dataset.pk)
         return Response(self.get_serializer(fresh).data)
 
     @action(detail=True, methods=["post"])
+    def lock(self, request, project_id, pk=None):
+        return self._set_dataset_status(request, pk, DataStatus.LOCKED, "dataset.lock")
+
+    @action(detail=True, methods=["post"])
     def unlock(self, request, project_id, pk=None):
-        dataset = self.get_object()
-        _set_status(dataset, DataStatus.ACTIVE, project=self.project, actor=request.user, action="dataset.unlock")
-        fresh = self._base_queryset().get(pk=dataset.pk)
-        return Response(self.get_serializer(fresh).data)
+        return self._set_dataset_status(request, pk, DataStatus.ACTIVE, "dataset.unlock")
 
 
 class ProjectCvatSyncView(ProjectScopedViewMixin, APIView):
@@ -605,46 +714,86 @@ class BatchViewSet(
             queryset = queryset.filter(name__icontains=params["search"])
         return queryset
 
+    def update(self, request, *args, **kwargs):
+        partial = kwargs.pop("partial", False)
+        instance = self.get_object()
+        serializer = self.get_serializer(instance, data=request.data, partial=partial)
+        serializer.is_valid(raise_exception=True)
+        self.perform_update(serializer)
+        fresh = self._base_queryset().get(pk=instance.pk)
+        return Response(self.get_serializer(fresh).data)
+
     def perform_update(self, serializer):
         instance = cast(Batch, serializer.instance)
-        before_deadline = instance.deadline
-        before_team = instance.team
-        batch = cast(Batch, serializer.save())
-        if batch.deadline != before_deadline:
-            # Deadline đặt theo task → job của task nhận theo (job đã xong thì không đổi).
-            batch.jobs.exclude(status__in=[JobStatus.APPROVED, JobStatus.DELIVERED]).update(deadline=batch.deadline)
-        if batch.team_id != (before_team and before_team.id):
-            ActivityLog.record(
-                project=self.project,
-                actor=self.request.user,
-                action="batch.assign_team",
-                target=batch,
-                before={"team": before_team and before_team.name},
-                after={"team": batch.team and batch.team.name},
+        try:
+            with transaction.atomic():
+                locked_batch = (
+                    Batch.objects.select_for_update(of=("self",))
+                    .select_related("team", "dataset", "qc2_confirmed_by")
+                    .filter(pk=instance.pk, project=self.project)
+                    .first()
+                )
+                if locked_batch is None:
+                    raise NotFound("Không tìm thấy task trong organization.")
+                before_deadline = locked_batch.deadline
+                before_team = locked_batch.team
+                serializer.instance = locked_batch
+                batch = cast(Batch, serializer.save())
+                if batch.deadline != before_deadline:
+                    # Deadline đặt theo task → khoá Batch → Job theo thứ tự id trước khi cập nhật.
+                    target_jobs = list(
+                        Job.objects.select_for_update(of=("self",))
+                        .filter(batch=batch)
+                        .exclude(status__in=[JobStatus.APPROVED, JobStatus.DELIVERED])
+                        .order_by("id")
+                    )
+                    if target_jobs:
+                        Job.objects.filter(pk__in=[j.pk for j in target_jobs]).update(deadline=batch.deadline)
+                if batch.team_id != (before_team and before_team.id):
+                    ActivityLog.record(
+                        project=self.project,
+                        actor=self.request.user,
+                        action="batch.assign_team",
+                        target=batch,
+                        before={"team": before_team and before_team.name},
+                        after={"team": batch.team and batch.team.name},
+                    )
+                if batch.deadline != before_deadline:
+                    ActivityLog.record(
+                        project=self.project,
+                        actor=self.request.user,
+                        action="batch.deadline",
+                        target=batch,
+                        before={"deadline": format_rfc3339_utc(before_deadline)},
+                        after={"deadline": format_rfc3339_utc(batch.deadline)},
+                    )
+        except IntegrityError as exc:
+            raise ValidationError("Không thể cập nhật task do dữ liệu tham chiếu không hợp lệ.") from exc
+
+    def _set_batch_status(self, request, pk, new_status, action_name):
+        try:
+            batch_pk = parse_int_param(pk, "pk")
+        except ValidationError as exc:
+            raise NotFound("Không tìm thấy task trong organization.") from exc
+        with transaction.atomic():
+            batch = (
+                Batch.objects.select_for_update(of=("self",))
+                .filter(pk=batch_pk, project=self.project)
+                .first()
             )
-        if batch.deadline != before_deadline:
-            ActivityLog.record(
-                project=self.project,
-                actor=self.request.user,
-                action="batch.deadline",
-                target=batch,
-                before={"deadline": format_rfc3339_utc(before_deadline)},
-                after={"deadline": format_rfc3339_utc(batch.deadline)},
-            )
+            if batch is None:
+                raise NotFound("Không tìm thấy task trong organization.")
+            _set_status(batch, new_status, project=self.project, actor=request.user, action=action_name)
+        fresh = self._base_queryset().get(pk=batch.pk)
+        return Response(self.get_serializer(fresh).data)
 
     @action(detail=True, methods=["post"])
     def lock(self, request, project_id, pk=None):
-        batch = self.get_object()
-        _set_status(batch, DataStatus.LOCKED, project=self.project, actor=request.user, action="batch.lock")
-        fresh = self._base_queryset().get(pk=batch.pk)
-        return Response(self.get_serializer(fresh).data)
+        return self._set_batch_status(request, pk, DataStatus.LOCKED, "batch.lock")
 
     @action(detail=True, methods=["post"])
     def unlock(self, request, project_id, pk=None):
-        batch = self.get_object()
-        _set_status(batch, DataStatus.ACTIVE, project=self.project, actor=request.user, action="batch.unlock")
-        fresh = self._base_queryset().get(pk=batch.pk)
-        return Response(self.get_serializer(fresh).data)
+        return self._set_batch_status(request, pk, DataStatus.ACTIVE, "batch.unlock")
 
     @action(detail=True, methods=["post"], url_path="confirm-qc2")
     def confirm_qc2(self, request, project_id, pk=None):
@@ -656,17 +805,28 @@ class BatchViewSet(
             raise NotFound("Không tìm thấy task trong organization.") from exc
 
         with transaction.atomic():
+            dataset_id = (
+                Batch.objects.filter(pk=batch_pk, project=self.project)
+                .values_list("dataset_id", flat=True)
+                .first()
+            )
+            if dataset_id is None:
+                raise NotFound("Không tìm thấy task trong organization.")
+            dataset = (
+                Dataset.objects.select_for_update(of=("self",))
+                .filter(pk=dataset_id, project=self.project)
+                .first()
+            )
             batch = (
                 Batch.objects.select_for_update(of=("self",))
-                .select_related("dataset")
                 .filter(pk=batch_pk, project=self.project)
                 .first()
             )
-            if batch is None:
+            if batch is None or dataset is None or batch.dataset_id != dataset.id:
                 raise NotFound("Không tìm thấy task trong organization.")
             if batch.status != DataStatus.ACTIVE:
                 raise ValidationError("Task đã khoá hoặc đã bàn giao.")
-            if batch.dataset.status != DataStatus.ACTIVE:
+            if dataset.status != DataStatus.ACTIVE:
                 raise ValidationError("Project của task đã khoá hoặc đã bàn giao.")
 
             jobs = list(Job.objects.select_for_update(of=("self",)).filter(batch=batch).order_by("id"))
@@ -703,8 +863,10 @@ class BatchViewSet(
                 is_pinned_pending=True,
             ).filter(
                 Q(job_id__in=transitioned_ids)
+                | Q(batch=batch)
                 | Q(
                     job__isnull=True,
+                    batch__isnull=True,
                     title__in=[
                         f"Task {batch.name} sẵn sàng xác nhận chuyển QC2",
                         f"Batch {batch.name} sẵn sàng xác nhận chuyển QC2",
@@ -727,6 +889,7 @@ class BatchViewSet(
                 title=f"Task {batch.name} đã được xác nhận chuyển QC2",
                 body=f"{len(transitioned_ids)} job đã sẵn sàng kiểm tra QC2.",
                 action_url=f"/projects/{self.project.id}/qc2/work",
+                batch=batch,
                 actor=request.user,
             )
             schedule_assignee_push(transitioned_ids)
@@ -756,7 +919,9 @@ class DeliveryViewSet(
 
     @action(detail=False)
     def candidates(self, request, project_id):
-        """Các task chưa bàn giao + mức độ sẵn sàng."""
+        """Các task chưa bàn giao + mức độ sẵn sàng + trạng thái hạn bàn giao (DH07)."""
+        now = timezone.now()
+        soon_cutoff = now + timedelta(hours=24)
         batches = (
             Batch.objects.filter(project=self.project)
             .exclude(status=DataStatus.DELIVERED)
@@ -770,15 +935,38 @@ class DeliveryViewSet(
                     filter=Q(audits__samples__result=AuditSample.Result.PENDING),
                     distinct=True,
                 ),
+                in_progress_audits=Count(
+                    "audits",
+                    filter=Q(audits__status=Audit.Status.IN_PROGRESS),
+                    distinct=True,
+                ),
             )
         )
-        return Response([
-            {
+        rows: list[dict[str, Any]] = []
+        for b in batches:
+            if not b.deadline:
+                due_state = "none"
+            elif b.deadline < now:
+                due_state = "overdue"
+            elif b.deadline <= soon_cutoff:
+                due_state = "soon"
+            else:
+                due_state = "normal"
+            rows.append({
                 "batch": b.id,
                 "batch_name": b.name,
                 "dataset_name": b.dataset.name,
+                "status": b.status,
+                "dataset_status": b.dataset.status,
+                "deadline": format_rfc3339_utc(b.deadline),
+                "is_overdue": bool(b.deadline and b.deadline < now),
+                "due_state": due_state,
                 "job_count": b.job_count,
                 "approved_count": b.approved_count,
+                "locked_jobs": b.locked_jobs,
+                "pending_qc2_samples": b.pending_qc2_samples,
+                "in_progress_audits": getattr(b, "in_progress_audits", 0),
+                # Giữ khoá open_audits theo số mẫu QC2 chờ kiểm để tương thích UI DeliveryPage.tsx hiện tại.
                 "open_audits": b.pending_qc2_samples,
                 "ready": (
                     b.status == DataStatus.ACTIVE
@@ -788,22 +976,35 @@ class DeliveryViewSet(
                     and b.pending_qc2_samples == 0
                     and b.locked_jobs == 0
                 ),
-            }
-            for b in batches
-        ])
+            })
+        return Response(rows)
 
     def perform_create(self, serializer):
         batch_id = validated_dict(serializer)["batch"].pk
         try:
             with transaction.atomic():
+                dataset_id = (
+                    Batch.objects.filter(pk=batch_id, project=self.project)
+                    .values_list("dataset_id", flat=True)
+                    .first()
+                )
+                if dataset_id is None:
+                    raise ValidationError({"batch": "Task không thuộc organization này."})
+                dataset = (
+                    Dataset.objects.select_for_update(of=("self",))
+                    .filter(pk=dataset_id, project=self.project)
+                    .first()
+                )
                 batch = (
                     Batch.objects.select_for_update(of=("self",))
-                    .select_related("dataset")
-                    .get(pk=batch_id, project=self.project)
+                    .filter(pk=batch_id, project=self.project)
+                    .first()
                 )
+                if batch is None or dataset is None or batch.dataset_id != dataset.id:
+                    raise ValidationError("Task vừa thay đổi project, vui lòng thử lại.")
                 if batch.status == DataStatus.DELIVERED or Delivery.objects.filter(batch=batch).exists():
                     raise ValidationError("Task đã được bàn giao.")
-                if batch.status != DataStatus.ACTIVE or batch.dataset.status != DataStatus.ACTIVE:
+                if batch.status != DataStatus.ACTIVE or dataset.status != DataStatus.ACTIVE:
                     raise ValidationError("Task hoặc Project đang bị khoá — mở khoá trước khi ghi nhận bàn giao.")
                 jobs = list(Job.objects.select_for_update(of=("self",)).filter(batch=batch).order_by("id"))
                 job_count = len(jobs)
@@ -822,10 +1023,27 @@ class DeliveryViewSet(
                 Job.objects.filter(pk__in=[j.pk for j in jobs]).update(status=JobStatus.DELIVERED)
                 batch.status = DataStatus.DELIVERED
                 batch.save(update_fields=["status"])
-                # Bàn giao xong → chốt các đợt QC2 đang mở của task.
+                # Bàn giao xong → chốt các đợt QC2 đang mở của task và gỡ ghim thông báo chờ duyệt của task.
                 batch.audits.filter(status=Audit.Status.IN_PROGRESS).update(
                     status=Audit.Status.COMPLETED, completed_at=timezone.now()
                 )
+                UserNotification.objects.filter(
+                    project=self.project,
+                    category=UserNotification.Category.REVIEW_NEEDED,
+                    is_pinned_pending=True,
+                ).filter(
+                    Q(batch=batch)
+                    | Q(job__batch=batch)
+                    | Q(
+                        job__isnull=True,
+                        batch__isnull=True,
+                        title__in=[
+                            f"Task {batch.name} đã được xác nhận chuyển QC2",
+                            f"Task {batch.name} sẵn sàng xác nhận chuyển QC2",
+                            f"Batch {batch.name} sẵn sàng xác nhận chuyển QC2",
+                        ],
+                    )
+                ).update(is_pinned_pending=False)
                 ActivityLog.record(
                     project=self.project,
                     actor=self.request.user,
@@ -848,19 +1066,29 @@ class DeliveryViewSet(
         if extra:
             raise ValidationError(f"Không được sửa: {', '.join(sorted(extra))}")
         instance = cast(Delivery, serializer.instance)
-        before = {field: getattr(instance, field) for field in validated}
-        delivery = cast(Delivery, serializer.save())
-        after = {field: getattr(delivery, field) for field in validated}
-        changed = {k: v for k, v in after.items() if before.get(k) != v}
-        if changed:
-            ActivityLog.record(
-                project=self.project,
-                actor=self.request.user,
-                action="delivery.update",
-                target=delivery,
-                before={k: before[k] for k in changed},
-                after=changed,
+        with transaction.atomic():
+            locked = (
+                Delivery.objects.select_for_update(of=("self",))
+                .select_related("batch__dataset", "delivered_by")
+                .filter(pk=instance.pk, project=self.project)
+                .first()
             )
+            if locked is None:
+                raise NotFound("Không tìm thấy bản ghi bàn giao.")
+            before = {field: getattr(locked, field) for field in validated}
+            serializer.instance = locked
+            delivery = cast(Delivery, serializer.save())
+            after = {field: getattr(delivery, field) for field in validated}
+            changed = {k: v for k, v in after.items() if before.get(k) != v}
+            if changed:
+                ActivityLog.record(
+                    project=self.project,
+                    actor=self.request.user,
+                    action="delivery.update",
+                    target=delivery,
+                    before={k: before[k] for k in changed},
+                    after=changed,
+                )
 
 
 class ActivityLogViewSet(ProjectScopedViewMixin, viewsets.ReadOnlyModelViewSet):

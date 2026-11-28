@@ -56,6 +56,7 @@ jobs:
         working-directory: backend
         run: |
           python manage.py check
+          DJANGO_ALLOWED_HOSTS=ci.example.com DJANGO_SECURE_SSL_REDIRECT=True python manage.py check --deploy
           python manage.py makemigrations --check --dry-run
 
       - name: Django tests

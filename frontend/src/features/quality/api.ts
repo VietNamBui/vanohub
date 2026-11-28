@@ -85,7 +85,15 @@ export const getAuditStrategy = async (projectId: number) =>
 // --- Level 1 QC (QC1) ---
 export const listQc1Jobs = async (
   projectId: number,
-  params: { scope?: Qc1Scope; tab?: Qc1JobTab; search?: string; page?: number; page_size?: number; overdue?: boolean } = {},
+  params: {
+    scope?: Qc1Scope
+    tab?: Qc1JobTab
+    search?: string
+    page?: number
+    page_size?: number
+    overdue?: boolean
+    due_soon?: boolean
+  } = {},
 ) =>
   (
     await apiClient.get<Paginated<Job>>(p(projectId, 'qc1/jobs/'), {
@@ -96,6 +104,7 @@ export const listQc1Jobs = async (
         page: params.page,
         page_size: params.page_size,
         overdue: params.overdue ? 1 : undefined,
+        due_soon: params.due_soon ? 1 : undefined,
       }),
     })
   ).data

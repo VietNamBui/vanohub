@@ -15,16 +15,35 @@ import secrets
 import string
 import unicodedata
 
-from cryptography.fernet import Fernet, InvalidToken
+from cryptography.fernet import Fernet, InvalidToken, MultiFernet
 from django.conf import settings
 
 # Bỏ các ký tự dễ nhầm khi đọc / gõ lại: 0 O o 1 l I
 _ALPHABET = "".join(c for c in string.ascii_letters + string.digits if c not in "0Oo1lI")
 
 
-def _fernet():
+def _coerce_fernet(raw_key: str) -> Fernet:
+    key_bytes = raw_key.strip().encode()
+    try:
+        return Fernet(key_bytes)
+    except (ValueError, TypeError):
+        digest = hashlib.sha256(f"vanohub:credential-key:{raw_key.strip()}".encode()).digest()
+        return Fernet(base64.urlsafe_b64encode(digest))
+
+
+def _secret_key_fernet() -> Fernet:
     digest = hashlib.sha256(f"vanohub:initial-password:{settings.SECRET_KEY}".encode()).digest()
     return Fernet(base64.urlsafe_b64encode(digest))
+
+
+def _fernet() -> Fernet | MultiFernet:
+    configured = [str(k).strip() for k in getattr(settings, "CREDENTIAL_ENCRYPTION_KEYS", ()) if str(k).strip()]
+    if not configured:
+        return _secret_key_fernet()
+    fernets = [_coerce_fernet(k) for k in configured]
+    if getattr(settings, "CREDENTIAL_LEGACY_SECRET_KEY_FALLBACK", True):
+        fernets.append(_secret_key_fernet())
+    return MultiFernet(fernets)
 
 
 def encrypt(password):
@@ -32,10 +51,10 @@ def encrypt(password):
 
 
 def decrypt(token):
-    """None nếu không giải mã được (vd. đã đổi SECRET_KEY)."""
+    """None nếu không giải mã được (vd. đã đổi khoá hoặc SECRET_KEY)."""
     try:
         return _fernet().decrypt(token.encode()).decode()
-    except (InvalidToken, ValueError):
+    except (InvalidToken, ValueError, TypeError):
         return None
 
 

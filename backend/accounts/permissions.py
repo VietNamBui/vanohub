@@ -11,11 +11,12 @@ nhưng capability dành cho PM KHÔNG có ở người chỉ có QC2.
 from typing import Any, cast
 
 from django.shortcuts import get_object_or_404
-from rest_framework.exceptions import NotFound
+from rest_framework.exceptions import NotFound, ValidationError
 from rest_framework.permissions import BasePermission
 from rest_framework.request import Request
 from rest_framework.views import APIView
 
+from .datetime_utils import parse_int_param
 from .models import Role, RoleAssignment, expand_roles
 
 ALL_PROJECT_ROLES = set(Role)
@@ -67,10 +68,12 @@ def capabilities_for_roles(roles):
 
 
 def get_project_capabilities(user, project):
-    roles = expand_roles(
+    direct = list(
         RoleAssignment.objects.filter(user=user, project=project).values_list("role", flat=True)
     )
-    return capabilities_for_roles(roles)
+    if getattr(user, "is_superuser", False):
+        direct.append(Role.PROJECT_MANAGER)
+    return capabilities_for_roles(expand_roles(direct))
 
 
 class HasProjectCapability(BasePermission):
@@ -115,7 +118,11 @@ class ProjectScopedViewMixin:
         if not hasattr(self, "_project"):
             from projects.models import Project  # import trễ để tránh import vòng
 
-            self._project = get_object_or_404(Project, pk=self.kwargs["project_id"])
+            try:
+                project_id = parse_int_param(self.kwargs.get("project_id"), "project_id")
+            except ValidationError as exc:
+                raise NotFound() from exc
+            self._project = get_object_or_404(Project, pk=project_id)
             self.capabilities = get_project_capabilities(self.request.user, self._project)
             if not self.capabilities:
                 raise NotFound()  # Không tiết lộ organization có tồn tại hay không.

@@ -1,9 +1,11 @@
 import { renderToStaticMarkup } from 'react-dom/server'
 import { describe, expect, it, vi } from 'vitest'
 import type { UserBrief } from '../../shared/api/types'
+import { buildContiguousRateRuns, formatAvgProductivitySubtitle } from '../analytics/analyticsHelpers'
 import type { Member } from '../projects/types'
 import AssigneeSelect from './components/AssigneeSelect'
 import JobStatusTag from './components/JobStatusTag'
+import ReviewErrorChips from './components/ReviewErrorChips'
 import { JOB_STATUS_LABELS } from './constants'
 import {
   activeErrorRound,
@@ -11,10 +13,20 @@ import {
   buildAssignPayload,
   buildQueueJobsUrl,
   describeTimelineEvent,
+  formatErrorLocationSummary,
+  formatKpiDeltaText,
+  getBulkAssignBlockReason,
+  getBulkDeadlineBlockReason,
   getJobLockReason,
+  getQc2AssignBlockReason,
+  hasStructuredErrorMeta,
+  isJobEscalationBlocked,
+  isJobEscalationWarnOnly,
   nextJobSortOrdering,
   parseJobUrlFilters,
+  parseOptionalInt,
   parseQueueUrlParams,
+  PG_INT32_MAX,
   serializeJobUrlFilters,
   splitActiveErrors,
   timelineDotColor,
@@ -238,5 +250,234 @@ describe('assignee, modal payload & timeline helpers + component regressions', (
     expect(flaggedHtml).toContain('Quá hạn')
     expect(flaggedHtml).toContain('Thiếu nguồn CVAT')
     expect(flaggedHtml).toContain('Khoá')
+  })
+
+  it('formats structured error helpers and renders ReviewErrorChips pills', () => {
+    expect(parseOptionalInt('', 0)).toEqual({ valid: true, value: null })
+    expect(parseOptionalInt('12', 0)).toEqual({ valid: true, value: 12 })
+    expect(parseOptionalInt('0', 1)).toEqual({ valid: false, value: null })
+    expect(parseOptionalInt('abc', 0)).toEqual({ valid: false, value: null })
+
+    expect(hasStructuredErrorMeta({})).toBe(false)
+    expect(hasStructuredErrorMeta({ frame_number: 5, verdict: 'edge' })).toBe(true)
+
+    expect(
+      formatErrorLocationSummary({
+        frame_number: 12,
+        cvat_object_id: 42,
+        is_missing_object: false,
+        location: 'Làn giữa',
+      }),
+    ).toBe('Frame #12 · Object #42 · Làn giữa')
+    expect(
+      formatErrorLocationSummary({
+        frame_number: 4,
+        cvat_object_id: 99,
+        is_missing_object: true,
+        location: '',
+      }),
+    ).toBe('Frame #4 · Thiếu đối tượng')
+
+    expect(renderToStaticMarkup(<ReviewErrorChips err={{}} />)).toBe('')
+    const chipsHtml = renderToStaticMarkup(
+      <ReviewErrorChips
+        err={{
+          frame_number: 12,
+          cvat_object_id: null,
+          is_missing_object: true,
+          verdict: 'fail',
+          is_voided: true,
+        }}
+      />,
+    )
+    expect(chipsHtml).toContain('Frame #12')
+    expect(chipsHtml).toContain('Thiếu đối tượng')
+    expect(chipsHtml).toContain('Lỗi')
+    expect(chipsHtml).toContain('Đã huỷ lỗi')
+  })
+
+  it('evaluates escalation policy (block vs warn_only) and formats KPI surplus/shortfall deltas', () => {
+    expect(isJobEscalationBlocked({ is_escalated: false, escalation_policy: 'block' })).toBe(false)
+    expect(isJobEscalationBlocked({ is_escalated: true, escalation_policy: 'block' })).toBe(true)
+    expect(isJobEscalationBlocked({ is_escalated: true, escalation_policy: 'warn_only' })).toBe(false)
+    expect(isJobEscalationBlocked({ is_escalated: true }, 'warn_only')).toBe(false)
+    expect(isJobEscalationBlocked({ is_escalated: true }, 'block')).toBe(true)
+
+    expect(isJobEscalationWarnOnly({ is_escalated: true, escalation_policy: 'warn_only' })).toBe(true)
+    expect(isJobEscalationWarnOnly({ is_escalated: true, escalation_policy: 'block' })).toBe(false)
+    expect(isJobEscalationWarnOnly({ is_escalated: false, escalation_policy: 'warn_only' })).toBe(false)
+
+    expect(formatKpiDeltaText(3, 0, 'job')).toBe('thiếu 3 job')
+    expect(formatKpiDeltaText(0, 4, 'job')).toBe('vượt 4 job')
+    expect(formatKpiDeltaText(0, 0, 'job')).toBe('đạt chỉ tiêu')
+    expect(formatKpiDeltaText(150, undefined, '', (n) => `${n} obj`)).toBe('thiếu 150 obj')
+  })
+
+  it('guards bulk assign/deadline and QC2 auditor assignment across locked, post-QC1, and delivered states', () => {
+    expect(getBulkAssignBlockReason(false, [{ is_locked: false, status: 'annotating' }])).toBe(
+      'Bạn không có quyền giao job',
+    )
+    expect(
+      getBulkAssignBlockReason(true, [
+        { is_locked: false, status: 'annotating' },
+        { is_locked: false, status: 'pending_qc1' },
+      ]),
+    ).toBeNull()
+    expect(
+      getBulkAssignBlockReason(true, [
+        { is_locked: false, status: 'annotating' },
+        { is_locked: false, status: 'pending_qc2' },
+      ]),
+    ).toBe('Không đổi người phụ trách sau khi job đã qua QC1')
+    expect(
+      getBulkAssignBlockReason(true, [
+        { is_locked: false, status: 'annotating' },
+        { is_locked: false, status: 'approved' },
+      ]),
+    ).toBe('Không đổi người phụ trách sau khi job đã qua QC1')
+    expect(getBulkAssignBlockReason(true, [{ is_locked: false, status: 'delivered' }])).toBe('Job đã bàn giao')
+
+    expect(
+      getBulkDeadlineBlockReason(true, [
+        { is_locked: false, status: 'pending_qc2' },
+        { is_locked: false, status: 'approved' },
+      ]),
+    ).toBeNull()
+    expect(getBulkDeadlineBlockReason(true, [{ is_locked: true, status: 'annotating' }])).toBe(
+      'Trong vùng chọn có job đang bị khoá',
+    )
+    expect(getBulkDeadlineBlockReason(true, [{ is_locked: false, status: 'delivered' }])).toBe(
+      'Trong vùng chọn có job đã bàn giao',
+    )
+
+    const pendingQc2Sample = { sample_id: 1, audit_id: 1, result: 'pending' as const, auditor: null }
+    expect(
+      getQc2AssignBlockReason(true, {
+        is_locked: false,
+        status: 'pending_qc2',
+        is_escalated: false,
+        qc2: pendingQc2Sample,
+      }),
+    ).toBeNull()
+    expect(
+      getQc2AssignBlockReason(
+        true,
+        {
+          is_locked: false,
+          status: 'pending_qc2',
+          is_escalated: true,
+          qc2: pendingQc2Sample,
+        },
+        'warn_only',
+      ),
+    ).toBeNull()
+    expect(
+      getQc2AssignBlockReason(
+        true,
+        {
+          is_locked: false,
+          status: 'pending_qc2',
+          is_escalated: true,
+          qc2: pendingQc2Sample,
+        },
+        'block',
+      ),
+    ).toBe('Job đang ở trạng thái Escalated')
+    expect(
+      getQc2AssignBlockReason(true, {
+        is_locked: true,
+        status: 'pending_qc2',
+        is_escalated: false,
+        qc2: pendingQc2Sample,
+      }),
+    ).toBe('Job đang bị khoá')
+    expect(
+      getQc2AssignBlockReason(true, {
+        is_locked: false,
+        status: 'approved',
+        is_escalated: false,
+        qc2: { ...pendingQc2Sample, result: 'pass' },
+      }),
+    ).toBe('Mẫu đã có kết quả (Pass)')
+
+    expect(parseOptionalInt(String(PG_INT32_MAX), 0)).toEqual({ valid: true, value: PG_INT32_MAX })
+    expect(parseOptionalInt(String(PG_INT32_MAX + 1), 0)).toEqual({ valid: false, value: null })
+  })
+
+  it('formats D06 annotator productivity subtitles accurately and breaks line runs on null rates', () => {
+    const baseProv = {
+      source: 'workflow_elapsed_session' as const,
+      status: 'unavailable' as const,
+      unit: 'hours' as const,
+      clamp_min_minutes: 15,
+      clamp_max_minutes: 600,
+      description: 'Ước tính từ khoảng phiên làm việc.',
+    }
+
+    expect(
+      formatAvgProductivitySubtitle({
+        objects_per_hour: null,
+        measured_objects: 0,
+        total_objects: 250,
+        submitted_objects: 0,
+        unsubmitted_cvat_objects: 250,
+        total_hours: 0,
+        status: 'unavailable',
+        formula: '',
+        hours_provenance: baseProv,
+      }),
+    ).toBe('Chưa có phiên nộp đủ dữ liệu giờ phiên ước tính')
+
+    expect(
+      formatAvgProductivitySubtitle({
+        objects_per_hour: 150,
+        measured_objects: 300,
+        total_objects: 300,
+        submitted_objects: 300,
+        unsubmitted_cvat_objects: 0,
+        total_hours: 2,
+        status: 'provisional',
+        formula: '',
+        hours_provenance: { ...baseProv, status: 'provisional' },
+      }),
+    ).toBe('300 cuboid ÷ 2,0 giờ ước tính')
+
+    const mismatched = formatAvgProductivitySubtitle({
+      objects_per_hour: 150,
+      measured_objects: 300,
+      total_objects: 480,
+      submitted_objects: 350,
+      unsubmitted_cvat_objects: 130,
+      total_hours: 2,
+      status: 'provisional',
+      formula: '',
+      hours_provenance: { ...baseProv, status: 'provisional' },
+    })
+    expect(mismatched).toContain('300 cuboid thuộc phiên đã đo ÷ 2,0 giờ ước tính')
+    expect(mismatched).toContain('tổng kỳ 480, gồm 130 chưa nộp CVAT')
+
+    const sampleDays = [
+      { day: 'd1', rate: 100 },
+      { day: 'd2', rate: 120 },
+      { day: 'd3', rate: null },
+      { day: 'd4', rate: 140 },
+    ]
+    const runs = buildContiguousRateRuns(
+      sampleDays,
+      (d) => d.rate,
+      (i) => i * 10,
+      (v) => v,
+    )
+    expect(runs).toHaveLength(2)
+    expect(runs[0].map((p) => p.value)).toEqual([100, 120])
+    expect(runs[1].map((p) => p.value)).toEqual([140])
+    expect(
+      buildContiguousRateRuns(
+        [{ day: 'd1', rate: null }],
+        (d) => d.rate,
+        (i) => i,
+        (v) => v,
+      ),
+    ).toEqual([])
   })
 })

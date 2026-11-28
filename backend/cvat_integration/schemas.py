@@ -134,16 +134,21 @@ class CvatJobMetaPayload(BaseModel):
         match = _FRAME_STEP_RE.search(self.frame_filter or "")
         return int(match.group(1)) if match else 1
 
-    @property
-    def resolved_stop_frame(self) -> int | None:
+    def resolve_stop_frame(self, job_stop_frame: int | None = None) -> int | None:
         if self.stop_frame is not None:
             return self.stop_frame
         if self.included_frames is not None:
             return max(self.included_frames) if self.included_frames else None
+        if job_stop_frame is not None:
+            return job_stop_frame
         if self.size > 0:
             base = self.start_frame or 0
             return base + (self.size - 1) * self.frame_step
         return None
+
+    @property
+    def resolved_stop_frame(self) -> int | None:
+        return self.resolve_stop_frame()
 
 
 class CvatAnnotationsPayload(BaseModel):
@@ -207,6 +212,14 @@ class CvatAnnotationsPayload(BaseModel):
             )
             return total_stepped - deleted_in_range
 
+        has_frame_constraints = (
+            start_frame is not None
+            or stop_frame is not None
+            or included_set is not None
+            or step > 1
+            or bool(deleted_set)
+        )
+
         total = 0
         for shape in self.shapes:
             if shape.get("outside") is True:
@@ -214,14 +227,15 @@ class CvatAnnotationsPayload(BaseModel):
             frame = shape.get("frame")
             if isinstance(frame, int) and not isinstance(frame, bool):
                 total += _count_range(frame, frame)
-            else:
+            elif not has_frame_constraints:
                 total += 1
 
         max_included = max(included_set) if included_set else None
         for track in self.tracks:
             raw_kfs = track.get("shapes")
             if not isinstance(raw_kfs, list):
-                total += 1
+                if not has_frame_constraints:
+                    total += 1
                 continue
             by_frame: dict[int, dict[str, object]] = {}
             for kf in raw_kfs:

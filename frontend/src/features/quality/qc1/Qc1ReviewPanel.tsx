@@ -13,8 +13,16 @@ import { useAction } from '../../../shared/hooks/useAction'
 import { useRequest } from '../../../shared/hooks/useRequest'
 import { formatDateTime } from '../../../shared/utils/format'
 import JobStatusBadge from '../../jobs/components/JobStatusBadge'
-import { ACTION_LABELS, JOB_STATUS_LABELS } from '../../jobs/constants'
+import ReviewErrorChips from '../../jobs/components/ReviewErrorChips'
+import { ACTION_LABELS, formatDeadlineCountdown, JOB_STATUS_LABELS } from '../../jobs/constants'
+import {
+  isJobEscalationBlocked,
+  isJobEscalationWarnOnly,
+  parseOptionalInt,
+  splitActiveErrors,
+} from '../../jobs/jobHelpers'
 import type { JobDetail, JobStatus, ReworkScope } from '../../jobs/types'
+import { useProject } from '../../projects/projectContext'
 import { getQc1Job, listErrorCategories, passQc1Job, rejectQc1Job, startQc1Job } from '../api'
 import { SEVERITY_LABELS } from '../constants'
 import type { ErrorInput, ErrorVerdict, Severity } from '../types'
@@ -38,8 +46,6 @@ type ErrorRow = {
   description: string
 }
 
-const PG_INT32_MAX = 2_147_483_647
-
 const SEVERITY_BADGE_COLORS: Record<string, 'gray' | 'warning' | 'error'> = {
   minor: 'gray',
   major: 'warning',
@@ -51,17 +57,9 @@ const VERDICT_OPTIONS: { id: ErrorVerdict; label: string }[] = [
   { id: 'edge', label: 'Cận biên (Edge)' },
 ]
 
-function parseOptionalInt(raw: string, min: number): { valid: boolean; value: number | null } {
-  const trimmed = raw.trim()
-  if (!trimmed) return { valid: true, value: null }
-  if (!/^\d+$/.test(trimmed)) return { valid: false, value: null }
-  const num = Number(trimmed)
-  if (!Number.isSafeInteger(num) || num < min || num > PG_INT32_MAX) return { valid: false, value: null }
-  return { valid: true, value: num }
-}
-
-/** Khung kiểm tra QC1 cho một job: mở CVAT, nhận bắt đầu, duyệt Đạt QC1 hoặc Reject kèm lỗi QC1. */
+/** Khung kiểm tra QC1 cho một job: mở CVAT, nhận bắt đầu, duyệt Đạt QC1 hoặc Reject kèm lỗi có cấu trúc. */
 export default function Qc1ReviewPanel({ projectId, jobId, version, onDone }: Props) {
+  const { project } = useProject()
   const { data: job, error, isLoading, retry } = useRequest(`qc1-job:${projectId}:${jobId}:${version}`, () =>
     getQc1Job(projectId, jobId),
   )
@@ -70,6 +68,10 @@ export default function Qc1ReviewPanel({ projectId, jobId, version, onDone }: Pr
   if (isLoading || !job) return <SectionCard><PageState kind="loading" /></SectionCard>
 
   const reviewable = job.status === 'pending_qc1' || job.status === 'qc1_reviewing'
+  const isEscalatedBlocked = isJobEscalationBlocked(job, project.escalation_policy)
+  const isEscalatedWarnOnly = isJobEscalationWarnOnly(job, project.escalation_policy)
+  const countdown = formatDeadlineCountdown(job.hours_remaining)
+  const { active: activeErrors, history: historyErrors } = splitActiveErrors(job, job.errors)
 
   return (
     <SectionCard
@@ -84,7 +86,25 @@ export default function Qc1ReviewPanel({ projectId, jobId, version, onDone }: Pr
       )}
     >
       <div className="flex flex-col gap-5">
-        <JobStatusBadge status={job.status} escalated={job.is_escalated} overdue={job.is_overdue} locked={job.is_locked} />
+        <div className="flex flex-wrap items-center gap-2">
+          <JobStatusBadge
+            status={job.status}
+            escalated={job.is_escalated}
+            overdue={job.is_overdue}
+            locked={job.is_locked}
+            sourceMissing={job.source_missing}
+          />
+          {job.rework_round > 0 && (
+            <Badge size="sm" type="pill-color" color="brand">
+              {job.rework_scope === 'full' ? 'Sửa toàn job' : 'Sửa một phần'}
+            </Badge>
+          )}
+          {countdown && (
+            <Badge size="sm" type="pill-color" color={countdown.tone}>
+              {countdown.text}
+            </Badge>
+          )}
+        </div>
 
         <dl className="grid grid-cols-2 gap-x-4 gap-y-3 text-sm">
           <Info label="Annotator" value={job.annotator?.full_name ?? 'Chưa giao'} />
@@ -94,12 +114,21 @@ export default function Qc1ReviewPanel({ projectId, jobId, version, onDone }: Pr
           <Info label="Deadline" value={formatDateTime(job.deadline)} />
         </dl>
 
+        {job.source_missing && (
+          <Notice text="Không còn tìm thấy job nguồn trên CVAT ở lần đồng bộ gần nhất." />
+        )}
+
         {job.is_locked ? (
           <Notice text="Job đang bị khoá — không thể kiểm tra." />
-        ) : job.is_escalated ? (
-          <Notice text="Job đang ở trạng thái Escalated, chờ PM xử lý." />
+        ) : isEscalatedBlocked ? (
+          <Notice text="Job đang ở trạng thái Escalated (chế độ chặn), chờ PM xử lý." />
         ) : reviewable ? (
-          <Qc1ReviewForm key={`${job.id}:${job.status}:${job.updated_at}`} projectId={projectId} job={job} onDone={onDone} />
+          <>
+            {isEscalatedWarnOnly && (
+              <Notice text="Job đã vượt số vòng rework tối đa — chế độ cảnh báo, bạn vẫn có thể tiếp tục kiểm tra." />
+            )}
+            <Qc1ReviewForm key={`${job.id}:${job.status}:${job.updated_at}`} projectId={projectId} job={job} onDone={onDone} />
+          </>
         ) : (
           <p className="rounded-lg bg-secondary p-3 text-sm text-tertiary">
             Job hiện ở trạng thái <span className="font-medium text-secondary">{JOB_STATUS_LABELS[job.status]}</span> — không còn trong hàng chờ QC1.
@@ -109,25 +138,72 @@ export default function Qc1ReviewPanel({ projectId, jobId, version, onDone }: Pr
         {job.errors.length > 0 && (
           <section className="border-t border-secondary pt-4">
             <h3 className="mb-2 text-sm font-semibold text-primary">
-              Lỗi đã ghi nhận <span className="font-normal text-tertiary">({job.errors.length})</span>
+              Lỗi đã ghi nhận{' '}
+              <span className="font-normal text-tertiary">
+                ({activeErrors.length} hiệu lực{historyErrors.length > 0 ? ` · ${historyErrors.length} lịch sử / đã huỷ` : ''})
+              </span>
             </h3>
-            <ul className="flex flex-col gap-2">
-              {job.errors.map((e) => (
-                <li key={e.id} className="rounded-lg p-3 text-sm ring-1 ring-secondary ring-inset">
-                  <div className="flex flex-wrap items-center gap-2">
-                    <span className="font-semibold text-secondary">{e.category}</span>
-                    <Badge type="color" size="sm" color={SEVERITY_BADGE_COLORS[e.severity] ?? 'gray'}>
-                      {SEVERITY_LABELS[e.severity as Severity] ?? e.severity}
-                    </Badge>
-                    <span className="text-xs text-quaternary">
-                      {e.stage.toUpperCase()} · vòng {e.rework_round}
-                    </span>
-                  </div>
-                  {e.location && <p className="mt-1 text-tertiary">Vị trí: {e.location}</p>}
-                  {e.description && <p className="mt-0.5 text-tertiary">{e.description}</p>}
-                </li>
-              ))}
-            </ul>
+
+            {activeErrors.length > 0 && (
+              <ul className="flex flex-col gap-2">
+                {activeErrors.map((e) => (
+                  <li key={e.id} className="rounded-lg p-3 text-sm ring-1 ring-secondary ring-inset">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span className="font-semibold text-secondary">{e.category}</span>
+                      <Badge type="color" size="sm" color={SEVERITY_BADGE_COLORS[e.severity] ?? 'gray'}>
+                        {SEVERITY_LABELS[e.severity as Severity] ?? e.severity}
+                      </Badge>
+                      <span className="text-xs text-quaternary">
+                        {e.stage.toUpperCase()} · vòng {e.rework_round}
+                      </span>
+                    </div>
+                    <ReviewErrorChips err={e} />
+                    {e.location && <p className="mt-1 text-tertiary">Vị trí: {e.location}</p>}
+                    {e.description && <p className="mt-0.5 text-tertiary">{e.description}</p>}
+                  </li>
+                ))}
+              </ul>
+            )}
+
+            {historyErrors.length > 0 && (
+              <div className={activeErrors.length > 0 ? 'mt-3 border-t border-secondary pt-3' : undefined}>
+                <p className="mb-2 text-xs font-semibold text-quaternary">
+                  Lịch sử lỗi các vòng trước & lỗi đã huỷ ({historyErrors.length})
+                </p>
+                <ul className="flex flex-col gap-2">
+                  {historyErrors.map((e) => (
+                    <li key={e.id} className="rounded-lg p-3 text-sm opacity-70 ring-1 ring-secondary ring-inset">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <span
+                          className={`font-semibold ${
+                            e.is_voided ? 'text-tertiary line-through' : 'text-secondary'
+                          }`}
+                        >
+                          {e.category}
+                        </span>
+                        <Badge type="color" size="sm" color={SEVERITY_BADGE_COLORS[e.severity] ?? 'gray'}>
+                          {SEVERITY_LABELS[e.severity as Severity] ?? e.severity}
+                        </Badge>
+                        <span className="text-xs text-quaternary">
+                          {e.stage.toUpperCase()} · vòng {e.rework_round}
+                        </span>
+                      </div>
+                      <ReviewErrorChips err={e} />
+                      {e.location && (
+                        <p className={`mt-1 text-tertiary ${e.is_voided ? 'line-through' : ''}`}>
+                          Vị trí: {e.location}
+                        </p>
+                      )}
+                      {e.description && (
+                        <p className={`mt-0.5 text-tertiary ${e.is_voided ? 'line-through' : ''}`}>
+                          {e.description}
+                        </p>
+                      )}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
           </section>
         )}
 
@@ -248,6 +324,7 @@ function Qc1ReviewForm({ projectId, job, onDone }: { projectId: number; job: Job
             </div>
             <div className="grid gap-3 sm:grid-cols-2">
               <Select
+                name={`error-${row.key}-category`}
                 label="Loại lỗi"
                 size="sm"
                 isRequired
@@ -264,6 +341,7 @@ function Qc1ReviewForm({ projectId, job, onDone }: { projectId: number; job: Job
                 {(item) => <Select.Item id={item.id} label={item.label} supportingText={item.supportingText} />}
               </Select>
               <Select
+                name={`error-${row.key}-severity`}
                 label="Mức độ"
                 size="sm"
                 placeholder="Theo loại lỗi"
@@ -276,6 +354,7 @@ function Qc1ReviewForm({ projectId, job, onDone }: { projectId: number; job: Job
             </div>
             <div className="grid items-end gap-3 sm:grid-cols-2">
               <Select
+                name={`error-${row.key}-verdict`}
                 label="Kết luận"
                 size="sm"
                 isDisabled={row.is_missing_object}
@@ -287,6 +366,7 @@ function Qc1ReviewForm({ projectId, job, onDone }: { projectId: number; job: Job
               </Select>
               <div className="pb-1.5">
                 <Checkbox
+                  name={`error-${row.key}-missing`}
                   size="sm"
                   label="Thiếu đối tượng"
                   hint="Bắt buộc Lỗi (Fail), bỏ qua Object ID"
@@ -304,6 +384,7 @@ function Qc1ReviewForm({ projectId, job, onDone }: { projectId: number; job: Job
             </div>
             <div className="grid gap-3 sm:grid-cols-2">
               <Input
+                name={`error-${row.key}-frame`}
                 label="Frame"
                 size="sm"
                 inputMode="numeric"
@@ -314,6 +395,7 @@ function Qc1ReviewForm({ projectId, job, onDone }: { projectId: number; job: Job
                 hint={showErrors && !frameParsed.valid ? 'Nhập số nguyên ≥ 0' : undefined}
               />
               <Input
+                name={`error-${row.key}-object-id`}
                 label="CVAT Object ID"
                 size="sm"
                 inputMode="numeric"
@@ -325,8 +407,8 @@ function Qc1ReviewForm({ projectId, job, onDone }: { projectId: number; job: Job
                 hint={showErrors && !objectParsed.valid ? 'Nhập số nguyên ≥ 1' : undefined}
               />
             </div>
-            <Input label="Vị trí lỗi" size="sm" placeholder="Mô tả ngắn vị trí (tuỳ chọn)" value={row.location} onChange={(v) => patch(row.key, { location: v })} />
-            <TextArea label="Mô tả lỗi" placeholder="Nhập nội dung…" rows={2} value={row.description} onChange={(v) => patch(row.key, { description: v })} />
+            <Input name={`error-${row.key}-location`} label="Vị trí lỗi" size="sm" placeholder="Mô tả ngắn vị trí (tuỳ chọn)" value={row.location} onChange={(v) => patch(row.key, { location: v })} />
+            <TextArea name={`error-${row.key}-description`} label="Mô tả lỗi" placeholder="Nhập nội dung…" rows={2} value={row.description} onChange={(v) => patch(row.key, { description: v })} />
           </div>
         )
       })}
@@ -358,6 +440,7 @@ function Qc1ReviewForm({ projectId, job, onDone }: { projectId: number; job: Job
       {showErrors && rows.length === 0 && <p className="text-sm text-error-primary">Thêm ít nhất 1 lỗi trước khi Reject.</p>}
 
       <Select
+        name="rework_scope"
         label="Phạm vi rework (khi Reject)"
         size="sm"
         items={[
@@ -370,7 +453,7 @@ function Qc1ReviewForm({ projectId, job, onDone }: { projectId: number; job: Job
         {(item) => <Select.Item id={item.id} label={item.label} supportingText={item.supportingText} />}
       </Select>
 
-      <TextArea label="Nhận xét (không bắt buộc)" rows={2} value={comment} onChange={setComment} />
+      <TextArea name="qc1_comment" label="Nhận xét (không bắt buộc)" rows={2} value={comment} onChange={setComment} />
 
       <div className="flex justify-end gap-3 border-t border-secondary pt-4">
         <Button color="primary-destructive" isLoading={pending} onPress={reject}>Reject → Rework</Button>

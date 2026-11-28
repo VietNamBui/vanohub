@@ -55,6 +55,8 @@ class User(AbstractUser):
     # Mật khẩu tạm do hệ thống sinh khi PM tạo tài khoản, lưu MÃ HOÁ (accounts/credentials.py) để PM
     # xem lại trong bảng thành viên. Xoá ngay khi người dùng tự đổi mật khẩu.
     initial_password_encrypted = models.TextField(blank=True, default="")
+    # Tăng đơn điệu mỗi khi đổi/cấp lại mật khẩu hoặc bị gỡ vai trò để thu hồi ngay JWT cũ.
+    token_version = models.PositiveIntegerField(default=1)
 
     def is_pm(self):
         return self.is_superuser or self.role_assignments.filter(role=Role.PROJECT_MANAGER).exists()

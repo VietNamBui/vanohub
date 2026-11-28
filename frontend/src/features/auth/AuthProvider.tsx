@@ -7,6 +7,8 @@ import type { CurrentUser } from './types'
 
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<CurrentUser | null>(null)
+  const [signedOut, setSignedOut] = useState(false)
+  const [lastUsername, setLastUsername] = useState<string | null>(null)
   // Có token đã lưu → cần hỏi backend xem token còn dùng được không.
   const [status, setStatus] = useState<AuthStatus>(() =>
     tokenStorage.getAccess() ? 'checking' : 'anonymous',
@@ -15,7 +17,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     // Khi refresh token cũng hết hạn, axios client gọi hàm này.
     setSessionExpiredHandler(() => {
-      setUser(null)
+      setUser((prev) => {
+        if (prev?.username) setLastUsername(prev.username)
+        return null
+      })
+      setSignedOut(false)
       setStatus('anonymous')
     })
   }, [])
@@ -25,6 +31,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     fetchCurrentUser().then(
       (me) => {
         setUser(me)
+        setLastUsername(me.username)
+        setSignedOut(false)
         setStatus('authenticated')
       },
       () => {
@@ -39,12 +47,16 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     tokenStorage.save(tokens.access, tokens.refresh)
     const me = await fetchCurrentUser()
     setUser(me)
+    setLastUsername(me.username)
+    setSignedOut(false)
     setStatus('authenticated')
   }, [])
 
   const logout = useCallback(() => {
     tokenStorage.clear()
     setUser(null)
+    setLastUsername(null)
+    setSignedOut(true)
     setStatus('anonymous')
   }, [])
 
@@ -52,13 +64,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     if (!tokenStorage.getAccess()) return null
     const me = await fetchCurrentUser()
     setUser(me)
+    setLastUsername(me.username)
     setStatus('authenticated')
     return me
   }, [])
 
   const value = useMemo(
-    () => ({ status, user, login, logout, refreshUser, setUser }),
-    [status, user, login, logout, refreshUser],
+    () => ({ status, user, signedOut, lastUsername, login, logout, refreshUser, setUser }),
+    [status, user, signedOut, lastUsername, login, logout, refreshUser],
   )
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>

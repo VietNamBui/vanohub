@@ -59,6 +59,34 @@ class FrameSamplingTests(TestCase):
         assert sample is not None
         self.assertIsNone(sample.auditor)
 
+    def test_pick_frames_supports_frame_step_deleted_included_and_stop_frame(self) -> None:
+        from cvat_integration.schemas import CvatJobMetaPayload
+
+        job = self.f.job(frame_count=5, cvat_start_frame=10)
+        # step=2 trên [10..18] trừ frame 12 → hợp lệ: [10, 14, 16, 18] (4 frame, rate 50% → 2 frame)
+        sampled = pick_frames(job, 50, frame_step=2, deleted_frames=[12], stop_frame=18)
+        self.assertEqual(len(sampled), 2)
+        self.assertTrue(all(f in {10, 14, 16, 18} for f in sampled))
+        self.assertEqual(sampled, pick_frames(job, 50, frame_step=2, deleted_frames=[12], stop_frame=18))
+
+        # Hỗ trợ truyền CvatJobMetaPayload và included_frames
+        meta = CvatJobMetaPayload.model_validate(
+            {
+                "size": 5,
+                "start_frame": 10,
+                "stop_frame": 18,
+                "frame_filter": "step=2",
+                "deleted_frames": [14],
+                "included_frames": [10, 14, 16, 20],
+            }
+        )
+        sampled_meta = pick_frames(job, 50, meta=meta)
+        self.assertEqual(len(sampled_meta), 1)
+        self.assertIn(sampled_meta[0], {10, 16})
+
+        # Tất cả frame bị xoá → trả [] an toàn
+        self.assertEqual(pick_frames(job, 20, included_frames=[14], deleted_frames=[14]), [])
+
 
 class Qc2ReviewTests(TestCase):
     def setUp(self) -> None:
@@ -876,3 +904,155 @@ class P0RegressionTests(TestCase):
         detail = self.pm.get(self.f.url(f"jobs/{job.id}/")).data
         self.assertEqual(list_row["open_error_count"], 2)
         self.assertEqual(detail["open_error_count"], 2)
+
+    def test_qc1_respects_escalation_policy_block_vs_warn_only(self) -> None:
+        from projects.models import EscalationPolicy
+
+        qc1 = self.f.client(self.f.qc1)
+        job = self.f.job(
+            status=JobStatus.PENDING_QC1,
+            annotator=self.f.ann1,
+            qc1_reviewer=None,
+            rework_round=4,
+            total_rework_rounds=4,
+            is_escalated=True,
+        )
+
+        # Chế độ BLOCK: ẩn khỏi pool và chặn start/pass/reject
+        self.f.project.escalation_policy = EscalationPolicy.BLOCK
+        self.f.project.save(update_fields=["escalation_policy"])
+        self.assertEqual(qc1.get(self.f.url("qc1/jobs/?scope=pool")).data["count"], 0)
+        self.assertEqual(qc1.post(self.f.url(f"qc1/jobs/{job.id}/start/"), {}, format="json").status_code, 400)
+        self.assertEqual(qc1.post(self.f.url(f"qc1/jobs/{job.id}/pass/"), {}, format="json").status_code, 400)
+
+        # Chế độ WARN_ONLY: hiện trong pool và cho phép start + pass
+        self.f.project.escalation_policy = EscalationPolicy.WARN_ONLY
+        self.f.project.save(update_fields=["escalation_policy"])
+        pool_ids = [r["id"] for r in qc1.get(self.f.url("qc1/jobs/?scope=pool")).data["results"]]
+        self.assertIn(job.id, pool_ids)
+        self.assertEqual(qc1.post(self.f.url(f"qc1/jobs/{job.id}/start/"), {}, format="json").status_code, 200)
+        pass_res = qc1.post(self.f.url(f"qc1/jobs/{job.id}/pass/"), {}, format="json")
+        self.assertEqual(pass_res.status_code, 200, pass_res.data)
+        self.assertEqual(pass_res.data["status"], JobStatus.QC1_PASSED)
+
+    def test_error_category_duplicate_integrity_error_returns_400(self) -> None:
+        with patch.object(ErrorCategory, "save", side_effect=IntegrityError("unique_error_category")):
+            res = self.pm.post(
+                self.f.url("error-categories/"),
+                {"name": "Loại lỗi race", "severity": "minor"},
+                format="json",
+            )
+            self.assertEqual(res.status_code, 400)
+
+        with patch.object(ErrorCategory, "save", side_effect=IntegrityError("unique_error_category")):
+            upd = self.pm.patch(
+                self.f.url(f"error-categories/{self.f.category.id}/"),
+                {"name": "Đổi tên race"},
+                format="json",
+            )
+            self.assertEqual(upd.status_code, 400)
+
+    def test_audit_sample_assign_requires_pending_qc2_status_and_locks_auditor(self) -> None:
+        other_qc2 = make_user("qc2_lock_assign", Role.QC2, project=self.f.project)
+        job = self.f.job(status=JobStatus.PENDING_QC2, frame_count=10)
+        sample = ensure_qc2_sample(job)
+        assert sample is not None
+
+        with CaptureQueriesContext(connection) as q_assign:
+            ok = self.pm.post(
+                self.f.url(f"audit-samples/{sample.id}/assign/"),
+                {"auditor": other_qc2.id},
+                format="json",
+            )
+        self.assertEqual(ok.status_code, 200, ok.data)
+        locks = [q["sql"] for q in q_assign if "FOR UPDATE" in q["sql"]]
+        self.assertGreaterEqual(len(locks), 3)
+        self.assertIn("quality_auditsample", locks[0])
+        self.assertIn("jobs_job", locks[1])
+        self.assertIn("accounts_user", locks[2])
+
+        # Nếu job không còn ở trạng thái PENDING_QC2 → chặn phân auditor (400)
+        Job.objects.filter(pk=job.pk).update(status=JobStatus.APPROVED)
+        blocked = self.pm.post(
+            self.f.url(f"audit-samples/{sample.id}/assign/"),
+            {"auditor": self.f.qc2.id},
+            format="json",
+        )
+        self.assertEqual(blocked.status_code, 400)
+
+    def test_qc2_reject_unpins_confirm_qc2_notification_when_last_sample_resolved(self) -> None:
+        job = self.f.job(status=JobStatus.PENDING_QC2, annotator=self.f.ann1, frame_count=10)
+        sample = ensure_qc2_sample(job)
+        assert sample is not None
+        notif = UserNotification.objects.create(
+            recipient=self.f.qc2,
+            project=self.f.project,
+            batch=self.f.batch,
+            category=UserNotification.Category.REVIEW_NEEDED,
+            title=f"Task {self.f.batch.name} đã được xác nhận chuyển QC2",
+            is_pinned_pending=True,
+        )
+        res = self.f.client(self.f.qc2).post(
+            self.f.url(f"audit-samples/{sample.id}/reject/"),
+            {"errors": [{"category": self.f.category.id, "description": "sai"}]},
+            format="json",
+        )
+        self.assertEqual(res.status_code, 200, res.data)
+        notif.refresh_from_db()
+        self.assertFalse(notif.is_pinned_pending)
+
+    def test_pick_auditor_locks_candidate_user_and_skips_revoked_role(self) -> None:
+        from django.db import connection
+        from django.test.utils import CaptureQueriesContext
+
+        from quality.qc2 import pick_auditor
+
+        job = self.f.job(status=JobStatus.PENDING_QC2, annotator=self.f.ann1, frame_count=10)
+        with CaptureQueriesContext(connection) as ctx:
+            picked = pick_auditor(job)
+        self.assertEqual(picked, self.f.qc2)
+        self.assertTrue(
+            any("accounts_user" in q["sql"] and "FOR UPDATE" in q["sql"] for q in ctx),
+            "pick_auditor phải khoá dòng accounts_user với FOR UPDATE",
+        )
+
+    def test_error_category_id_oracle_uniform_for_foreign_and_missing_ids(self) -> None:
+        other = ProjectFixture(name="err_oracle")
+        foreign_cat_id = other.category.id
+        missing_cat_id = foreign_cat_id + 99999
+
+        # QC1 reject: foreign category ID và nonexistent ID trả cùng 400 payload
+        qc1_job = self.f.job(status=JobStatus.QC1_REVIEWING, annotator=self.f.ann1, qc1_reviewer=self.f.qc1)
+        qc1 = self.f.client(self.f.qc1)
+        r_foreign_qc1 = qc1.post(
+            self.f.url(f"qc1/jobs/{qc1_job.id}/reject/"),
+            {"errors": [{"category": foreign_cat_id, "description": "x"}]},
+            format="json",
+        )
+        r_missing_qc1 = qc1.post(
+            self.f.url(f"qc1/jobs/{qc1_job.id}/reject/"),
+            {"errors": [{"category": missing_cat_id, "description": "x"}]},
+            format="json",
+        )
+        self.assertEqual(r_foreign_qc1.status_code, 400)
+        self.assertEqual(r_missing_qc1.status_code, 400)
+        self.assertEqual(r_foreign_qc1.data, r_missing_qc1.data)
+
+        # QC2 reject: foreign category ID và nonexistent ID trả cùng 400 payload
+        qc2_job = self.f.job(status=JobStatus.PENDING_QC2, annotator=self.f.ann1, frame_count=10)
+        sample = ensure_qc2_sample(qc2_job)
+        assert sample is not None
+        qc2 = self.f.client(self.f.qc2)
+        r_foreign_qc2 = qc2.post(
+            self.f.url(f"audit-samples/{sample.id}/reject/"),
+            {"errors": [{"category": foreign_cat_id, "description": "x"}]},
+            format="json",
+        )
+        r_missing_qc2 = qc2.post(
+            self.f.url(f"audit-samples/{sample.id}/reject/"),
+            {"errors": [{"category": missing_cat_id, "description": "x"}]},
+            format="json",
+        )
+        self.assertEqual(r_foreign_qc2.status_code, 400)
+        self.assertEqual(r_missing_qc2.status_code, 400)
+        self.assertEqual(r_foreign_qc2.data, r_missing_qc2.data)

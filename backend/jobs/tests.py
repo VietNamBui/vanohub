@@ -1,10 +1,12 @@
 from datetime import timedelta
 from unittest.mock import patch
 
+from django.db import connection
 from django.test import TestCase, override_settings
+from django.test.utils import CaptureQueriesContext
 from django.utils import timezone
 
-from accounts.models import Role
+from accounts.models import Role, RoleAssignment
 from accounts.testing import ProjectFixture, make_user
 from projects.models import ActivityLog, Batch, Dataset, DataStatus, EscalationPolicy, UserNotification
 from quality.models import Audit, AuditSample, ReviewError, ReviewStage
@@ -841,3 +843,55 @@ class JobHardeningAndSecurityTests(TestCase):
             format="json",
         )
         self.assertEqual(double.status_code, 400)
+
+    def test_resolve_escalation_blocks_post_qc1_statuses_even_without_annotator(self):
+        for st in (JobStatus.QC1_PASSED, JobStatus.PENDING_QC2, JobStatus.APPROVED, JobStatus.DELIVERED):
+            job = self.f.job(
+                status=st,
+                annotator=self.f.ann1,
+                rework_round=3,
+                total_rework_rounds=3,
+                is_escalated=True,
+            )
+            res = self.pm.post(self.f.url(f"jobs/{job.id}/resolve-escalation/"), {}, format="json")
+            self.assertEqual(res.status_code, 400, f"Status {st} should block resolve-escalation")
+
+    def test_assign_job_locks_user_and_rechecks_role_while_claim_reads_wip_and_team_inside_atomic(self):
+        from rest_framework.exceptions import ValidationError as DrfValidationError
+
+        from .views import assign_job
+
+        job = self.f.job(status=JobStatus.ANNOTATING, annotator=self.f.ann1)
+        with CaptureQueriesContext(connection) as q_assign:
+            res = self.pm.post(
+                self.f.url(f"jobs/{job.id}/assign/"),
+                {"annotator": self.f.ann2.id},
+                format="json",
+            )
+        self.assertEqual(res.status_code, 200, res.data)
+        locks = [q["sql"] for q in q_assign if "FOR UPDATE" in q["sql"]]
+        self.assertGreaterEqual(len(locks), 2)
+        self.assertIn("jobs_job", locks[0])
+        self.assertIn("accounts_user", locks[1])
+
+        # Nếu vai trò vừa bị gỡ trước khi assign_job chạy → chặn lại sau khi khoá User
+        RoleAssignment.objects.filter(project=self.f.project, user=self.f.ann2, role=Role.ANNOTATOR).delete()
+        with self.assertRaises(DrfValidationError):
+            assign_job(job, {"annotator": self.f.ann2}, self.f.pm, self.f.project)
+
+        # claim đọc team_ids và wip_limit sau khi khoá User
+        pool_job = Job.objects.create(
+            project=self.f.project,
+            dataset=self.f.dataset,
+            batch=self.f.batch,
+            name="POOL-CLAIM-LOCK",
+            status=JobStatus.PENDING_ANNOTATION,
+        )
+        with CaptureQueriesContext(connection) as q_claim:
+            claimed = self.ann1.post(self.f.url("annotator/jobs/claim/"), {}, format="json")
+        self.assertEqual(claimed.status_code, 200, claimed.data)
+        self.assertEqual(claimed.data["id"], pool_job.id)
+        sqls = [q["sql"] for q in q_claim]
+        user_lock_idx = next(i for i, s in enumerate(sqls) if "accounts_user" in s and "FOR UPDATE" in s)
+        team_query_idx = next(i for i, s in enumerate(sqls) if "teams_teammember" in s)
+        self.assertGreater(team_query_idx, user_lock_idx)

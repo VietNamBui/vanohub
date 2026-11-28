@@ -1,17 +1,16 @@
 import { AlertTriangle, ArrowRight, CheckCircle, Clock, Target04 } from '@untitledui/icons'
 import type { FC } from 'react'
-import { useEffect, useState } from 'react'
+import { useState } from 'react'
 import { Link, useNavigate } from 'react-router'
 import { Badge, BadgeWithDot } from '@/components/base/badges/badges'
 import { Button } from '@/components/base/buttons/button'
 import { ProgressBarBase } from '@/components/base/progress-indicators/progress-indicators'
 import { FeaturedIcon } from '@/components/foundations/featured-icon/featured-icon'
-import { useShell } from '../../../layouts/ShellContext'
 import { getErrorMessage } from '../../../shared/api/errors'
 import PageState from '../../../shared/components/ui/PageState'
 import SectionCard from '../../../shared/components/ui/SectionCard'
 import { useRequest } from '../../../shared/hooks/useRequest'
-import { formatDateTime, formatNumber, formatShortDateTime, VN_TIME_ZONE } from '../../../shared/utils/format'
+import { formatDateTime, formatNumber, formatShortDateTime, formatViPercent, VN_TIME_ZONE } from '../../../shared/utils/format'
 import { useAuth } from '../../auth/useAuth'
 import { useProject } from '../../projects/projectContext'
 import { SEVERITY_LABELS } from '../../quality/constants'
@@ -20,7 +19,9 @@ import { getAnnotatorDashboard } from '../api'
 import AnnotatorBreadcrumb from '../components/AnnotatorBreadcrumb'
 import AnnotatorJobDrawer from '../components/AnnotatorJobDrawer'
 import JobStatusBadge from '../components/JobStatusBadge'
+import ReviewErrorChips from '../components/ReviewErrorChips'
 import { formatDeadlineCountdown } from '../constants'
+import { formatKpiDeltaText, isJobEscalationWarnOnly } from '../jobHelpers'
 import type { AnnotatorDailyResult, AnnotatorRequestStatus } from '../types'
 
 function getGreeting() {
@@ -43,11 +44,6 @@ function getShortName(fullName?: string, firstName?: string, username?: string) 
   return firstName || username || 'bạn'
 }
 
-function formatViPercent(val: number | null) {
-  if (val == null) return '—'
-  return `${val.toFixed(1).replace('.', ',')}%`
-}
-
 const SEVERITY_BADGE: Record<string, 'gray' | 'warning' | 'error'> = {
   minor: 'gray',
   major: 'warning',
@@ -64,19 +60,12 @@ const REQUEST_STATUS_COLOR: Record<AnnotatorRequestStatus, 'warning' | 'success'
 export default function AnnotatorDashboardPage() {
   const { projectId, project } = useProject()
   const { user } = useAuth()
-  const { setTeamLeaderName } = useShell()
   const navigate = useNavigate()
   const [drawerJobId, setDrawerJobId] = useState<number | null>(null)
 
   const { data, error, isLoading, retry } = useRequest(`annotator-dashboard:${projectId}:week`, () =>
     getAnnotatorDashboard(projectId, 'week'),
   )
-
-  useEffect(() => {
-    if (data?.meta?.team_leader_name) {
-      setTeamLeaderName(data.meta.team_leader_name)
-    }
-  }, [data?.meta?.team_leader_name, setTeamLeaderName])
 
   const firstName = getShortName(user?.full_name, user?.first_name, user?.username)
   const syncText = data?.meta?.last_cvat_sync_at
@@ -140,7 +129,7 @@ export default function AnnotatorDashboardPage() {
               }
               subtitle={
                 data.kpi_summary.target_objects
-                  ? `${formatNumber(data.kpi_summary.actual_objects)} / ${formatNumber(data.kpi_summary.target_objects)} · thiếu ${formatNumber(data.kpi_summary.shortfall)}`
+                  ? `${formatNumber(data.kpi_summary.actual_objects)} / ${formatNumber(data.kpi_summary.target_objects)} · ${formatKpiDeltaText(data.kpi_summary.shortfall, data.kpi_summary.surplus, '', formatNumber)}`
                   : `${formatNumber(data.kpi_summary.actual_objects)} object-frame hoàn tất`
               }
               tone="brand"
@@ -153,7 +142,11 @@ export default function AnnotatorDashboardPage() {
               value={String(data.kpi_summary.rework_jobs_count)}
               subtitle={
                 data.kpi_summary.rework_jobs_count > 0
-                  ? `job · vòng sửa ${data.kpi_summary.max_rework_round_active} / ${data.kpi_summary.max_rework_rounds}`
+                  ? `${
+                      data.kpi_summary.pending_rework_errors != null
+                        ? `${data.kpi_summary.pending_rework_errors} lỗi chờ sửa`
+                        : 'job'
+                    } · vòng sửa ${data.kpi_summary.max_rework_round_active} / ${data.kpi_summary.max_rework_rounds}`
                   : `0 job cần sửa (tối đa ${data.kpi_summary.max_rework_rounds} vòng)`
               }
               tone={data.kpi_summary.rework_jobs_count > 0 ? 'warning' : 'brand'}
@@ -167,7 +160,15 @@ export default function AnnotatorDashboardPage() {
               subtitle={`${data.kpi_summary.due_soon_count} sắp hạn · ${data.kpi_summary.overdue_count} quá hạn`}
               tone={data.kpi_summary.due_soon_count + data.kpi_summary.overdue_count > 0 ? 'warning' : 'brand'}
               icon={Clock}
-              onClick={() => navigate(`/projects/${projectId}/annotator/jobs?due_soon=1`)}
+              onClick={() => {
+                const qs =
+                  data.kpi_summary.overdue_count > 0
+                    ? '?overdue=1'
+                    : data.kpi_summary.due_soon_count > 0
+                      ? '?due_soon=1'
+                      : ''
+                navigate(`/projects/${projectId}/annotator/jobs${qs}`)
+              }}
             />
 
             <KpiCard
@@ -209,8 +210,7 @@ export default function AnnotatorDashboardPage() {
                       const pct = job.progress_percent ?? 0
                       const countdown = formatDeadlineCountdown(job.hours_remaining)
                       const isRework = job.status === 'rework'
-                      const isWarnOnlyEscalated =
-                        job.is_escalated && (job.escalation_policy ?? project.escalation_policy ?? 'block') === 'warn_only'
+                      const isWarnOnlyEscalated = isJobEscalationWarnOnly(job, project.escalation_policy)
                       return (
                         <tr
                           key={job.id}
@@ -334,33 +334,7 @@ export default function AnnotatorDashboardPage() {
                                 </div>
                                 <div className="min-w-0">
                                   <p className="text-sm font-medium text-primary">{err.category}</p>
-                                  {(err.frame_number != null ||
-                                    err.cvat_object_id != null ||
-                                    err.is_missing_object ||
-                                    err.verdict === 'edge') && (
-                                    <div className="mt-1 flex flex-wrap gap-1">
-                                      {err.frame_number != null && (
-                                        <Badge size="sm" type="pill-color" color="gray">
-                                          Frame #{err.frame_number}
-                                        </Badge>
-                                      )}
-                                      {err.cvat_object_id != null && (
-                                        <Badge size="sm" type="pill-color" color="blue">
-                                          Object #{err.cvat_object_id}
-                                        </Badge>
-                                      )}
-                                      {err.is_missing_object && (
-                                        <Badge size="sm" type="pill-color" color="orange">
-                                          Thiếu đối tượng
-                                        </Badge>
-                                      )}
-                                      {err.verdict === 'edge' && (
-                                        <Badge size="sm" type="pill-color" color="warning">
-                                          Cận biên
-                                        </Badge>
-                                      )}
-                                    </div>
-                                  )}
+                                  <ReviewErrorChips err={err} />
                                   {err.description && <p className="mt-0.5 text-xs text-tertiary">{err.description}</p>}
                                 </div>
                               </div>
@@ -647,6 +621,11 @@ function DailyStackedChart({ data, target }: { data: AnnotatorDailyResult[]; tar
               <p className="font-semibold text-primary">{data[hoverIdx].label}</p>
               <p className="text-tertiary">Lần đầu: {formatNumber(data[hoverIdx].first_pass_objects)}</p>
               <p className="text-tertiary">Rework: {formatNumber(data[hoverIdx].rework_objects)}</p>
+              {(data[hoverIdx].unsubmitted_cvat_objects ?? 0) > 0 && (
+                <p className="text-tertiary">
+                  Đồng bộ CVAT (chưa nộp): {formatNumber(data[hoverIdx].unsubmitted_cvat_objects ?? 0)}
+                </p>
+              )}
               <p className="font-medium text-brand-secondary">Tổng KPI: {formatNumber(data[hoverIdx].total_objects)}</p>
             </div>
           )}

@@ -8,11 +8,13 @@ gom trong Audit đang mở của task (Batch). Frame được chọn cố địn
 
 import math
 import random
+from collections.abc import Iterable
+from typing import Any
 
 from django.db import IntegrityError, transaction
 from django.db.models import Count, Q
 
-from accounts.models import Role, User
+from accounts.models import Role, RoleAssignment, User
 from jobs.models import DailyOutputRecord, Job, JobStatus
 from projects.models import ActivityLog, Batch, SamplingMethod
 
@@ -104,10 +106,11 @@ def four_eyes_conflicts(job: Job) -> set[int]:
 def pick_auditor(job: Job) -> User | None:
     """Tự giao lượt QC2 cho người có vai trò QC2 (gán trực tiếp, không tính PM kiêm QC2)
     đang giữ ít lượt chờ kiểm nhất, trừ người đã annotate / QC1 job (luật bốn mắt).
+    Khoá dòng User được chọn và kiểm tra lại quyền QC2 để chặn race với gỡ vai trò đồng thời.
     Không có ai phù hợp → để trống cho PM phân.
     """
     blocked = four_eyes_conflicts(job)
-    candidates = (
+    candidate_ids = list(
         User.objects.filter(
             is_active=True,
             role_assignments__project=job.project,
@@ -124,17 +127,81 @@ def pick_auditor(job: Job) -> User | None:
             )
         )
         .order_by("load", "id")
+        .values_list("id", flat=True)
     )
-    return candidates.first()
+    if not candidate_ids:
+        return None
+    with transaction.atomic():
+        for candidate_id in candidate_ids:
+            user = User.objects.select_for_update(of=("self",)).filter(pk=candidate_id, is_active=True).first()
+            if user is None:
+                continue
+            if RoleAssignment.objects.filter(project=job.project, user=user, role=Role.QC2).exists():
+                return user
+    return None
 
 
-def pick_frames(job: Job, rate: int) -> list[int]:
-    """Chọn cố định sampling_rate % frame của job theo (job.pk, max(total_rework_rounds, rework_round))."""
-    total = max(job.frame_count, 1)
-    count = min(total, max(1, math.ceil(total * rate / 100)))
+def pick_frames(
+    job: Job,
+    rate: int,
+    *,
+    frame_step: int | None = None,
+    deleted_frames: Iterable[int] | None = None,
+    included_frames: Iterable[int] | None = None,
+    stop_frame: int | None = None,
+    meta: Any = None,
+) -> list[int]:
+    """Chọn cố định sampling_rate % frame hợp lệ của job theo (job.pk, max(total_rework_rounds, rework_round)).
+
+    Hỗ trợ tùy chọn `frame_step`, `deleted_frames`, `included_frames`, `stop_frame` (hoặc `meta` từ CVAT)
+    mà vẫn giữ nguyên kết quả định danh của các job thường khi không truyền bộ lọc.
+    """
+    start = max(0, int(getattr(job, "cvat_start_frame", 0) or 0))
+    raw_step = frame_step if frame_step is not None else (getattr(meta, "frame_step", None) if meta is not None else getattr(job, "cvat_frame_step", None))
+    step = max(1, int(raw_step or 1))
+    raw_deleted = deleted_frames if deleted_frames is not None else (getattr(meta, "deleted_frames", None) if meta is not None else getattr(job, "cvat_deleted_frames", None))
+    deleted_set = {f for f in (raw_deleted or ()) if isinstance(f, int) and not isinstance(f, bool)}
+    raw_included = included_frames if included_frames is not None else (getattr(meta, "included_frames", None) if meta is not None else getattr(job, "cvat_included_frames", None))
+    included_list = [f for f in raw_included if isinstance(f, int) and not isinstance(f, bool)] if raw_included is not None else None
+    raw_stop = stop_frame if stop_frame is not None else getattr(job, "cvat_stop_frame", None)
+    if meta is not None and hasattr(meta, "resolve_stop_frame"):
+        resolved_stop = meta.resolve_stop_frame(raw_stop)
+    else:
+        resolved_stop = raw_stop
+
     # Non-cryptographic deterministic sampling per (job, cumulative rework round)
     rng = random.Random(f"{job.pk}:{max(job.total_rework_rounds, job.rework_round)}")
-    return [job.cvat_start_frame + offset for offset in sorted(rng.sample(range(total), count))]
+
+    if included_list is not None:
+        candidates = sorted(
+            {
+                f
+                for f in included_list
+                if f >= start and (resolved_stop is None or f <= resolved_stop) and f not in deleted_set
+            }
+        )
+        if not candidates:
+            return []
+        count = min(len(candidates), max(1, math.ceil(len(candidates) * rate / 100)))
+        return sorted(rng.sample(candidates, count))
+
+    if step == 1 and not deleted_set and resolved_stop is None:
+        total = max(job.frame_count, 1)
+        count = min(total, max(1, math.ceil(total * rate / 100)))
+        return [start + offset for offset in sorted(rng.sample(range(total), count))]
+
+    if resolved_stop is not None:
+        if resolved_stop < start:
+            return []
+        raw_frames = range(start, resolved_stop + 1, step)
+    else:
+        total = max(job.frame_count, 1)
+        raw_frames = range(start, start + total * step, step)
+    candidates = [f for f in raw_frames if f not in deleted_set]
+    if not candidates:
+        return []
+    count = min(len(candidates), max(1, math.ceil(len(candidates) * rate / 100)))
+    return sorted(rng.sample(candidates, count))
 
 
 def ensure_qc2_sample(job: Job) -> AuditSample | None:

@@ -1,3 +1,4 @@
+import type { Capability } from '../../shared/types/capabilities'
 import type { Role } from '../../shared/types/roles'
 
 export interface RoleAssignment {
@@ -5,6 +6,15 @@ export interface RoleAssignment {
   role: Role
   project: number
   project_name: string | null
+}
+
+export interface UserProjectScope {
+  id: number
+  name: string
+  cvat_org_slug: string
+  roles: Role[]
+  direct_roles: Role[]
+  capabilities: Capability[]
 }
 
 /** Dữ liệu trả về từ GET/PATCH /api/auth/me/ */
@@ -21,9 +31,11 @@ export interface CurrentUser {
   notify_deadline?: boolean
   notify_request_updates?: boolean
   notify_qc_pass?: boolean
+  is_pm: boolean
   cvat_linked?: boolean
   cvat_username?: string | null
   role_assignments: RoleAssignment[]
+  projects: UserProjectScope[]
 }
 
 export interface ProfileUpdateInput {

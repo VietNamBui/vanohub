@@ -4,7 +4,11 @@ from urllib.parse import urlparse
 
 from django.contrib.auth.password_validation import validate_password
 from django.core.exceptions import ValidationError as DjangoValidationError
+from django.db import transaction
 from rest_framework import serializers
+from rest_framework_simplejwt.exceptions import AuthenticationFailed, InvalidToken
+from rest_framework_simplejwt.serializers import TokenObtainPairSerializer, TokenRefreshSerializer
+from rest_framework_simplejwt.settings import api_settings
 
 from .models import Role, RoleAssignment, User, expand_roles
 from .permissions import capabilities_for_roles
@@ -113,9 +117,17 @@ class CurrentUserSerializer(serializers.ModelSerializer):
                 grouped[project.id] = (project, {assignment.role})
             else:
                 entry[1].add(assignment.role)
+        if user.is_superuser:
+            from projects.models import Project
+
+            for project in Project.objects.all():
+                grouped.setdefault(project.id, (project, set()))
         result: list[dict[str, Any]] = []
         for project, direct_roles in grouped.values():
-            effective_roles = expand_roles(direct_roles)
+            effective_input = set(direct_roles)
+            if user.is_superuser:
+                effective_input.add(Role.PROJECT_MANAGER)
+            effective_roles = expand_roles(effective_input)
             result.append(
                 {
                     "id": project.id,
@@ -209,9 +221,47 @@ class ChangePasswordSerializer(serializers.Serializer):
         return attrs
 
     def save(self, **kwargs: Any) -> User:
-        user: User = self.context["request"].user
+        request_user: User = self.context["request"].user
         data = cast(dict[str, Any], self.validated_data)
-        user.set_password(data["new_password"])
-        user.initial_password_encrypted = ""
-        user.save(update_fields=["password", "initial_password_encrypted"])
+        with transaction.atomic():
+            user = User.objects.select_for_update().get(pk=request_user.pk)
+            if not user.check_password(data["current_password"]):
+                raise serializers.ValidationError({"current_password": "Mật khẩu hiện tại không đúng."})
+            user.set_password(data["new_password"])
+            user.initial_password_encrypted = ""
+            user.token_version += 1
+            user.save(update_fields=["password", "initial_password_encrypted", "token_version"])
         return user
+
+
+class VanoHubTokenObtainPairSerializer(TokenObtainPairSerializer):
+    """Đưa User.token_version vào payload JWT để thu hồi tức thì khi đổi mật khẩu hoặc gỡ vai trò."""
+
+    @classmethod
+    def get_token(cls, user: Any) -> Any:
+        token = super().get_token(user)
+        token["tv"] = user.token_version
+        return token
+
+
+class VanoHubTokenRefreshSerializer(TokenRefreshSerializer):
+    """Từ chối làm mới access token nếu token_version không khớp User.token_version hiện tại."""
+
+    def validate(self, attrs: dict[str, Any]) -> dict[str, Any]:
+        refresh = self.token_class(attrs["refresh"])
+        user_id = refresh.payload.get(api_settings.USER_ID_CLAIM)
+        if user_id is None:
+            raise InvalidToken("Token không chứa định danh người dùng.")
+        user = User.objects.filter(**{api_settings.USER_ID_FIELD: user_id}).first()
+        if user is None or not api_settings.USER_AUTHENTICATION_RULE(user):
+            raise AuthenticationFailed(
+                str(self.error_messages["no_active_account"]),
+                "no_active_account",
+            )
+        token_version = refresh.payload.get("tv")
+        if token_version is None or token_version != user.token_version:
+            raise AuthenticationFailed(
+                "Phiên đăng nhập đã hết hiệu lực, vui lòng đăng nhập lại.",
+                code="token_revoked",
+            )
+        return super().validate(attrs)

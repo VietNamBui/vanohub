@@ -25,6 +25,7 @@ export interface Workload {
   capacity: number
   holding: number
   qc1_holding: number
+  overdue: number
   due_soon: number
   escalated: number
 }

@@ -145,6 +145,8 @@ export function formatCsvFileDate(at: Date = new Date()): string {
 }
 
 export const formatPercent = (value?: number | null) => (value == null ? '—' : `${value}%`)
+export const formatViPercent = (value?: number | null) =>
+  value == null ? '—' : `${new Intl.NumberFormat('vi-VN', { maximumFractionDigits: 1 }).format(value)}%`
 export const formatNumber = (value?: number | null) => (value == null ? '—' : value.toLocaleString('vi-VN'))
 
 /** "5 phút trước", "2 ngày trước"... dùng Native Intl.RelativeTimeFormat('vi'). */

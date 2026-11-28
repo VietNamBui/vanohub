@@ -1,6 +1,7 @@
 import { lazy } from 'react'
 
 export const AccountSettingsPage = lazy(() => import('../features/accounts/AccountSettingsPage'))
+export const ActivityLogPage = lazy(() => import('../features/projects/pages/ActivityLogPage'))
 export const AnnotatorAnalyticsPage = lazy(() => import('../features/analytics/AnnotatorAnalyticsPage'))
 export const LoginPage = lazy(() => import('../features/auth/LoginPage'))
 export const CvatLinkPage = lazy(() => import('../features/cvat/pages/CvatLinkPage'))
@@ -18,6 +19,7 @@ export const DeliveryPage = lazy(() => import('../features/projects/pages/Delive
 export const GuidelinesPage = lazy(() => import('../features/projects/pages/GuidelinesPage'))
 export const OverviewPage = lazy(() => import('../features/projects/pages/OverviewPage'))
 export const ProjectListPage = lazy(() => import('../features/projects/pages/ProjectListPage'))
+export const ProjectSettingsPage = lazy(() => import('../features/projects/pages/ProjectSettingsPage'))
 export const TeamRankingPage = lazy(() => import('../features/projects/pages/TeamRankingPage'))
 export const ErrorCategoriesPage = lazy(() => import('../features/quality/pages/ErrorCategoriesPage'))
 export const Qc1DashboardPage = lazy(() => import('../features/quality/qc1/Qc1DashboardPage'))

@@ -1,5 +1,6 @@
 from collections import Counter, defaultdict
 from decimal import Decimal
+from typing import Any, cast
 
 from rest_framework import serializers
 
@@ -73,7 +74,11 @@ class ProjectListSerializer(serializers.ModelSerializer):
         ]
 
     def get_my_roles(self, project):
-        return _my_roles(project)
+        roles = [a.role for a in project.my_assignments]
+        request = self.context.get("request")
+        if request and getattr(request.user, "is_superuser", False):
+            roles.append(Role.PROJECT_MANAGER)
+        return sorted(expand_roles(roles))
 
     def get_project_managers(self, project):
         pms = getattr(project, "pm_assignments", None)
@@ -233,6 +238,10 @@ class MemberSerializer(serializers.Serializer):
     active_jobs = serializers.IntegerField()
 
 
+_INVALID_TEAM_MSG = "Team không hợp lệ hoặc không thuộc organization này."
+_INVALID_BATCH_MSG = "Task không hợp lệ hoặc không thuộc organization này."
+
+
 class CreateMemberSerializer(serializers.Serializer):
     full_name = serializers.CharField(max_length=150)
     username = serializers.RegexField(
@@ -247,7 +256,19 @@ class CreateMemberSerializer(serializers.Serializer):
         allow_empty=False,
         error_messages={"empty": "Chọn ít nhất một vai trò."},
     )
-    team = serializers.PrimaryKeyRelatedField(queryset=Team.objects.all(), required=False, allow_null=True)
+    team = serializers.PrimaryKeyRelatedField(
+        queryset=Team.objects.none(),
+        required=False,
+        allow_null=True,
+        error_messages={"does_not_exist": _INVALID_TEAM_MSG, "incorrect_type": _INVALID_TEAM_MSG},
+    )
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        project = self.context.get("project")
+        if project is not None:
+            team_field = cast(serializers.PrimaryKeyRelatedField, self.fields["team"])
+            team_field.queryset = Team.objects.filter(project=project)
 
     def validate_full_name(self, value):
         value = " ".join(value.split())
@@ -265,7 +286,7 @@ class CreateMemberSerializer(serializers.Serializer):
 
     def validate_team(self, team):
         if team and team.project_id != self.context["project"].id:
-            raise serializers.ValidationError("Team không thuộc organization này.")
+            raise serializers.ValidationError(_INVALID_TEAM_MSG)
         return team
 
 
@@ -365,15 +386,30 @@ class BatchSerializer(ProjectScopedSerializer):
         locked = getattr(batch, "locked_jobs", 0) or 0
         return qc1_passed > 0 and blocking == 0 and locked == 0
 
+    def get_fields(self):
+        fields = super().get_fields()
+        project = self.context.get("project")
+        if "team" in fields and isinstance(fields["team"], serializers.PrimaryKeyRelatedField):
+            team_field = cast(serializers.PrimaryKeyRelatedField, fields["team"])
+            team_field.queryset = Team.objects.filter(project=project) if project is not None else Team.objects.none()
+            team_field.error_messages = {
+                **team_field.error_messages,
+                "does_not_exist": _INVALID_TEAM_MSG,
+                "incorrect_type": _INVALID_TEAM_MSG,
+            }
+        return fields
+
     def validate_team(self, team):
         if team and team.project_id != self.project.id:
-            raise serializers.ValidationError("Team không thuộc organization này.")
+            raise serializers.ValidationError(_INVALID_TEAM_MSG)
         return team
 
 
 class DeliverySerializer(ProjectScopedSerializer):
     batch_name = serializers.CharField(source="batch.name", read_only=True)
     dataset_name = serializers.CharField(source="batch.dataset.name", read_only=True)
+    deadline = RFC3339DateTimeField(source="batch.deadline", read_only=True)
+    is_on_time = serializers.SerializerMethodField()
     delivered_by = UserBriefSerializer(read_only=True)
     delivered_at = RFC3339DateTimeField(read_only=True)
     job_count = serializers.IntegerField(source="batch.jobs.count", read_only=True)
@@ -385,6 +421,8 @@ class DeliverySerializer(ProjectScopedSerializer):
             "batch",
             "batch_name",
             "dataset_name",
+            "deadline",
+            "is_on_time",
             "recipient",
             "output_path",
             "note",
@@ -394,9 +432,33 @@ class DeliverySerializer(ProjectScopedSerializer):
             "job_count",
         ]
 
+    def get_fields(self):
+        fields = super().get_fields()
+        if "batch" in fields:
+            if self.instance is not None:
+                fields["batch"].read_only = True
+            elif isinstance(fields["batch"], serializers.PrimaryKeyRelatedField):
+                project = self.context.get("project")
+                batch_field = cast(serializers.PrimaryKeyRelatedField, fields["batch"])
+                batch_field.queryset = (
+                    Batch.objects.filter(project=project) if project is not None else Batch.objects.none()
+                )
+                batch_field.error_messages = {
+                    **batch_field.error_messages,
+                    "does_not_exist": _INVALID_BATCH_MSG,
+                    "incorrect_type": _INVALID_BATCH_MSG,
+                }
+        return fields
+
+    def get_is_on_time(self, delivery):
+        deadline = delivery.batch.deadline if delivery.batch_id else None
+        if deadline is None or delivery.delivered_at is None:
+            return None
+        return delivery.delivered_at <= deadline
+
     def validate_batch(self, batch):
         if batch.project_id != self.project.id:
-            raise serializers.ValidationError("Task không thuộc organization này.")
+            raise serializers.ValidationError(_INVALID_BATCH_MSG)
         return batch
 
     def validate(self, attrs):
@@ -467,9 +529,22 @@ class AnnouncementSerializer(ProjectScopedSerializer):
             raise serializers.ValidationError(f"Vai trò không hợp lệ: {', '.join(invalid)}")
         return roles
 
+    def get_fields(self):
+        fields = super().get_fields()
+        project = self.context.get("project")
+        if "target_team" in fields and isinstance(fields["target_team"], serializers.PrimaryKeyRelatedField):
+            team_field = cast(serializers.PrimaryKeyRelatedField, fields["target_team"])
+            team_field.queryset = Team.objects.filter(project=project) if project is not None else Team.objects.none()
+            team_field.error_messages = {
+                **team_field.error_messages,
+                "does_not_exist": _INVALID_TEAM_MSG,
+                "incorrect_type": _INVALID_TEAM_MSG,
+            }
+        return fields
+
     def validate_target_team(self, team):
         if team and team.project_id != self.project.id:
-            raise serializers.ValidationError("Team không thuộc organization này.")
+            raise serializers.ValidationError(_INVALID_TEAM_MSG)
         return team
 
 

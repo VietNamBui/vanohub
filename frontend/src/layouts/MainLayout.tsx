@@ -29,7 +29,7 @@ export default function MainLayout() {
   const projectMatch = useMatch('/projects/:projectId/*')
   const projectId = projectMatch ? Number(projectMatch.params.projectId) : null
   const { data: projects } = useRequest(
-    `header-projects:${user?.id ?? 0}:${user?.role_assignments.length ?? 0}:${projectId ?? 'all'}`,
+    `header-projects:${user?.id ?? 0}:${user?.projects?.length ?? user?.role_assignments.length ?? 0}:${projectId ?? 'all'}`,
     listProjects,
   )
   const scopedProjects = useMemo(
@@ -42,7 +42,6 @@ export default function MainLayout() {
   const [supportOpen, setSupportOpen] = useState(false)
   const [menuOpen, setMenuOpen] = useState(false)
   const [changingPassword, setChangingPassword] = useState(false)
-  const [teamLeaderName, setTeamLeaderName] = useState<string | null>(null)
   const [projectCapabilities, setProjectCapabilities] = useState<ProjectCapabilitiesState | null>(null)
   const menuRef = useRef<HTMLDivElement>(null)
 
@@ -112,12 +111,10 @@ export default function MainLayout() {
       projectId,
       projectCapabilities,
       setProjectCapabilities,
-      teamLeaderName,
-      setTeamLeaderName,
       openSearch: () => setSearchOpen(true),
       openSupport: () => setSupportOpen(true),
     }),
-    [projectId, projectCapabilities, teamLeaderName],
+    [projectId, projectCapabilities],
   )
 
   return (
@@ -301,7 +298,6 @@ export default function MainLayout() {
         <SupportCenterDrawer
           open={supportOpen}
           projectId={projectId}
-          teamLeaderName={teamLeaderName}
           onClose={() => setSupportOpen(false)}
         />
         {changingPassword && <ChangePasswordDialog onClose={() => setChangingPassword(false)} />}

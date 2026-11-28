@@ -387,6 +387,7 @@ class UserNotification(models.Model):
         id: int
         recipient_id: int
         project_id: int
+        batch_id: int | None
         job_id: int | None
 
     class Category(models.TextChoices):
@@ -403,6 +404,7 @@ class UserNotification(models.Model):
         settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="notifications"
     )
     project = models.ForeignKey(Project, on_delete=models.CASCADE, related_name="notifications")
+    batch = models.ForeignKey("projects.Batch", on_delete=models.CASCADE, null=True, blank=True, related_name="+")
     job = models.ForeignKey("jobs.Job", on_delete=models.CASCADE, null=True, blank=True, related_name="+")
     category = models.CharField(max_length=20, choices=Category.choices, default=Category.ANNOUNCEMENT)
     title = models.CharField(max_length=200)

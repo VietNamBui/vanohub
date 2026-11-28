@@ -10,7 +10,12 @@ Cấu hình qua biến môi trường (backend/.env):
 Organization trên CVAT được truyền trực tiếp qua tham số `organization` (từ `Project.cvat_org_slug`).
 """
 
+import ipaddress
+import json as json_module
 import logging
+import re
+import time
+from collections.abc import Mapping
 from typing import Any
 from urllib.parse import urlparse
 
@@ -24,6 +29,12 @@ from .schemas import CvatAboutPayload, CvatAnnotationsPayload, CvatJobMetaPayloa
 logger = logging.getLogger(__name__)
 
 MAX_PAGES = 1000
+DEFAULT_MAX_RESPONSE_BYTES = 50 * 1024 * 1024
+DEFAULT_MAX_REQUEST_DURATION = 120.0
+_STREAM_CHUNK_SIZE = 65536
+_HOST_LABEL_RE = re.compile(
+    r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*\.?$"
+)
 
 
 class CvatError(Exception):
@@ -62,6 +73,48 @@ def _validate_base_url(base_url: str) -> None:
         raise CvatError("CVAT_URL phải dùng https:// khi CVAT_REQUIRE_HTTPS=True.")
 
 
+def _validate_host_header(raw_host: str, *, base_url: str) -> str:
+    """Validate optional CVAT_HOST_HEADER against CRLF, whitespace, userinfo/path injection, and invalid host[:port]."""
+    if not raw_host:
+        return ""
+    if any(ord(ch) < 32 or ord(ch) == 127 for ch in raw_host):
+        raise CvatError("CVAT_HOST_HEADER chứa ký tự điều khiển không hợp lệ.")
+    host = raw_host.strip()
+    if not host or any(ch.isspace() for ch in host) or any(ch in host for ch in ("/", "\\", "@", "?", "#")):
+        raise CvatError("CVAT_HOST_HEADER không hợp lệ.")
+    try:
+        parsed = urlparse(f"http://{host}")
+        port = parsed.port
+    except ValueError as exc:
+        raise CvatError("CVAT_HOST_HEADER không hợp lệ: cần dạng <host>[:port].") from exc
+    if (
+        not parsed.hostname
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.path
+        or parsed.query
+        or parsed.fragment
+        or (port is not None and not (1 <= port <= 65535))
+    ):
+        raise CvatError("CVAT_HOST_HEADER không hợp lệ: cần dạng <host>[:port].")
+    if host.startswith("["):
+        try:
+            ipaddress.ip_address(parsed.hostname)
+        except ValueError as exc:
+            raise CvatError("CVAT_HOST_HEADER không hợp lệ: địa chỉ IPv6 sai định dạng.") from exc
+    elif not _HOST_LABEL_RE.fullmatch(parsed.hostname):
+        raise CvatError("CVAT_HOST_HEADER không hợp lệ: tên miền sai định dạng.")
+
+    parsed_base = urlparse(base_url)
+    if parsed_base.scheme == "https" and parsed_base.hostname and parsed_base.hostname.lower() != parsed.hostname.lower():
+        logger.warning(
+            "CVAT_HOST_HEADER (%s) differs from HTTPS CVAT_URL host (%s); TLS SNI uses CVAT_URL hostname.",
+            parsed.hostname,
+            parsed_base.hostname,
+        )
+    return host
+
+
 class CvatClient:
     def __init__(
         self,
@@ -71,30 +124,94 @@ class CvatClient:
         password: str | None = None,
         organization: str | None = None,
         timeout: int = 15,
+        max_duration_seconds: float | None = None,
+        max_response_bytes: int | None = None,
     ) -> None:
         self.base_url = (base_url or settings.CVAT_URL or "").rstrip("/")
         if not self.base_url:
             raise CvatError("Chưa cấu hình CVAT_URL trong backend/.env.")
         _validate_base_url(self.base_url)
-        self.timeout = timeout
-        self.session = requests.Session()
-        self.session.trust_env = False
-        host_header = getattr(settings, "CVAT_HOST_HEADER", "")
-        if host_header:
-            self.session.headers["Host"] = host_header
+
+        raw_host_header = getattr(settings, "CVAT_HOST_HEADER", "")
+        host_header = _validate_host_header(
+            raw_host_header if isinstance(raw_host_header, str) else str(raw_host_header),
+            base_url=self.base_url,
+        )
+
         resolved_token = (token or settings.CVAT_ACCESS_TOKEN or "").strip()
         resolved_username = username or settings.CVAT_USERNAME
         resolved_password = password or settings.CVAT_PASSWORD
         if resolved_token:
             if any(ch.isspace() or ord(ch) < 33 or ord(ch) > 126 for ch in resolved_token):
                 raise CvatError("Access Token CVAT chứa ký tự không hợp lệ.")
-            self.session.headers["Authorization"] = f"Bearer {resolved_token}"
-        elif resolved_username and resolved_password:
-            self.session.auth = (resolved_username, resolved_password)
-        else:
+        elif not (resolved_username and resolved_password):
             raise CvatError("Chưa cấu hình tài khoản CVAT (CVAT_ACCESS_TOKEN hoặc CVAT_USERNAME/CVAT_PASSWORD).")
+
+        self.timeout = timeout
+        self.max_duration_seconds = float(
+            max_duration_seconds
+            if max_duration_seconds is not None
+            else getattr(settings, "CVAT_MAX_REQUEST_DURATION", DEFAULT_MAX_REQUEST_DURATION)
+        )
+        self.max_response_bytes = int(
+            max_response_bytes
+            if max_response_bytes is not None
+            else getattr(settings, "CVAT_MAX_RESPONSE_BYTES", DEFAULT_MAX_RESPONSE_BYTES)
+        )
+        self.session = requests.Session()
+        self.session.trust_env = False
+        if host_header:
+            self.session.headers["Host"] = host_header
+        if resolved_token:
+            self.session.headers["Authorization"] = f"Bearer {resolved_token}"
+        else:
+            self.session.auth = (resolved_username, resolved_password)
         if organization:
             self.session.headers["X-Organization"] = organization
+
+    def close(self) -> None:
+        self.session.close()
+
+    def __enter__(self) -> "CvatClient":
+        return self
+
+    def __exit__(self, *exc_info: object) -> None:
+        self.close()
+
+    def _read_json_body(self, response: Any, path: str, *, max_bytes: int) -> Any:
+        raw_headers = getattr(response, "headers", None)
+        if isinstance(raw_headers, Mapping):
+            raw_len = raw_headers.get("Content-Length")
+            if isinstance(raw_len, str) and raw_len.strip().isdigit() and int(raw_len.strip()) > max_bytes:
+                raise CvatError(f"Phản hồi CVAT vượt quá giới hạn dung lượng cho {path}.")
+
+        if isinstance(response, requests.Response):
+            chunks: list[bytes] = []
+            total = 0
+            for chunk in response.iter_content(chunk_size=_STREAM_CHUNK_SIZE):
+                if not chunk:
+                    continue
+                total += len(chunk)
+                if total > max_bytes:
+                    raise CvatError(f"Phản hồi CVAT vượt quá giới hạn dung lượng cho {path}.")
+                chunks.append(chunk)
+            if total == 0:
+                return None
+            try:
+                return json_module.loads(b"".join(chunks).decode("utf-8"))
+            except (UnicodeDecodeError, ValueError) as exc:
+                raise CvatError(f"CVAT trả JSON không hợp lệ cho {path}") from exc
+
+        content = getattr(response, "content", b"")
+        if isinstance(content, (bytes, bytearray)):
+            if len(content) > max_bytes:
+                raise CvatError(f"Phản hồi CVAT vượt quá giới hạn dung lượng cho {path}.")
+            if not content:
+                return None
+        try:
+            return response.json()
+        except ValueError as exc:
+            raise CvatError(f"CVAT trả JSON không hợp lệ cho {path}") from exc
 
     def _request(
         self,
@@ -102,48 +219,73 @@ class CvatClient:
         path: str,
         params: dict[str, Any] | None = None,
         json: Any = None,
+        *,
+        timeout: float | None = None,
+        max_bytes: int | None = None,
     ) -> Any:
         url = f"{self.base_url}/api/{path.lstrip('/')}"
+        effective_timeout = self.timeout if timeout is None else timeout
+        effective_max_bytes = self.max_response_bytes if max_bytes is None else max_bytes
         try:
             response = self.session.request(
                 method,
                 url,
                 params=params,
                 json=json,
-                timeout=self.timeout,
+                timeout=effective_timeout,
                 allow_redirects=False,
+                stream=True,
             )
         except requests.RequestException as exc:
             logger.warning("CVAT request failed: %s %s (%s)", method, path, type(exc).__name__)
             raise CvatError(f"Không kết nối được CVAT tại {self.base_url} ({type(exc).__name__}).") from exc
-        if 300 <= response.status_code < 400:
-            raise CvatError(
-                f"CVAT trả chuyển hướng HTTP {response.status_code} cho {path} — kiểm tra lại CVAT_URL."
-            )
-        if response.status_code == 401:
-            raise CvatError("CVAT từ chối xác thực. Kiểm tra tài khoản/token CVAT.")
-        if response.status_code == 403:
-            raise CvatError(f"Tài khoản CVAT không có quyền thực hiện: {path}")
-        if response.status_code == 404:
-            raise CvatNotFoundError(f"Không tìm thấy trên CVAT: {path}")
-        if not response.ok:
-            raise CvatError(f"CVAT trả lỗi {response.status_code} cho {path}")
-        if not response.content:
-            return None
         try:
-            return response.json()
-        except ValueError as exc:
-            raise CvatError(f"CVAT trả JSON không hợp lệ cho {path}") from exc
+            if 300 <= response.status_code < 400:
+                raise CvatError(
+                    f"CVAT trả chuyển hướng HTTP {response.status_code} cho {path} — kiểm tra lại CVAT_URL."
+                )
+            if response.status_code == 401:
+                raise CvatError("CVAT từ chối xác thực. Kiểm tra tài khoản/token CVAT.")
+            if response.status_code == 403:
+                raise CvatError(f"Tài khoản CVAT không có quyền thực hiện: {path}")
+            if response.status_code == 404:
+                raise CvatNotFoundError(f"Không tìm thấy trên CVAT: {path}")
+            if not response.ok:
+                raise CvatError(f"CVAT trả lỗi {response.status_code} cho {path}")
+            return self._read_json_body(response, path, max_bytes=effective_max_bytes)
+        finally:
+            close_fn = getattr(response, "close", None)
+            if callable(close_fn):
+                close_fn()
 
-    def _get(self, path: str, params: dict[str, Any] | None = None) -> Any:
-        return self._request("GET", path, params=params)
+    def _get(
+        self,
+        path: str,
+        params: dict[str, Any] | None = None,
+        *,
+        timeout: float | None = None,
+        max_bytes: int | None = None,
+    ) -> Any:
+        return self._request("GET", path, params=params, timeout=timeout, max_bytes=max_bytes)
 
-    def _get_all(self, path: str, params: dict[str, Any] | None = None) -> list[Any]:
-        """CVAT phân trang (results + next). Gom hết các trang an toàn, giới hạn MAX_PAGES."""
+    def _get_all(
+        self,
+        path: str,
+        params: dict[str, Any] | None = None,
+        *,
+        max_duration_seconds: float | None = None,
+    ) -> list[Any]:
+        """CVAT phân trang (results + next). Gom hết các trang an toàn, giới hạn MAX_PAGES và tổng thời gian."""
         query: dict[str, Any] = {**(params or {}), "page_size": 100, "page": 1}
         items: list[Any] = []
+        started = time.monotonic()
+        budget = self.max_duration_seconds if max_duration_seconds is None else max_duration_seconds
         for _ in range(MAX_PAGES):
-            data = self._get(path, query)
+            elapsed = time.monotonic() - started
+            if budget > 0 and elapsed >= budget:
+                raise CvatError(f"Quá thời gian phản hồi khi phân trang CVAT cho {path}.")
+            page_timeout = min(self.timeout, max(0.1, budget - elapsed)) if budget > 0 else self.timeout
+            data = self._get(path, query, timeout=page_timeout)
             if not isinstance(data, dict) or not isinstance(data.get("results", []), list):
                 raise CvatError(f"CVAT trả cấu trúc phân trang không hợp lệ cho {path}")
             items.extend(data.get("results", []))
@@ -234,6 +376,7 @@ class CvatClient:
         *,
         start_frame: int | None = None,
         stop_frame: int | None = None,
+        allow_missing_meta: bool = False,
     ) -> int:
         """Tổng số cuboid/object-frame sau khi bung track keyframes, trừ deleted_frames và outside."""
         payload = _validate_model(
@@ -245,12 +388,19 @@ class CvatClient:
         try:
             meta = self.get_job_meta(job_id)
         except CvatNotFoundError:
+            if not allow_missing_meta:
+                raise
             meta = None
         if meta is None:
             return payload.count_object_frames(start_frame=start_frame, stop_frame=stop_frame)
+        if start_frame is not None and meta.start_frame is not None:
+            resolved_start: int | None = max(start_frame, meta.start_frame)
+        else:
+            resolved_start = start_frame if start_frame is not None else meta.start_frame
+        resolved_stop = meta.resolve_stop_frame(stop_frame)
         return payload.count_object_frames(
-            start_frame=meta.start_frame if meta.start_frame is not None else start_frame,
-            stop_frame=meta.resolved_stop_frame if meta.resolved_stop_frame is not None else stop_frame,
+            start_frame=resolved_start,
+            stop_frame=resolved_stop,
             frame_step=meta.frame_step,
             deleted_frames=meta.deleted_frames,
             included_frames=meta.included_frames,

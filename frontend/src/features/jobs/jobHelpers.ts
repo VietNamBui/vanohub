@@ -6,6 +6,8 @@ import type { Member } from '../projects/types'
 import { JOB_STATUS_LABELS } from './constants'
 import type { Job, JobDetail, JobErrorBrief, JobFilters, JobStatus, QueueStage, Stage } from './types'
 
+export const PG_INT32_MAX = 2_147_483_647
+
 const VALID_STAGES = new Set<Stage>(['annotation', 'qc1', 'qc2', 'done'])
 const VALID_QUEUE_STAGES = new Set<QueueStage['stage']>(['annotation', 'qc1', 'qc2'])
 
@@ -91,6 +93,50 @@ export function getJobLockReason(
   return null
 }
 
+/** Lý do không thể giao lại hàng loạt (backend xử lý theo transaction: chỉ cần 1 job bị chặn là huỷ cả nhóm). */
+export function getBulkAssignBlockReason(
+  canManage: boolean,
+  jobs: Pick<Job, 'is_locked' | 'status'>[],
+): string | null {
+  if (!canManage) return 'Bạn không có quyền giao job'
+  for (const job of jobs) {
+    const reason = getJobLockReason(canManage, job)
+    if (reason) return reason
+  }
+  return null
+}
+
+/** Lý do không thể đặt deadline hàng loạt (khớp ensure_editable ở backend). */
+export function getBulkDeadlineBlockReason(
+  canManage: boolean,
+  jobs: Pick<Job, 'is_locked' | 'status'>[],
+): string | null {
+  if (!canManage) return 'Bạn không có quyền đặt deadline'
+  for (const job of jobs) {
+    if (job.is_locked) return 'Trong vùng chọn có job đang bị khoá'
+    if (job.status === 'delivered') return 'Trong vùng chọn có job đã bàn giao'
+  }
+  return null
+}
+
+/** Lý do không sửa được người kiểm QC2 của mẫu audit đang mở. */
+export function getQc2AssignBlockReason(
+  canManageAudits: boolean,
+  job: Pick<Job, 'is_locked' | 'status' | 'is_escalated' | 'escalation_policy' | 'qc2'>,
+  projectPolicy?: 'block' | 'warn_only',
+): string | null {
+  if (!job.qc2) return 'Job chưa được lấy mẫu trong đợt audit QC2 đang mở'
+  if (!canManageAudits) return 'Bạn không có quyền phân auditor'
+  if (job.qc2.result !== 'pending') {
+    return `Mẫu đã có kết quả (${job.qc2.result === 'pass' ? 'Pass' : 'Reject'})`
+  }
+  if (job.is_locked) return 'Job đang bị khoá'
+  if (job.status === 'delivered') return 'Job đã bàn giao'
+  if (isJobEscalationBlocked(job, projectPolicy)) return 'Job đang ở trạng thái Escalated'
+  if (job.status !== 'pending_qc2') return 'Job không ở trạng thái Chờ QC2'
+  return null
+}
+
 /** Vòng lỗi rework đang cần annotator xử lý (dùng total_rework_rounds để không lệch sau resolve-escalation). */
 export function activeErrorRound(job: { rework_round: number; total_rework_rounds?: number }): number | null {
   const maxRound = Math.max(job.total_rework_rounds ?? 0, job.rework_round)
@@ -106,6 +152,42 @@ export function splitActiveErrors(
   const active = errors.filter((e) => !e.is_voided && (round === null || e.rework_round === round))
   const history = errors.filter((e) => e.is_voided || (round !== null && e.rework_round !== round))
   return { active, history }
+}
+
+/** Kiểm tra bản ghi lỗi có metadata cấu trúc (frame, object, thiếu đối tượng, verdict, void) hay không. */
+export function hasStructuredErrorMeta(
+  err: Pick<JobErrorBrief, 'frame_number' | 'cvat_object_id' | 'is_missing_object' | 'verdict' | 'is_voided'>,
+): boolean {
+  return (
+    err.frame_number != null ||
+    err.cvat_object_id != null ||
+    Boolean(err.is_missing_object) ||
+    err.verdict === 'edge' ||
+    err.verdict === 'fail' ||
+    Boolean(err.is_voided)
+  )
+}
+
+/** Tóm tắt vị trí lỗi gồm frame / object ID / mô tả vị trí cho tiêu đề hoặc danh sách chọn. */
+export function formatErrorLocationSummary(
+  err: Pick<JobErrorBrief, 'frame_number' | 'cvat_object_id' | 'is_missing_object' | 'location'>,
+): string {
+  const parts: string[] = []
+  if (err.frame_number != null) parts.push(`Frame #${err.frame_number}`)
+  if (err.is_missing_object) parts.push('Thiếu đối tượng')
+  else if (err.cvat_object_id != null) parts.push(`Object #${err.cvat_object_id}`)
+  if (err.location) parts.push(err.location)
+  return parts.join(' · ')
+}
+
+/** Phân tích số nguyên không bắt buộc trong ngưỡng int32 PostgreSQL. */
+export function parseOptionalInt(raw: string, min: number): { valid: boolean; value: number | null } {
+  const trimmed = raw.trim()
+  if (!trimmed) return { valid: true, value: null }
+  if (!/^\d+$/.test(trimmed)) return { valid: false, value: null }
+  const num = Number(trimmed)
+  if (!Number.isSafeInteger(num) || num < min || num > PG_INT32_MAX) return { valid: false, value: null }
+  return { valid: true, value: num }
 }
 
 /** Đọc bộ lọc task và stage từ URLSearchParams của trang Data Queue. */
@@ -195,6 +277,37 @@ export function describeTimelineEvent(event: JobDetail['timeline'][number]): str
     return `→ ${d ? formatDateTime(d) : 'không có deadline'}`
   }
   return ''
+}
+
+/** Kiểm tra job bị chặn thao tác vì Escalated (chỉ chặn khi chính sách là BLOCK, không chặn ở WARN_ONLY). */
+export function isJobEscalationBlocked(
+  job: Pick<Job, 'is_escalated' | 'escalation_policy'>,
+  projectPolicy?: 'block' | 'warn_only',
+): boolean {
+  const policy = job.escalation_policy ?? projectPolicy ?? 'block'
+  return Boolean(job.is_escalated && policy !== 'warn_only')
+}
+
+/** Kiểm tra job đang ở trạng thái Escalated nhưng chạy chế độ cảnh báo (WARN_ONLY — vẫn thao tác tiếp được). */
+export function isJobEscalationWarnOnly(
+  job: Pick<Job, 'is_escalated' | 'escalation_policy'>,
+  projectPolicy?: 'block' | 'warn_only',
+): boolean {
+  const policy = job.escalation_policy ?? projectPolicy ?? 'block'
+  return Boolean(job.is_escalated && policy === 'warn_only')
+}
+
+/** Định dạng phần thiếu / vượt chỉ tiêu KPI (KPI03 & KPI04). */
+export function formatKpiDeltaText(
+  shortfall: number,
+  surplus: number | undefined,
+  unit = '',
+  formatter: (n: number) => string = String,
+): string {
+  const suffix = unit ? ` ${unit}` : ''
+  if ((surplus ?? 0) > 0) return `vượt ${formatter(surplus ?? 0)}${suffix}`
+  if (shortfall > 0) return `thiếu ${formatter(shortfall)}${suffix}`
+  return 'đạt chỉ tiêu'
 }
 
 /** Màu chấm tròn hiển thị theo loại sự kiện dòng thời gian. */

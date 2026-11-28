@@ -8,6 +8,7 @@ import type {
   CreatedMember,
   CreateMemberInput,
   CvatLabel,
+  CvatStatus,
   Dataset,
   Delivery,
   DeliveryCandidate,
@@ -20,7 +21,9 @@ import type {
   ProjectDetail,
   ProjectOverview,
   ProjectSettings,
+  ProjectSettingsUpdateInput,
   ProjectSummary,
+  ProjectWriteInput,
   ProjectsSyncResult,
   ProjectSyncResult,
   TeamRanking,
@@ -30,10 +33,14 @@ const p = (projectId: number, path: string) => `/projects/${projectId}/${path}`
 
 export const listProjects = async () => (await apiClient.get<ProjectSummary[]>('/projects/')).data
 export const getProject = async (id: number) => (await apiClient.get<ProjectDetail>(`/projects/${id}/`)).data
+export const createProject = async (data: ProjectWriteInput) =>
+  (await apiClient.post<ProjectDetail>('/projects/', data)).data
+export const updateProject = async (id: number, data: Partial<ProjectWriteInput>) =>
+  (await apiClient.patch<ProjectDetail>(`/projects/${id}/`, data)).data
 
 // --- Cấu hình & thành viên ---
 export const getSettings = async (id: number) => (await apiClient.get<ProjectSettings>(p(id, 'settings/'))).data
-export const updateSettings = async (id: number, data: Partial<ProjectSettings>) =>
+export const updateSettings = async (id: number, data: ProjectSettingsUpdateInput) =>
   (await apiClient.patch<ProjectSettings>(p(id, 'settings/'), data)).data
 export const listMembers = async (id: number, role?: string) =>
   (await apiClient.get<Member[]>(p(id, 'members/'), { params: cleanParams({ role }) })).data
@@ -83,7 +90,7 @@ export const updateDelivery = async (
 // --- Nhật ký, thông báo, guideline ---
 export const listActivity = async (
   id: number,
-  params: { page?: number; actor?: number; action?: string; date_from?: string; date_to?: string },
+  params: { page?: number; page_size?: number; actor?: number; action?: string; date_from?: string; date_to?: string },
 ) => (await apiClient.get<Paginated<ActivityLog>>(p(id, 'activity/'), { params: cleanParams(params) })).data
 export const listAnnouncements = async (id: number) =>
   (await apiClient.get<Announcement[]>(p(id, 'announcements/'))).data
@@ -93,13 +100,17 @@ export const sendAnnouncement = async (
 ) => (await apiClient.post<Announcement>(p(id, 'announcements/'), data)).data
 export const listProjectNotifications = async (id: number) =>
   (await apiClient.get<NotificationFeed>(p(id, 'notifications/'))).data
-export const markProjectNotificationsRead = async (id: number, notification_id?: number | string) =>
-  (
+export const markProjectNotificationsRead = async (id: number, notification_id?: number | string) => {
+  if (typeof notification_id === 'string' && notification_id.startsWith('due-')) {
+    return { updated: 0 }
+  }
+  return (
     await apiClient.post<{ updated: number }>(
       p(id, 'notifications/mark-read/'),
       notification_id != null ? { notification_id } : {},
     )
   ).data
+}
 export const listGuidelines = async (id: number) => (await apiClient.get<Guideline[]>(p(id, 'guidelines/'))).data
 export const publishGuideline = async (id: number, data: { title: string; content: string }) =>
   (await apiClient.post<Guideline>(p(id, 'guidelines/'), data)).data
@@ -113,7 +124,7 @@ export const getMemberPerformance = async (id: number) =>
 
 // --- CVAT ---
 export const getCvatStatus = async () =>
-  (await apiClient.get<{ connected: boolean; url: string; version?: string; detail?: string }>('/cvat/status/')).data
+  (await apiClient.get<CvatStatus>('/cvat/status/')).data
 export const createMember = async (id: number, data: CreateMemberInput) =>
   (await apiClient.post<CreatedMember>(p(id, 'members/'), data)).data
 export const getMemberCredential = async (id: number, userId: number) =>

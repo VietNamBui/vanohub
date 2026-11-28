@@ -167,6 +167,8 @@ function buildMenu(can: (cap: Capability) => boolean): NavGroup[] {
   const extraItems: NavItem[] = (
     [
       { key: 'delivery', label: 'Bàn giao', cap: 'manage_delivery' },
+      { key: 'settings', label: 'Cấu hình organization', cap: 'manage_settings' },
+      { key: 'activity', label: 'Nhật ký hoạt động', cap: 'view_activity' },
       { key: 'cvat-link', label: 'Liên kết CVAT', cap: 'view_project' },
       { key: 'announcements', label: 'Thông báo', cap: 'view_project' },
     ] satisfies NavItem[]
@@ -333,7 +335,7 @@ export default function ProjectLayout() {
           )}
         >
           <GearIcon />
-          <span>Cài đặt</span>
+          <span>Cài đặt tài khoản</span>
         </button>
       </div>
     </div>

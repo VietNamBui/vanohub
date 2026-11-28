@@ -1,4 +1,5 @@
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from unittest.mock import patch
 
 from django.test import TestCase
@@ -7,7 +8,7 @@ from django.utils import timezone
 from accounts.models import Role
 from accounts.testing import ProjectFixture, make_user
 from jobs.models import DailyOutputRecord, Job, JobStatus, ReworkScope, record_daily_output
-from projects.models import ActivityLog, Batch, Dataset, DataStatus
+from projects.models import ActivityLog, Batch, Dataset, DataStatus, Delivery
 from quality.models import AuditSample, ErrorVerdict, ReviewError, ReviewStage, Severity
 from quality.qc2 import ensure_qc2_sample
 from teams.models import Team, TeamMember
@@ -84,14 +85,19 @@ class AnnotatorAndQc1AnalyticsTests(TestCase):
             {"errors": [{"category": self.f.category.id, "description": "thieu"}]},
             format="json",
         )
-        # QC2 bắt được 1 lỗi FAIL và 1 lỗi EDGE (EDGE không tính là escape)
-        ReviewError.objects.create(
+        # QC2 bắt được 1 lỗi FAIL, 1 lỗi EDGE và 1 lỗi đã huỷ (chỉ FAIL chưa huỷ tính là escape)
+        fail_err = ReviewError.objects.create(
             job=j_pass,
             stage=ReviewStage.QC2,
             rework_round=0,
             category=self.f.category,
             severity=Severity.MAJOR,
             verdict=ErrorVerdict.FAIL,
+            frame_number=14,
+            cvat_object_id=88,
+            location="Làn trái",
+            description="Lệch hướng cuboid",
+            reported_by=self.f.qc2,
         )
         ReviewError.objects.create(
             job=j_pass,
@@ -101,18 +107,36 @@ class AnnotatorAndQc1AnalyticsTests(TestCase):
             severity=Severity.MINOR,
             verdict=ErrorVerdict.EDGE,
         )
+        ReviewError.objects.create(
+            job=j_pass,
+            stage=ReviewStage.QC2,
+            rework_round=0,
+            category=self.f.category,
+            severity=Severity.CRITICAL,
+            verdict=ErrorVerdict.FAIL,
+            is_voided=True,
+        )
 
         res = self.qc1.get(self.f.url("qc1-summary/?period=week"))
         self.assertEqual(res.status_code, 200, res.data)
         self.assertEqual(res.data["scope"], "mine")
         self.assertEqual(res.data["stats"]["passed"], 1)
         self.assertEqual(res.data["stats"]["rejected"], 1)
+        self.assertEqual(res.data["stats"]["reviewed_today"], 2)
         self.assertEqual(res.data["pass_rate"], 50.0)
         self.assertEqual(res.data["on_time_pct"], 50.0)
+        self.assertEqual(res.data["on_time_count"], 1)
+        self.assertEqual(res.data["on_time_total"], 2)
         self.assertEqual(res.data["kpi"]["current"]["reviewed"], 2)
         self.assertEqual(res.data["kpi"]["current"]["errors"], 1)
         self.assertEqual(res.data["qc2_escape_errors"], 1)
         self.assertEqual(res.data["escaped_jobs"], 1)
+        self.assertEqual(len(res.data["escape_errors"]), 1)
+        self.assertEqual(res.data["escape_errors"][0]["id"], fail_err.id)
+        self.assertEqual(res.data["escape_errors"][0]["job_id"], j_pass.id)
+        self.assertEqual(res.data["escape_errors"][0]["frame_number"], 14)
+        self.assertEqual(res.data["escape_errors"][0]["cvat_object_id"], 88)
+        self.assertEqual(res.data["escape_errors"][0]["reported_by"]["id"], self.f.qc2.id)
         self.assertEqual(len(res.data["trend"]), 7)
         self.assertEqual(res.data["trend"][-1]["reviewed"], 2)
 
@@ -320,7 +344,7 @@ class FormulaAndDailyOutputTests(TestCase):
 
         # Batch 2 sẵn sàng confirm-qc2 (100% QC1_PASSED)
         batch2 = Batch.objects.create(project=self.f.project, dataset=self.f.dataset, name="B2")
-        self.f.job(batch=batch2, status=JobStatus.QC1_PASSED)
+        j2 = self.f.job(batch=batch2, status=JobStatus.QC1_PASSED)
 
         ov = self.pm.get(self.f.url("overview/")).data
         self.assertEqual(ov["counts"]["ready_batches"], 1)
@@ -328,10 +352,59 @@ class FormulaAndDailyOutputTests(TestCase):
         self.assertEqual(ov["pending_decisions"]["pending_qc2_samples"], 0)
         self.assertNotIn("audits_ready_to_complete", ov["pending_decisions"])
 
-        # Khoá j1 → ready_batches giảm về 0
+        # Khoá j1 → ready_batches giảm về 0; khoá j2 → batches_ready_for_qc2_confirm giảm về 0
         Job.objects.filter(pk=j1.pk).update(is_locked=True)
+        Job.objects.filter(pk=j2.pk).update(is_locked=True)
         ov2 = self.pm.get(self.f.url("overview/")).data
         self.assertEqual(ov2["counts"]["ready_batches"], 0)
+        self.assertEqual(ov2["pending_decisions"]["batches_ready_for_qc2_confirm"], 0)
+
+    def test_overview_thresholds_strings_and_dh07_delivery_on_time(self) -> None:
+        ov_empty = self.pm.get(self.f.url("overview/")).data
+        self.assertEqual(ov_empty["thresholds"], {"quality_cl": None, "defect_error_rate": None})
+        self.assertIsNone(ov_empty["metrics"]["delivery_on_time_rate"]["value"])
+        self.assertEqual(ov_empty["metrics"]["delivery_on_time_rate"]["due_deliveries"], 0)
+        self.assertEqual(ov_empty["counts"]["overdue_batches"], 0)
+
+        self.f.project.quality_cl_threshold = Decimal("95.5")
+        self.f.project.defect_rate_threshold = Decimal("2")
+        self.f.project.save(update_fields=["quality_cl_threshold", "defect_rate_threshold"])
+
+        now = timezone.now()
+        b_on_time = Batch.objects.create(
+            project=self.f.project, dataset=self.f.dataset, name="B_ON_TIME", deadline=now + timedelta(days=1)
+        )
+        b_late = Batch.objects.create(
+            project=self.f.project, dataset=self.f.dataset, name="B_LATE", deadline=now - timedelta(hours=3)
+        )
+        Batch.objects.create(
+            project=self.f.project, dataset=self.f.dataset, name="B_OVERDUE_OPEN", deadline=now - timedelta(days=1)
+        )
+        Batch.objects.create(
+            project=self.f.project, dataset=self.f.dataset, name="B_FUTURE_OPEN", deadline=now + timedelta(days=5)
+        )
+        b_no_deadline = Batch.objects.create(
+            project=self.f.project, dataset=self.f.dataset, name="B_NO_DL", deadline=None
+        )
+        for batch in (b_on_time, b_late, b_no_deadline):
+            Delivery.objects.create(
+                project=self.f.project,
+                batch=batch,
+                recipient="Client",
+                output_path=f"s3://out/{batch.name}",
+                delivered_by=self.f.pm,
+            )
+            Batch.objects.filter(pk=batch.pk).update(status=DataStatus.DELIVERED)
+
+        ov = self.pm.get(self.f.url("overview/")).data
+        self.assertEqual(ov["thresholds"], {"quality_cl": "95.50", "defect_error_rate": "2.00"})
+        self.assertEqual(ov["counts"]["overdue_batches"], 1)
+        dh07 = ov["metrics"]["delivery_on_time_rate"]
+        self.assertEqual(dh07["value"], 33.3)
+        self.assertEqual(dh07["on_time_deliveries"], 1)
+        self.assertEqual(dh07["late_deliveries"], 1)
+        self.assertEqual(dh07["overdue_undelivered"], 1)
+        self.assertEqual(dh07["due_deliveries"], 3)
 
     def test_qc1_escape_anchored_on_sample_created_at_and_includes_cvat_synced_escapes(self) -> None:
         qc1_b = make_user("qc1_second", Role.QC1, project=self.f.project)
@@ -428,16 +501,19 @@ class FormulaAndDailyOutputTests(TestCase):
 
         qc2_mine = self.qc2.get(self.f.url("qc2-summary/?scope=mine")).data
         self.assertEqual(qc2_mine["stats"]["passed"], 0)
+        self.assertEqual(qc2_mine["stats"]["audited_today"], 0)
         self.assertEqual(qc2_mine["kpi_summary"]["actual"], 0)
 
         pm_mine = self.pm.get(self.f.url("qc2-summary/?scope=mine")).data
         self.assertEqual(pm_mine["stats"]["passed"], 1)
+        self.assertEqual(pm_mine["stats"]["audited_today"], 1)
         self.assertEqual(pm_mine["kpi_target"], 2)
         self.assertEqual(pm_mine["kpi_summary"]["achievement_pct"], 50.0)
         self.assertEqual(pm_mine["kpi"]["comparison"]["audited"]["delta"], 1)
         self.assertIsNone(pm_mine["kpi"]["comparison"]["audited"]["pct_change"])
 
         pm_proj = self.pm.get(self.f.url("qc2-summary/")).data
+        self.assertEqual(pm_proj["stats"]["audited_today"], 2)
         self.assertEqual(len(pm_proj["progress_by_batch"]), 2)
         self.assertEqual({r["dataset_name"] for r in pm_proj["progress_by_batch"]}, {"D1", "D2"})
 
@@ -445,6 +521,14 @@ class FormulaAndDailyOutputTests(TestCase):
         self.f.job(status=JobStatus.APPROVED, annotator=self.f.ann1, object_count=999)
         empty_res = self.ann1.get(self.f.url("annotator/analytics/?range=7d")).data
         self.assertEqual(empty_res["avg_productivity"]["total_objects"], 0)
+        self.assertEqual(empty_res["avg_productivity"]["measured_objects"], 0)
+        self.assertIsNone(empty_res["avg_productivity"]["objects_per_hour"])
+        self.assertEqual(empty_res["avg_productivity"]["status"], "unavailable")
+        self.assertEqual(empty_res["avg_productivity"]["hours_provenance"]["source"], "workflow_elapsed_session")
+        self.assertEqual(empty_res["avg_productivity"]["hours_provenance"]["status"], "unavailable")
+        self.assertIsNone(empty_res["daily_productivity"][-1]["first_pass_per_hour"])
+        self.assertIsNone(empty_res["daily_productivity"][-1]["rework_per_hour"])
+        self.assertEqual(empty_res["daily_productivity"][-1]["hours_status"], "unavailable")
         self.assertIsNone(empty_res["ranking"]["previous_rank"])
 
         now = timezone.now()
@@ -476,8 +560,12 @@ class FormulaAndDailyOutputTests(TestCase):
         today_row = analytics["daily_productivity"][-1]
         self.assertEqual(today_row["first_pass_objects"], 200)
         self.assertEqual(today_row["rework_objects"], 10)
+        self.assertEqual(today_row["measured_objects"], 210)
+        self.assertEqual(today_row["hours_status"], "provisional")
         self.assertAlmostEqual(today_row["first_pass_per_hour"], 100.0, delta=2.0)
         self.assertAlmostEqual(today_row["rework_per_hour"], 10.0, delta=0.5)
+        self.assertEqual(analytics["avg_productivity"]["measured_objects"], 210)
+        self.assertEqual(analytics["avg_productivity"]["status"], "provisional")
 
         perf = {r["user"]["id"]: r for r in self.pm.get(self.f.url("member-performance/")).data}
         self.assertEqual(perf[self.f.ann1.id]["total_objects"], 210)
@@ -539,12 +627,16 @@ class FormulaAndDailyOutputTests(TestCase):
         self.assertEqual(today_row["first_pass_objects"], 100)
         self.assertEqual(today_row["submitted_objects"], 30)
         self.assertEqual(today_row["unsubmitted_cvat_objects"], 100)
-        self.assertEqual(today_row["first_pass_per_hour"], 0)
+        self.assertEqual(today_row["measured_objects"], 30)
+        self.assertEqual(today_row["hours_status"], "provisional")
+        self.assertIsNone(today_row["first_pass_per_hour"])
         self.assertAlmostEqual(today_row["rework_per_hour"], 30.0, delta=1.5)
         self.assertAlmostEqual(today_row["hours"], 1.0, delta=0.1)
         self.assertEqual(ann2_ana["avg_productivity"]["total_objects"], 130)
+        self.assertEqual(ann2_ana["avg_productivity"]["measured_objects"], 30)
         self.assertEqual(ann2_ana["avg_productivity"]["submitted_objects"], 30)
         self.assertEqual(ann2_ana["avg_productivity"]["unsubmitted_cvat_objects"], 100)
+        self.assertEqual(ann2_ana["avg_productivity"]["status"], "provisional")
         self.assertAlmostEqual(ann2_ana["avg_productivity"]["objects_per_hour"], 30, delta=2)
 
     def test_post_escalation_partial_rework_focus(self) -> None:
@@ -810,6 +902,18 @@ class AnalyticsBugFixTests(TestCase):
         self.assertEqual(qc1_mine["escaped_jobs"], 1)
         self.assertEqual(other_mine["qc2_escape_errors"], 0)
         self.assertEqual(other_mine["escaped_jobs"], 0)
+
+        # scope=project: pool chưa giao KHÔNG bị tính vào assigned, và job thuộc batch khoá bị loại khỏi pending
+        pm_proj_before = self.pm.get(self.f.url("qc1-summary/?period=week")).data
+        self.assertEqual(pm_proj_before["stats"]["assigned"], 0)
+        self.assertEqual(pm_proj_before["stats"]["pool_pending"], 1)
+        self.assertEqual(pm_proj_before["stats"]["pending"], 1)
+
+        self.f.job(status=JobStatus.PENDING_QC1, annotator=self.f.ann1, qc1_reviewer=other_qc1)
+        pm_proj_after = self.pm.get(self.f.url("qc1-summary/?period=week")).data
+        self.assertEqual(pm_proj_after["stats"]["assigned"], 1)
+        self.assertEqual(pm_proj_after["stats"]["pool_pending"], 1)
+        self.assertEqual(pm_proj_after["stats"]["pending"], 2)
 
     def test_team_ranking_ranks_zero_output_below_real_output_and_excludes_voided_errors(self) -> None:
         t_zero = Team.objects.create(project=self.f.project, name="Team Zero")

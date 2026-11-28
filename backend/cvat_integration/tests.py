@@ -1,3 +1,4 @@
+import io
 from datetime import timedelta
 from typing import Any
 from unittest import mock
@@ -5,7 +6,8 @@ from unittest.mock import MagicMock, patch
 
 import requests
 from django.conf import settings
-from django.db import connection
+from django.core.management import call_command
+from django.db import IntegrityError, connection
 from django.test import TestCase, override_settings
 from django.utils import timezone
 from pydantic import ValidationError as PydanticValidationError
@@ -14,14 +16,14 @@ from rest_framework.exceptions import ValidationError as DrfValidationError
 from accounts.models import Role, RoleAssignment, User
 from accounts.testing import ProjectFixture
 from jobs.models import DailyOutputRecord, Job, JobStatus, user_work_date
-from projects.models import ActivityLog, Batch, DataStatus, EscalationPolicy, Project
+from projects.models import ActivityLog, Batch, Dataset, DataStatus, EscalationPolicy, Project
 from quality.models import Audit, AuditSample, ErrorCategory
 from quality.qc2 import four_eyes_conflicts
 
 from . import sync
-from .assignee import _NOT_MANAGED, current_holder, jobs_held_by, push_assignees
+from .assignee import current_holder, drain_cvat_outbox, enqueue_assignee_push, jobs_held_by, push_assignees
 from .client import MAX_PAGES, CvatClient, CvatError, CvatNotFoundError, _validate_model
-from .models import CvatAccount
+from .models import CvatAccount, CvatAssigneeOutbox
 from .schemas import CvatAnnotationsPayload, CvatAssigneePayload, CvatJobMetaPayload, CvatJobPayload, CvatTaskPayload
 from .sync import SYNCABLE_STATUSES, import_task_jobs, sync_batch
 from .views import _filter_sync_result_for_user
@@ -338,7 +340,7 @@ class CvatClientSecurityAndApiTests(TestCase):
             self.assertEqual(mock_req.call_args.args, ("PATCH", "http://cvat.local/api/jobs/77"))
             self.assertEqual(mock_req.call_args.kwargs["json"], {"assignee": 11})
 
-    def test_count_job_objects_uses_meta_and_falls_back_when_meta_404(self):
+    def test_count_job_objects_uses_meta_and_handles_meta_404_explicitly(self):
         client = CvatClient(base_url="http://cvat.local", token="secret")
         ann_with_meta = {"tracks": [{"id": 1, "shapes": [{"frame": 0, "outside": False}]}]}
         meta_payload = {
@@ -352,9 +354,17 @@ class CvatClientSecurityAndApiTests(TestCase):
         with patch.object(client, "_get", side_effect=[ann_with_meta, meta_payload]):
             self.assertEqual(client.count_job_objects(87), 3)
 
+        # Mặc định data/meta 404 phải ném CvatNotFoundError để không bỏ sót frame_step/deleted_frames
         ann_fallback = {"shapes": [{"id": 1, "frame": 5, "outside": False}, {"id": 2, "frame": 9, "outside": False}]}
+        with (
+            patch.object(client, "_get", side_effect=[ann_fallback, CvatNotFoundError("404")]),
+            self.assertRaises(CvatNotFoundError),
+        ):
+            client.count_job_objects(88, start_frame=4, stop_frame=6)
+
         with patch.object(client, "_get", side_effect=[ann_fallback, CvatNotFoundError("404")]):
-            self.assertEqual(client.count_job_objects(88, start_frame=4, stop_frame=6), 1)
+            self.assertEqual(client.count_job_objects(88, start_frame=4, stop_frame=6, allow_missing_meta=True), 1)
+        client.close()
 
 
 class CvatSyncValidationTests(TestCase):
@@ -515,7 +525,7 @@ class CvatSyncValidationTests(TestCase):
         self.f.batch.save(update_fields=["cvat_task_id"])
         submitted_at = timezone.now() - timedelta(days=1)
         job = self.f.job(
-            status=JobStatus.QC1_PASSED,
+            status=JobStatus.PENDING_QC1,
             annotator=self.f.ann1,
             cvat_job_id=750,
             object_count=0,
@@ -524,7 +534,7 @@ class CvatSyncValidationTests(TestCase):
 
         class PassedCountClient:
             def list_task_jobs(self, task_id):
-                return [{"id": 750, "type": "annotation", "stage": "validation", "state": "completed"}]
+                return [{"id": 750, "type": "annotation", "stage": "annotation", "state": "completed"}]
 
             def count_job_objects(self, job_id):
                 return 65
@@ -537,6 +547,34 @@ class CvatSyncValidationTests(TestCase):
         self.assertEqual(len(records), 1)
         self.assertEqual(records[0].object_count, 65)
         self.assertEqual(records[0].work_date, user_work_date(self.f.ann1, at=submitted_at))
+
+        # Sau QC1 (QC1_PASSED / PENDING_QC2 / APPROVED / DELIVERED): dù submitted_at != None cũng KHÔNG đổi object_count hay cộng thêm sản lượng
+        for frozen_status, cvat_id in (
+            (JobStatus.QC1_PASSED, 751),
+            (JobStatus.PENDING_QC2, 752),
+            (JobStatus.APPROVED, 753),
+            (JobStatus.DELIVERED, 754),
+        ):
+            frozen_job = self.f.job(
+                status=frozen_status,
+                annotator=self.f.ann1,
+                cvat_job_id=cvat_id,
+                object_count=10,
+                last_counted_objects=10,
+                submitted_at=submitted_at,
+            )
+
+            class FrozenClient:
+                def list_task_jobs(self, task_id, jid=cvat_id):
+                    return [{"id": jid, "type": "annotation", "stage": "validation", "state": "completed"}]
+
+                def count_job_objects(self, job_id):
+                    return 99
+
+            sync_batch(self.f.batch, self.f.pm, client=FrozenClient(), count_objects=True)
+            frozen_job.refresh_from_db()
+            self.assertEqual(frozen_job.object_count, 10)
+            self.assertFalse(DailyOutputRecord.objects.filter(job=frozen_job).exists())
 
 
 class FakeCvatClient:
@@ -611,18 +649,28 @@ class AssigneePushTests(TestCase):
         CvatAccount.objects.create(user=self.f.ann1, cvat_user_id=11, cvat_username="a1")
         CvatAccount.objects.create(user=self.f.qc1, cvat_user_id=33, cvat_username="q1")
 
-    def test_holder_follows_status_and_qc1_passed_is_not_managed(self):
+    def test_holder_follows_status_and_clears_post_stage_assignee(self):
         annotating = self.f.job(status=JobStatus.ANNOTATING, annotator=self.f.ann1, cvat_job_id=1)
         in_qc1 = self.f.job(status=JobStatus.PENDING_QC1, annotator=self.f.ann1, cvat_job_id=2)
-        qc1_passed = self.f.job(status=JobStatus.QC1_PASSED, annotator=self.f.ann1, cvat_job_id=9)
-        approved = self.f.job(status=JobStatus.APPROVED, annotator=self.f.ann1, cvat_job_id=3)
+        qc1_passed_clean = self.f.job(status=JobStatus.QC1_PASSED, annotator=self.f.ann1, cvat_job_id=9)
+        qc1_passed_stale = self.f.job(
+            status=JobStatus.QC1_PASSED, annotator=self.f.ann1, cvat_job_id=10, cvat_assignee_id=33
+        )
+        approved_stale = self.f.job(
+            status=JobStatus.APPROVED, annotator=self.f.ann1, cvat_job_id=3, cvat_assignee_id=22
+        )
 
-        self.assertIs(current_holder(qc1_passed), _NOT_MANAGED)
+        self.assertIsNone(current_holder(qc1_passed_clean))
+        self.assertIsNone(current_holder(approved_stale))
         self.assertEqual([j.pk for j in jobs_held_by(self.f.qc1)], [in_qc1.pk])
 
-        result = push_assignees([annotating, in_qc1, qc1_passed, approved])
-        self.assertEqual(result, {"pushed": 2, "waiting": 0, "warnings": []})
-        self.assertEqual(FakeCvatClient.pushed, [(1, 11), (2, 33)])  # QC1_PASSED và APPROVED: không động vào
+        result = push_assignees([annotating, in_qc1, qc1_passed_clean, qc1_passed_stale, approved_stale])
+        self.assertEqual(result, {"pushed": 4, "waiting": 0, "warnings": []})
+        self.assertEqual(FakeCvatClient.pushed, [(1, 11), (2, 33), (10, None), (3, None)])
+        qc1_passed_stale.refresh_from_db()
+        approved_stale.refresh_from_db()
+        self.assertIsNone(qc1_passed_stale.cvat_assignee_id)
+        self.assertIsNone(approved_stale.cvat_assignee_id)
 
     def test_unlinked_holder_is_waiting_and_old_assignee_removed(self):
         job = self.f.job(status=JobStatus.ANNOTATING, annotator=self.f.ann2, cvat_job_id=4, cvat_assignee_id=11)
@@ -888,7 +936,7 @@ class CvatSyncWorkflowSafetyTests(TestCase):
                 {"id": 408, "stage": "acceptance", "state": "completed", "start_frame": 10, "stop_frame": 19},
             ]
         )
-        sync.sync_organization(self.f.project, self.f.pm, client=client_confirmed)
+        sync.sync_organization(self.f.project, self.f.pm, client=client_confirmed, cooldown_seconds=0)
         existing_confirmed.refresh_from_db()
         new_confirmed = Job.objects.get(cvat_job_id=408)
         self.assertEqual(existing_confirmed.status, JobStatus.PENDING_QC2)
@@ -1003,7 +1051,7 @@ class CvatSyncWorkflowSafetyTests(TestCase):
         # Đổi sang WARN_ONLY → escalated job ĐƯỢC phép đồng bộ trạng thái (nhưng is_locked vẫn bị chặn)
         self.f.project.escalation_policy = EscalationPolicy.WARN_ONLY
         self.f.project.save(update_fields=["escalation_policy"])
-        sync.sync_organization(self.f.project, self.f.pm, client=client)
+        sync.sync_organization(self.f.project, self.f.pm, client=client, cooldown_seconds=0)
         j_locked.refresh_from_db()
         j_escalated.refresh_from_db()
         self.assertEqual(j_locked.status, JobStatus.PENDING_ANNOTATION)
@@ -1017,6 +1065,7 @@ class CvatSyncWorkflowSafetyTests(TestCase):
             self.f.project,
             self.f.pm,
             client=_FakeSyncClient([{"id": 423, "stage": "annotation", "state": "in progress"}]),
+            cooldown_seconds=0,
         )
         j_in_locked_batch.refresh_from_db()
         self.assertEqual(j_in_locked_batch.status, JobStatus.PENDING_ANNOTATION)
@@ -1251,3 +1300,333 @@ class JobsHeldByAndSyncOrgsRbacTests(TestCase):
         log = ActivityLog.objects.get(job=job, action="job.status")
         self.assertEqual(log.actor, self.f.qc1)
         self.assertEqual(log.after.get("event"), "qc1.pass")
+
+
+class Phase1CvatHardeningRegressionTests(TestCase):
+    """Kiểm thử hồi quy cho CvatClient DoS/OOM, counting edge cases, freeze guards, outbox và race IntegrityError."""
+
+    def setUp(self) -> None:
+        self.f = ProjectFixture()
+        self.f.project.cvat_org_id = 7
+        self.f.project.cvat_org_slug = "acme"
+        self.f.project.save(update_fields=["cvat_org_id", "cvat_org_slug"])
+        self.f.dataset.cvat_project_id = 900
+        self.f.dataset.save(update_fields=["cvat_project_id"])
+        self.f.batch.cvat_task_id = 5
+        self.f.batch.save(update_fields=["cvat_task_id"])
+
+    def test_client_host_header_validation_session_close_deadline_and_streaming_limit(self) -> None:
+        for bad_host in ("cvat.local\r\nX-Inject: 1", "bad host", "cvat.local/path", "user@cvat.local", "cvat.local:99999"):
+            with (
+                override_settings(CVAT_HOST_HEADER=bad_host),
+                patch("cvat_integration.client.requests.Session") as mock_session,
+                self.assertRaises(CvatError),
+            ):
+                CvatClient(base_url="http://127.0.0.1:8080", token="secret")
+            mock_session.assert_not_called()
+
+        with (
+            override_settings(CVAT_HOST_HEADER="cvat.internal:8443"),
+            self.assertLogs("cvat_integration.client", level="WARNING") as logs,
+            CvatClient(base_url="https://10.0.0.5:8443", token="secret") as client,
+        ):
+            self.assertEqual(client.session.headers["Host"], "cvat.internal:8443")
+        self.assertTrue(any("TLS SNI" in msg for msg in logs.output))
+
+        # Session được đóng khi rời context manager
+        with patch("cvat_integration.client.requests.Session") as mock_sess_cls:
+            sess_inst = mock_sess_cls.return_value
+            sess_inst.headers = {}
+            with CvatClient(base_url="http://cvat.local", token="secret"):
+                pass
+            sess_inst.close.assert_called_once()
+
+        # Total deadline across _get_all pagination
+        dl_client = CvatClient(base_url="http://cvat.local", token="secret", max_duration_seconds=0.05)
+        page_resp = MagicMock(status_code=200, ok=True, content=b'{"results": [{"id": 1}], "next": "p2"}')
+        page_resp.json.return_value = {"results": [{"id": 1}], "next": "p2"}
+        with (
+            patch.object(dl_client.session, "request", return_value=page_resp),
+            patch("cvat_integration.client.time.monotonic", side_effect=[0.0, 0.01, 0.10]),
+            self.assertRaises(CvatError),
+        ):
+            dl_client._get_all("tasks")
+        dl_client.close()
+
+        # Streaming size limit (Content-Length và streamed requests.Response)
+        stream_client = CvatClient(base_url="http://cvat.local", token="secret", max_response_bytes=32)
+
+        too_large_header = requests.Response()
+        too_large_header.status_code = 200
+        too_large_header.headers["Content-Length"] = "1024"
+        too_large_header.raw = io.BytesIO(b"{}")
+        with (
+            patch.object(stream_client.session, "request", return_value=too_large_header),
+            self.assertRaises(CvatError),
+        ):
+            stream_client._get("jobs/1/annotations")
+
+        too_large_stream = requests.Response()
+        too_large_stream.status_code = 200
+        too_large_stream._content_consumed = False
+        too_large_stream.raw = io.BytesIO(b'{"shapes": [{"id": 1, "padding": "' + b"x" * 64 + b'"}]}')
+        with (
+            patch.object(stream_client.session, "request", return_value=too_large_stream),
+            self.assertRaises(CvatError),
+        ):
+            stream_client._get("jobs/1/annotations")
+
+        ok_stream = requests.Response()
+        ok_stream.status_code = 200
+        ok_stream._content_consumed = False
+        ok_stream.raw = io.BytesIO(b'{"shapes": []}')
+        with patch.object(stream_client.session, "request", return_value=ok_stream):
+            self.assertEqual(stream_client._get("jobs/1/annotations"), {"shapes": []})
+        stream_client.close()
+
+    def test_meta_stop_frame_precedence_and_no_spurious_plus_one_on_constrained_counts(self) -> None:
+        meta = CvatJobMetaPayload.model_validate({"size": 100, "start_frame": 0, "stop_frame": None})
+        self.assertEqual(meta.resolve_stop_frame(19), 19)
+        self.assertEqual(meta.resolved_stop_frame, 99)
+
+        client = CvatClient(base_url="http://cvat.local", token="secret")
+        ann_payload = {
+            "shapes": [
+                {"id": 1, "frame": 5, "outside": False},
+                {"id": 2, "frame": 12, "outside": False},
+                {"id": 3, "outside": False},  # thiếu frame → phải là 0 khi có giới hạn job
+            ],
+            "tracks": [
+                {"id": 10, "shapes": [{"frame": 10, "outside": False}]},
+                {"id": 11},  # thiếu shapes → phải là 0 khi có giới hạn job
+            ],
+        }
+        task_scoped_meta = {"size": 100, "start_frame": 0, "stop_frame": None, "deleted_frames": []}
+        with patch.object(client, "_get", side_effect=[ann_payload, task_scoped_meta]):
+            # Segment [10..19]: shape@12 (1) + track 10 bung từ [10..19] (10) = 11 (không tính shape@5 hay +1 rác)
+            self.assertEqual(client.count_job_objects(1, start_frame=10, stop_frame=19), 11)
+        client.close()
+
+        # included_frames != None cũng không được cộng +1 rác cho shape thiếu frame / track thiếu shapes
+        parsed = CvatAnnotationsPayload.model_validate(ann_payload)
+        self.assertEqual(parsed.count_object_frames(included_frames=[10, 12]), 3)
+
+    def test_sync_freeze_guards_source_missing_cascade_and_lock_cooldown(self) -> None:
+        # 1. Batch LOCKED và Dataset LOCKED: không ghi đè name/dataset, không tạo job mới, không sửa job metadata
+        locked_ds = Dataset.objects.create(
+            project=self.f.project, name="Frozen DS", cvat_project_id=901, status=DataStatus.LOCKED
+        )
+        locked_batch = Batch.objects.create(
+            project=self.f.project, dataset=self.f.dataset, name="Frozen Batch", cvat_task_id=6, status=DataStatus.LOCKED
+        )
+        frozen_job = self.f.job(
+            batch=locked_batch,
+            dataset=self.f.dataset,
+            status=JobStatus.ANNOTATING,
+            cvat_job_id=801,
+            cvat_stage="annotation",
+            cvat_state="new",
+            frame_count=5,
+        )
+        locked_flag_job = self.f.job(
+            batch=self.f.batch,
+            dataset=self.f.dataset,
+            status=JobStatus.ANNOTATING,
+            cvat_job_id=802,
+            is_locked=True,
+            cvat_stage="annotation",
+            cvat_state="new",
+            frame_count=5,
+        )
+        active_missing_job = self.f.job(
+            batch=self.f.batch,
+            dataset=self.f.dataset,
+            status=JobStatus.ANNOTATING,
+            cvat_job_id=803,
+        )
+
+        class FreezeClient:
+            def list_org_projects(self, org_id):
+                return [
+                    {"id": 900, "name": "Synced Project"},
+                    {"id": 901, "name": "Renamed DS"},
+                ]
+
+            def list_project_tasks(self, project_id):
+                if project_id == 900:
+                    return [{"id": 6, "name": "Renamed Batch"}]  # task 5 biến mất → absent_batches + cascade!
+                return [{"id": 7, "name": "Should Not Create Batch In Locked DS"}]
+
+            def list_task_jobs(self, task_id):
+                return [
+                    {"id": 801, "stage": "validation", "state": "completed", "frame_count": 99},
+                    {"id": 804, "stage": "annotation", "state": "new", "frame_count": 10},
+                ]
+
+            def set_job_assignee(self, job_id, cvat_user_id):
+                pass
+
+        sync.sync_organization(self.f.project, self.f.pm, client=FreezeClient(), cooldown_seconds=0)
+        locked_ds.refresh_from_db()
+        locked_batch.refresh_from_db()
+        frozen_job.refresh_from_db()
+        self.f.batch.refresh_from_db()
+        active_missing_job.refresh_from_db()
+        locked_flag_job.refresh_from_db()
+
+        self.assertEqual(locked_ds.name, "Frozen DS")
+        self.assertFalse(Batch.objects.filter(cvat_task_id=7).exists())
+        self.assertEqual(locked_batch.name, "Frozen Batch")
+        self.assertFalse(Job.objects.filter(cvat_job_id=804).exists())
+        self.assertEqual((frozen_job.cvat_stage, frozen_job.frame_count), ("annotation", 5))
+        # Task 5 mất trên CVAT → Batch.source_missing=True và lan sang active_missing_job, KHÔNG lan sang locked_flag_job
+        self.assertTrue(self.f.batch.source_missing)
+        self.assertTrue(active_missing_job.source_missing)
+        self.assertFalse(locked_flag_job.source_missing)
+
+        # 2. Advisory lock busy → ValidationError
+        with (
+            patch("cvat_integration.sync._try_advisory_lock", return_value=False),
+            self.assertRaises(DrfValidationError),
+        ):
+            sync.sync_organization(self.f.project, self.f.pm, client=FreezeClient(), cooldown_seconds=0)
+
+        # 3. Cooldown → POST /api/projects/{id}/cvat-sync/ trả 400 nếu vừa mới đồng bộ
+        with override_settings(CVAT_SYNC_COOLDOWN_SECONDS=60):
+            res = self.f.client(self.f.pm).post(self.f.url("cvat-sync/"), {"count_objects": False}, format="json")
+        self.assertEqual(res.status_code, 400)
+
+    def test_integrity_error_races_handled_without_500_in_link_and_sync(self) -> None:
+        # 1. cvat/link IntegrityError race → HTTP 400
+        with (
+            patch("cvat_integration.views.CvatClient", FakeCvatClient),
+            patch("cvat_integration.views.CvatAccount.objects.update_or_create", side_effect=IntegrityError("dup")),
+        ):
+            res = self.f.client(self.f.ann1).post("/api/cvat/link/", {"token": "tok-ann1"}, format="json")
+        self.assertEqual(res.status_code, 400)
+
+        # 2. import_task_jobs IntegrityError race on cvat_task_id → ValidationError (400)
+        other_batch = Batch.objects.create(project=self.f.project, dataset=self.f.dataset, name="Other")
+
+        class ImportClient:
+            def get_task(self, task_id):
+                return {"id": task_id, "name": "Task X"}
+
+            def list_task_jobs(self, task_id):
+                return []
+
+        with (
+            patch.object(Batch, "save", side_effect=IntegrityError("dup task")),
+            self.assertRaises(DrfValidationError),
+        ):
+            import_task_jobs(other_batch, 999, self.f.pm, client=ImportClient())
+
+        # 3. sync_organizations IntegrityError on Project/RoleAssignment → recovers cleanly
+        CvatAccount.objects.create(user=self.f.pm, cvat_user_id=50, cvat_username="pm_cvat")
+        client = _FakeSyncClient(
+            jobs=[],
+            orgs=[{"id": 7, "slug": "acme", "name": self.f.project.name}],
+            memberships={7: [{"user": {"id": 50}, "role": "owner", "is_active": True}]},
+        )
+        with patch("cvat_integration.sync.RoleAssignment.objects.get_or_create", side_effect=IntegrityError("dup role")):
+            summary = sync.sync_organizations(actor=self.f.pm, client=client)
+        self.assertEqual(summary["pm_added"], [])
+
+    def test_outbox_durable_retry_isolation_stale_guard_activity_log_and_command(self) -> None:
+        CvatAccount.objects.create(user=self.f.ann1, cvat_user_id=11, cvat_username="a1")
+        CvatAccount.objects.create(user=self.f.ann2, cvat_user_id=12, cvat_username="a2")
+        j1 = self.f.job(status=JobStatus.ANNOTATING, annotator=self.f.ann1, cvat_job_id=911)
+        j2 = self.f.job(status=JobStatus.ANNOTATING, annotator=self.f.ann2, cvat_job_id=912)
+        enqueue_assignee_push([j1.pk, j2.pk])
+        self.assertEqual(CvatAssigneeOutbox.objects.filter(status=CvatAssigneeOutbox.Status.PENDING).count(), 2)
+
+        # Job 1 lỗi, Job 2 thành công → lô không dừng giữa chừng; j1 lên backoff pending, j2 xong + ActivityLog
+        class PartialOrgFailClient:
+            def __init__(self):
+                self.invited: list[tuple[str, str, str]] = []
+                self.pushed: list[tuple[int, int | None]] = []
+
+            def list_memberships(self, org_id):
+                return []
+
+            def get_user(self, user_id):
+                return {"id": user_id, "username": f"u{user_id}", "email": f"u{user_id}@example.com"}
+
+            def invite_to_org(self, org_slug, email, role="worker"):
+                self.invited.append((org_slug, email, role))
+
+            def set_job_assignee(self, cvat_job_id, cvat_user_id):
+                if cvat_job_id == 911:
+                    raise CvatError("temporary 503")
+                self.pushed.append((cvat_job_id, cvat_user_id))
+
+        partial_client = PartialOrgFailClient()
+        stats = drain_cvat_outbox(client=partial_client, max_attempts=2)
+        self.assertEqual((stats["pushed"], stats["failed"]), (1, 1))
+        self.assertEqual(partial_client.pushed, [(912, 12)])
+        j1.refresh_from_db()
+        j2.refresh_from_db()
+        self.assertIsNone(j1.cvat_assignee_id)
+        self.assertEqual(j2.cvat_assignee_id, 12)
+        self.assertTrue(ActivityLog.objects.filter(job=j2, action="cvat.assignee_push", actor__isnull=True).exists())
+        self.assertTrue(ActivityLog.objects.filter(project=self.f.project, action="cvat.org_invite", actor__isnull=True).exists())
+
+        outbox_j1 = CvatAssigneeOutbox.objects.get(job=j1)
+        self.assertEqual((outbox_j1.status, outbox_j1.attempts), (CvatAssigneeOutbox.Status.PENDING, 1))
+        self.assertGreater(outbox_j1.next_retry_at, timezone.now())
+
+        # Lần retry thứ 2 đạt max_attempts=2 → chuyển DEAD
+        stats_dead = drain_cvat_outbox(client=partial_client, force=True, max_attempts=2)
+        self.assertEqual(stats_dead["dead"], 1)
+        outbox_j1.refresh_from_db()
+        self.assertEqual(outbox_j1.status, CvatAssigneeOutbox.Status.DEAD)
+
+        # Stale-write guard: trong lúc HTTP đang chạy cho j3 (target=11), VanoHub đổi annotator sang ann2 (target=12)
+        j3 = self.f.job(status=JobStatus.ANNOTATING, annotator=self.f.ann1, cvat_job_id=913)
+        enqueue_assignee_push([j3.pk])
+
+        class StaleRaceClient(PartialOrgFailClient):
+            def __init__(self, new_ann_id: int) -> None:
+                super().__init__()
+                self.new_ann_id = new_ann_id
+
+            def list_memberships(self, org_id):
+                return [{"user": {"id": 11}, "is_active": True}, {"user": {"id": 12}, "is_active": True}]
+
+            def set_job_assignee(self, cvat_job_id, cvat_user_id):
+                super().set_job_assignee(cvat_job_id, cvat_user_id)
+                if cvat_job_id == 913 and cvat_user_id == 11:
+                    Job.objects.filter(pk=j3.pk).update(annotator=self.new_ann_id)
+
+        race_client = StaleRaceClient(self.f.ann2.pk)
+        drain_cvat_outbox(job_ids=[j3.pk], client=race_client)
+        j3.refresh_from_db()
+        # Không ghi đè cvat_assignee_id=11 bị cũ; đã xếp hàng lại cho 12
+        self.assertIsNone(j3.cvat_assignee_id)
+        pending_j3 = CvatAssigneeOutbox.objects.get(job=j3, status=CvatAssigneeOutbox.Status.PENDING)
+        self.assertEqual(pending_j3.target_cvat_user_id, 12)
+
+        # Management command drain_cvat_outbox chạy thành công
+        with patch("cvat_integration.management.commands.drain_cvat_outbox.drain_cvat_outbox") as mock_drain:
+            mock_drain.return_value = {"claimed": 1, "pushed": 1, "failed": 0, "dead": 0, "skipped": 0, "locked": False}
+            call_command("drain_cvat_outbox", "--limit", "10", "--force")
+            mock_drain.assert_called_once_with(batch_limit=10, force=True, max_attempts=10)
+
+    def test_submit_annotation_cvat_linked_job_preserves_cvat_object_count_ssot(self) -> None:
+        cvat_job = self.f.job(
+            status=JobStatus.ANNOTATING,
+            annotator=self.f.ann1,
+            cvat_job_id=950,
+            object_count=30,
+            last_counted_objects=30,
+        )
+        res = self.f.client(self.f.ann1).post(
+            self.f.url(f"annotator/jobs/{cvat_job.id}/submit/"),
+            {"object_count": 9999, "note": "done"},
+            format="json",
+        )
+        self.assertEqual(res.status_code, 200, res.data)
+        cvat_job.refresh_from_db()
+        self.assertEqual(cvat_job.status, JobStatus.PENDING_QC1)
+        self.assertEqual(cvat_job.object_count, 30)
+        self.assertFalse(DailyOutputRecord.objects.filter(job=cvat_job).exists())

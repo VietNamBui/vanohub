@@ -1,6 +1,7 @@
 import { ArrowDown, ArrowUp, Download01 } from '@untitledui/icons'
 import { useState } from 'react'
 import { Tabs } from '@/components/application/tabs/tabs'
+import { Badge } from '@/components/base/badges/badges'
 import { Button } from '@/components/base/buttons/button'
 import { ProgressBar } from '@/components/base/progress-indicators/progress-indicators'
 import { getErrorMessage } from '../../../shared/api/errors'
@@ -13,10 +14,22 @@ import { useRequest } from '../../../shared/hooks/useRequest'
 import { formatCsvFileDate, formatCsvTimestamp, formatShortDate } from '../../../shared/utils/format'
 import { useProject } from '../../projects/projectContext'
 import { getQc2Summary } from '../api'
-import type { Qc2Summary, Qc2Window } from '../types'
+import { SEVERITY_LABELS } from '../constants'
+import type { Qc2Summary, Qc2Window, Severity } from '../types'
 
 type Period = 'day' | 'week' | 'month'
 const PERIOD_LABELS: Record<Period, string> = { day: 'Ngày', week: 'Tuần', month: 'Tháng' }
+const SEVERITY_ORDER: Severity[] = ['critical', 'major', 'minor']
+const SEVERITY_BADGE_COLORS: Record<Severity, 'error' | 'warning' | 'gray'> = {
+  critical: 'error',
+  major: 'warning',
+  minor: 'gray',
+}
+const SEVERITY_BAR_COLORS: Record<Severity, string> = {
+  critical: 'bg-fg-error-primary',
+  major: 'bg-fg-warning-primary',
+  minor: 'bg-fg-quaternary',
+}
 
 const KPI_ROWS: { key: keyof Qc2Window; label: string; format?: (v: number | null) => string }[] = [
   { key: 'audited', label: 'Job đã audit' },
@@ -154,28 +167,68 @@ export default function Qc2DashboardPage() {
                 }))}
               />
             </SectionCard>
-            <SectionCard title="Lỗi theo loại" description="Lỗi QC2 ghi nhận, nhiều nhất trước." className="lg:col-span-2">
-              {data.errors_by_category.length === 0 ? (
-                <PageState kind="empty" title="Chưa ghi nhận lỗi nào" />
-              ) : (
-                <ul className="flex flex-col gap-3">
-                  {data.errors_by_category.map((c) => {
-                    const top = data.errors_by_category[0].count
-                    return (
-                      <li key={c.category}>
-                        <div className="mb-1 flex justify-between text-sm">
-                          <span className="text-secondary">{c.category}</span>
-                          <span className="font-medium text-primary tabular-nums">{c.count}</span>
-                        </div>
-                        <div className="h-2 rounded-full bg-secondary">
-                          <div className="h-full rounded-full bg-brand-solid" style={{ width: `${(c.count * 100) / top}%` }} />
-                        </div>
-                      </li>
-                    )
-                  })}
-                </ul>
-              )}
-            </SectionCard>
+            <div className="flex flex-col gap-5 lg:col-span-2">
+              <SectionCard title="Lỗi QC2 theo mức độ" description="Chỉ tính lỗi chưa bị huỷ.">
+                {(() => {
+                  const severityCounts = data.errors_by_severity
+                  const severityTotal = severityCounts
+                    ? SEVERITY_ORDER.reduce((sum, s) => sum + (severityCounts[s] ?? 0), 0)
+                    : 0
+                  if (severityTotal === 0) {
+                    return <p className="text-sm text-tertiary">Chưa ghi nhận lỗi QC2 nào.</p>
+                  }
+                  return (
+                    <ul className="flex flex-col gap-3">
+                      {SEVERITY_ORDER.map((sev) => {
+                        const count = severityCounts?.[sev] ?? 0
+                        const pct = severityTotal ? Math.round((count * 100) / severityTotal) : 0
+                        return (
+                          <li key={sev}>
+                            <div className="mb-1 flex items-center justify-between text-sm">
+                              <Badge type="pill-color" size="sm" color={SEVERITY_BADGE_COLORS[sev]}>
+                                {SEVERITY_LABELS[sev]}
+                              </Badge>
+                              <span className="font-medium text-primary tabular-nums">
+                                {count} ({pct}%)
+                              </span>
+                            </div>
+                            <div className="h-2 rounded-full bg-secondary">
+                              <div
+                                className={`h-full rounded-full ${SEVERITY_BAR_COLORS[sev]}`}
+                                style={{ width: `${pct}%` }}
+                              />
+                            </div>
+                          </li>
+                        )
+                      })}
+                    </ul>
+                  )
+                })()}
+              </SectionCard>
+
+              <SectionCard title="Lỗi theo loại" description="Lỗi QC2 ghi nhận, nhiều nhất trước.">
+                {data.errors_by_category.length === 0 ? (
+                  <PageState kind="empty" title="Chưa ghi nhận lỗi nào" />
+                ) : (
+                  <ul className="flex flex-col gap-3">
+                    {data.errors_by_category.map((c) => {
+                      const top = data.errors_by_category[0].count
+                      return (
+                        <li key={c.category}>
+                          <div className="mb-1 flex justify-between text-sm">
+                            <span className="text-secondary">{c.category}</span>
+                            <span className="font-medium text-primary tabular-nums">{c.count}</span>
+                          </div>
+                          <div className="h-2 rounded-full bg-secondary">
+                            <div className="h-full rounded-full bg-brand-solid" style={{ width: `${(c.count * 100) / top}%` }} />
+                          </div>
+                        </li>
+                      )
+                    })}
+                  </ul>
+                )}
+              </SectionCard>
+            </div>
           </div>
         </>
       )}

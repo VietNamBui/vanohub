@@ -1,9 +1,8 @@
-import { AlertTriangle, ArrowRight } from '@untitledui/icons'
+import { AlertTriangle, ArrowRight, LinkExternal01 } from '@untitledui/icons'
 import { useState } from 'react'
 import { useNavigate } from 'react-router'
 import { Badge, BadgeWithDot } from '@/components/base/badges/badges'
 import { Button } from '@/components/base/buttons/button'
-import { useShell } from '../../../layouts/ShellContext'
 import { getErrorMessage } from '../../../shared/api/errors'
 import PageState from '../../../shared/components/ui/PageState'
 import SectionCard from '../../../shared/components/ui/SectionCard'
@@ -12,32 +11,30 @@ import { formatShortDateTime } from '../../../shared/utils/format'
 import { useProject } from '../../projects/projectContext'
 import { SEVERITY_LABELS } from '../../quality/constants'
 import type { Severity } from '../../quality/types'
-import { getAnnotatorJob, listAnnotatorJobs } from '../api'
+import { listAnnotatorJobsWithErrors } from '../api'
 import AnnotatorBreadcrumb from '../components/AnnotatorBreadcrumb'
 import DisputeErrorModal from '../components/DisputeErrorModal'
 import JobStatusBadge from '../components/JobStatusBadge'
+import ReviewErrorChips from '../components/ReviewErrorChips'
 import { formatDeadlineCountdown } from '../constants'
-import { splitActiveErrors } from '../jobHelpers'
-import type { Job, JobDetail, JobErrorBrief } from '../types'
+import { isJobEscalationWarnOnly, splitActiveErrors } from '../jobHelpers'
+import type { JobWithErrors } from '../types'
 
 const REWORK_PAGE_SIZE = 100
 const MAX_REWORK_PAGES = 10
-const DETAIL_BATCH_SIZE = 6
 
-async function fetchAllReworkJobs(projectId: number): Promise<JobDetail[]> {
-  const allJobs: Job[] = []
+async function fetchAllReworkJobs(projectId: number): Promise<JobWithErrors[]> {
+  const allJobs: JobWithErrors[] = []
   for (let page = 1; page <= MAX_REWORK_PAGES; page += 1) {
-    const listed = await listAnnotatorJobs(projectId, { tab: 'rework', page, page_size: REWORK_PAGE_SIZE })
+    const listed = await listAnnotatorJobsWithErrors(projectId, {
+      tab: 'rework',
+      page,
+      page_size: REWORK_PAGE_SIZE,
+    })
     allJobs.push(...listed.results)
     if (!listed.next || listed.results.length === 0) break
   }
-  const details: JobDetail[] = []
-  for (let i = 0; i < allJobs.length; i += DETAIL_BATCH_SIZE) {
-    const chunk = allJobs.slice(i, i + DETAIL_BATCH_SIZE)
-    const batchDetails = await Promise.all(chunk.map((j) => getAnnotatorJob(projectId, j.id)))
-    details.push(...batchDetails)
-  }
-  return details
+  return allJobs
 }
 
 const SEVERITY_BADGE: Record<string, 'gray' | 'warning' | 'error'> = {
@@ -46,61 +43,17 @@ const SEVERITY_BADGE: Record<string, 'gray' | 'warning' | 'error'> = {
   critical: 'error',
 }
 
-function splitJobErrors(job: JobDetail) {
-  return splitActiveErrors(job, job.errors)
-}
-
-function CuboidErrorChips({ err }: { err: JobErrorBrief }) {
-  const hasAny =
-    err.frame_number != null ||
-    err.cvat_object_id != null ||
-    Boolean(err.is_missing_object) ||
-    err.verdict === 'edge' ||
-    err.verdict === 'fail'
-  if (!hasAny) return null
-  return (
-    <div className="mt-1 flex flex-wrap gap-1">
-      {err.frame_number != null && (
-        <Badge size="sm" type="pill-color" color="gray">
-          Frame #{err.frame_number}
-        </Badge>
-      )}
-      {err.cvat_object_id != null && (
-        <Badge size="sm" type="pill-color" color="blue">
-          Object #{err.cvat_object_id}
-        </Badge>
-      )}
-      {err.is_missing_object && (
-        <Badge size="sm" type="pill-color" color="orange">
-          Thiếu đối tượng
-        </Badge>
-      )}
-      {err.verdict === 'edge' && (
-        <Badge size="sm" type="pill-color" color="warning">
-          Cận biên
-        </Badge>
-      )}
-      {err.verdict === 'fail' && (
-        <Badge size="sm" type="pill-color" color="error">
-          Lỗi
-        </Badge>
-      )}
-    </div>
-  )
-}
-
 /** Trang "Cần sửa" (/projects/:projectId/annotator/rework) — danh sách lỗi theo object-frame cần xử lý rework. */
 export default function AnnotatorReworkPage() {
   const { projectId, project } = useProject()
   const navigate = useNavigate()
-  const { teamLeaderName } = useShell()
   const [version, setVersion] = useState(0)
-  const [disputeTarget, setDisputeTarget] = useState<{ job: JobDetail; errorId: number } | null>(null)
+  const [disputeTarget, setDisputeTarget] = useState<{ job: JobWithErrors; errorId: number } | null>(null)
 
   const req = useRequest(`annotator-rework-full:${projectId}:${version}`, () => fetchAllReworkJobs(projectId))
 
   const reworkJobs = req.data ?? []
-  const totalErrors = reworkJobs.reduce((sum, j) => sum + splitJobErrors(j).active.length, 0)
+  const totalErrors = reworkJobs.reduce((sum, j) => sum + splitActiveErrors(j, j.errors).active.length, 0)
 
   return (
     <div className="mx-auto flex max-w-6xl flex-col gap-5 p-4 md:p-6">
@@ -141,9 +94,8 @@ export default function AnnotatorReworkPage() {
         <div className="flex flex-col gap-5">
           {reworkJobs.map((job) => {
             const countdown = formatDeadlineCountdown(job.hours_remaining)
-            const { active, history } = splitJobErrors(job)
-            const escalationPolicy = job.escalation_policy ?? project.escalation_policy ?? 'block'
-            const isWarnOnly = escalationPolicy === 'warn_only'
+            const { active, history } = splitActiveErrors(job, job.errors)
+            const isWarnOnly = isJobEscalationWarnOnly(job, project.escalation_policy)
 
             return (
               <SectionCard
@@ -151,14 +103,28 @@ export default function AnnotatorReworkPage() {
                 title={job.name}
                 description={`${job.batch_name}${job.deadline ? ` · Hạn sửa ${formatShortDateTime(job.deadline)}` : ''}${countdown ? ` · ${countdown.text}` : ''}`}
                 actions={
-                  <Button
-                    size="sm"
-                    color="secondary"
-                    iconTrailing={ArrowRight}
-                    onPress={() => navigate(`/projects/${projectId}/annotator/jobs/${job.id}`)}
-                  >
-                    Mở job
-                  </Button>
+                  <div className="flex flex-wrap items-center gap-2">
+                    {job.cvat_url && (
+                      <Button
+                        size="sm"
+                        color="secondary"
+                        iconLeading={LinkExternal01}
+                        href={job.cvat_url}
+                        target="_blank"
+                        rel="noreferrer"
+                      >
+                        Mở trên CVAT
+                      </Button>
+                    )}
+                    <Button
+                      size="sm"
+                      color="secondary"
+                      iconTrailing={ArrowRight}
+                      onPress={() => navigate(`/projects/${projectId}/annotator/jobs/${job.id}`)}
+                    >
+                      Mở job
+                    </Button>
+                  </div>
                 }
                 bodyClassName="p-0"
               >
@@ -216,9 +182,16 @@ export default function AnnotatorReworkPage() {
                       <tbody className="divide-y divide-secondary">
                         {active.map((err) => (
                           <tr key={err.id} className="transition hover:bg-primary_hover">
-                            <td className="px-5 py-3.5 font-medium text-primary">{err.category}</td>
+                            <td className="px-5 py-3.5 font-medium text-primary">
+                              <div className="flex flex-wrap items-center gap-1.5">
+                                <span>{err.category}</span>
+                                <Badge size="sm" type="color" color="gray">
+                                  {err.stage.toUpperCase()}
+                                </Badge>
+                              </div>
+                            </td>
                             <td className="px-4 py-3.5 text-secondary">
-                              <CuboidErrorChips err={err} />
+                              <ReviewErrorChips err={err} />
                               {err.location ? (
                                 <div className="mt-1 text-xs text-secondary">{err.location}</div>
                               ) : err.frame_number == null && err.cvat_object_id == null && !err.is_missing_object ? (
@@ -264,17 +237,11 @@ export default function AnnotatorReworkPage() {
                               >
                                 {err.category}
                               </span>
-                              {err.is_voided ? (
-                                <Badge size="sm" type="pill-color" color="gray">
-                                  Đã huỷ lỗi
-                                </Badge>
-                              ) : (
-                                <Badge size="sm" type="pill-color" color="gray">
-                                  Vòng {err.rework_round}
-                                </Badge>
-                              )}
+                              <Badge size="sm" type="pill-color" color="gray">
+                                {err.stage.toUpperCase()} · vòng {err.rework_round}
+                              </Badge>
                             </div>
-                            <CuboidErrorChips err={err} />
+                            <ReviewErrorChips err={err} />
                             {err.location && (
                               <div className={`mt-1 text-xs text-tertiary ${err.is_voided ? 'line-through' : ''}`}>
                                 {err.location}
@@ -312,8 +279,7 @@ export default function AnnotatorReworkPage() {
           projectId={projectId}
           jobId={disputeTarget.job.id}
           jobName={disputeTarget.job.name}
-          teamLeaderName={teamLeaderName}
-          errors={splitJobErrors(disputeTarget.job).active}
+          errors={splitActiveErrors(disputeTarget.job, disputeTarget.job.errors).active}
           initialErrorId={disputeTarget.errorId}
           onClose={() => setDisputeTarget(null)}
           onSubmitted={() => setVersion((v) => v + 1)}

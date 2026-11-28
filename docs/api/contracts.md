@@ -16,56 +16,56 @@ The product specification defines intended behavior. Current code and runtime ev
 
 Do not publish a new custom route under CVAT's existing API documentation unless the route actually exists in the selected CVAT deployment. Shared Django/DRF technology does not automatically provide shared permissions, schema tooling, or resource isolation.
 
-## 2. Verified endpoint inventory (`0beace7`)
+## 2. Verified endpoint inventory (`feature/annotator-qclv1` @ `b37b0b2` + working tree `2026-11-28`)
 
-Source: `feature/issue-logger` at `0beace7`; [root URLs](../../backend/config/urls.py), [accounts](../../backend/accounts/urls.py), [projects](../../backend/projects/urls.py), [teams](../../backend/teams/urls.py), [jobs](../../backend/jobs/urls.py), [quality](../../backend/quality/urls.py), [analytics](../../backend/analytics/urls.py), and [cvat_integration](../../backend/cvat_integration/urls.py).
+Source: `feature/annotator-qclv1` @ `b37b0b2` (with reconciled working-tree changes); [root URLs](../../backend/config/urls.py), [accounts](../../backend/accounts/urls.py), [projects](../../backend/projects/urls.py), [teams](../../backend/teams/urls.py), [jobs](../../backend/jobs/urls.py), [quality](../../backend/quality/urls.py), [analytics](../../backend/analytics/urls.py), and [cvat_integration](../../backend/cvat_integration/urls.py).
 
-All `/api/projects/{id}/...` views inherit `ProjectScopedViewMixin` + `HasProjectCapability` (`404` outside membership; `403` when missing capability). Global endpoints require `IsAuthenticated` unless noted.
+All `/api/projects/{id}/...` views inherit `ProjectScopedViewMixin` + `HasProjectCapability` (`404` outside membership, including non-int32 `project_id` values via `parse_int_param`; `403` when missing capability). Global endpoints require `IsAuthenticated` unless noted.
 
 ### Auth & Account (`/api/auth/`)
 
 | Endpoint / View | Methods | Auth / Capability & Behavior |
 | --- | --- | --- |
-| `/api/auth/token/`, `/api/auth/token/refresh/` | `POST` | SimpleJWT login and refresh (`AllowAny` token endpoints). |
-| `/api/auth/me/` (`MeView`) | `GET`, `PATCH` | `IsAuthenticated`; current user profile, preferences, `cvat_account`, project roles. |
-| `/api/auth/me/password/` (`ChangePasswordView`) | `POST` | `IsAuthenticated`; returns `204` and clears `initial_password_encrypted`. |
+| `/api/auth/token/`, `/api/auth/token/refresh/` | `POST` | SimpleJWT login and refresh (`AllowAny` token endpoints). `VanoHubTokenObtainPairSerializer`, `VanoHubTokenRefreshSerializer`, and `VanoHubJWTAuthentication` embed/verify `User.token_version` (`tv` claim) and reject revoked sessions with `401` (`token_revoked`). |
+| `/api/auth/me/` (`MeView`) | `GET`, `PATCH` | `IsAuthenticated`; current user profile, preferences, `is_pm`, `cvat_account`, `role_assignments`, and `projects` (superusers without `RoleAssignment` rows receive `PROJECT_MANAGER` roles/capabilities per project). |
+| `/api/auth/me/password/` (`ChangePasswordView`) | `POST` | `IsAuthenticated`; returns `204`, clears `initial_password_encrypted`, and increments `User.token_version` (invalidating existing JWTs). |
 
 ### CVAT Integration (`/api/cvat/`)
 
 | Endpoint / View | Methods | Auth / Capability & Behavior |
 | --- | --- | --- |
-| `/api/cvat/status/` (`status`) | `GET` | `IsAuthenticated`; calls `CvatClient.about()` (timeout `5s`). Returns `200` with `{connected, url, version}` or `{connected: false, url, detail}` with sanitized error text. |
-| `/api/cvat/link/` (`link`) | `GET`, `POST`, `DELETE` | `IsAuthenticated`; `GET` returns `CvatAccount` state + `jobs_held`. `POST {"token"}` verifies PAT once via `/users/self` (never stores token), links `CvatAccount`, pushes held-job assignees, and quietly syncs orgs (`sync_organizations_quietly`). `DELETE` unlinks and clears CVAT assignees on held jobs. |
-| `/api/cvat/sync-organizations/` (`sync_organizations_view`) | `POST` | `user.is_pm()`; pulls CVAT orgs/memberships into VanoHub `Project` + `RoleAssignment` (`owner`/`maintainer` -> `project_manager`; other linked members default to `annotator`) and filters summary to caller's orgs unless superuser; maps `CvatError` to `502`. |
+| `/api/cvat/status/` (`status`) | `GET` | `IsAuthenticated`; calls `CvatClient.about()` (timeout `5s`, closes owned session). Returns `200` with `{connected, url, version}` or `{connected: false, url, detail}` with sanitized error text. |
+| `/api/cvat/link/` (`link`) | `GET`, `POST`, `DELETE` | `IsAuthenticated`; `GET` returns `CvatAccount` state + `jobs_held`. `POST {"token"}` verifies PAT once via `/users/self` (never stores token), locks `User` (`IntegrityError` → `400`), links `CvatAccount`, pushes held-job assignees, and quietly syncs orgs (`only_cvat_user_id`, ID-filtered output). `DELETE` locks `User`, unlinks, and clears CVAT assignees on held jobs. |
+| `/api/cvat/sync-organizations/` (`sync_organizations_view`) | `POST` | `user.is_pm()`; guarded by PostgreSQL advisory lock (`pg_try_advisory_lock`); pulls CVAT orgs/memberships into VanoHub `Project` + `RoleAssignment` (`owner`/`maintainer` -> `project_manager`; other linked members default to `annotator`) and filters summary by membership IDs unless superuser; maps `CvatError` to `502`. |
 
 ### Projects, Members, Data, Delivery & Notifications (`/api/projects/`)
 
 | Endpoint / View | Methods | Auth / Capability & Behavior |
 | --- | --- | --- |
-| `/api/projects/` (`ProjectViewSet`) | `GET`, `POST` | Membership-filtered list; `create` requires `user.is_pm()`. |
-| `/api/projects/{id}/` (`ProjectViewSet`) | `GET`, `PUT`, `PATCH` | Membership-filtered detail; `update`/`partial_update` requires `PROJECT_MANAGER` of that project or superuser. |
-| `/api/projects/{id}/settings/` (`ProjectSettingsView`) | `GET`, `PATCH` | `VIEW_PROJECT` / `MANAGE_SETTINGS`; rework, `escalation_policy`, `annotator_wip_limit`, `sampling_rate`, thresholds, KPI targets. |
-| `/api/projects/{id}/members/` (`ProjectMembersView`) | `GET`, `POST` | `VIEW_PROJECT` / `MANAGE_TEAM`; `GET` lists org members, expanded roles, `cvat_linked`, `has_initial_password`; `POST` creates account with encrypted temporary password. |
-| `/api/projects/{id}/members/{uid}/credential/` (`MemberCredentialView`) | `GET` | `MANAGE_TEAM`; returns `{username, password, status}` (`initial`/`changed`/`unreadable`) and logs `member.view_password`. |
-| `/api/projects/{id}/members/{uid}/reset-password/` (`MemberResetPasswordView`) | `POST` | `MANAGE_TEAM`; regenerates temp password (`200`), rejects self and PMs. |
-| `/api/projects/{id}/members/{uid}/roles/` (`ProjectMemberRolesView`) | `POST` | `MANAGE_TEAM`; grants direct role (`qc2`, `qc1`, `annotator`). |
-| `/api/projects/{id}/members/{uid}/roles/{role}/` (`ProjectMemberRoleDetailView`) | `DELETE` | `MANAGE_TEAM`; revokes grantable role after active-work checks (rejects `project_manager` and last role). |
+| `/api/projects/` (`ProjectViewSet`) | `GET`, `POST` | Membership-filtered list (superusers see all projects with `PROJECT_MANAGER` visibility/capabilities while preserving `User.get_project_roles()` and `member_counts`); `create` requires `user.is_pm()`, locks/assigns `pm_ids`, maps `IntegrityError` → `400`. |
+| `/api/projects/{id}/` (`ProjectViewSet`) | `GET`, `PUT`, `PATCH` | Membership-filtered detail; `update`/`partial_update` requires `PROJECT_MANAGER` of that project or superuser, locks `Project`, and `_sync_pms` increments `token_version` for removed PMs. |
+| `/api/projects/{id}/settings/` (`ProjectSettingsView`) | `GET`, `PATCH` | `VIEW_PROJECT` / `MANAGE_SETTINGS`; locks `Project` on `PATCH`; rework, `escalation_policy`, `annotator_wip_limit`, `sampling_rate`, thresholds, KPI targets. |
+| `/api/projects/{id}/members/` (`ProjectMembersView`) | `GET`, `POST` | `VIEW_PROJECT` / `MANAGE_TEAM`; `GET` lists org members, expanded roles, `cvat_linked`, `has_initial_password`; `POST` creates account with encrypted temp password (`CREDENTIAL_ENCRYPTION_KEYS` / `MultiFernet`), returns `Cache-Control: no-store`, maps `IntegrityError` → `400`. |
+| `/api/projects/{id}/members/{uid}/credential/` (`MemberCredentialView`) | `GET` | `MANAGE_TEAM`; blocks superuser/staff, PM, and multi-org targets unless actor is superuser; sets `Cache-Control: no-store`; returns `{username, password, status}` (`initial`/`changed`/`unreadable`) and logs `member.view_password`. |
+| `/api/projects/{id}/members/{uid}/reset-password/` (`MemberResetPasswordView`) | `POST` | `MANAGE_TEAM`; locks `User`, applies same target guard as `credential`, regenerates temp password (`200`, `Cache-Control: no-store`), increments `token_version`, rejects self. |
+| `/api/projects/{id}/members/{uid}/roles/` (`ProjectMemberRolesView`) | `POST` | `MANAGE_TEAM`; locks `User`, grants direct role (`qc2`, `qc1`, `annotator`), maps `IntegrityError` → `400`. |
+| `/api/projects/{id}/members/{uid}/roles/{role}/` (`ProjectMemberRoleDetailView`) | `DELETE` | `MANAGE_TEAM`; locks `User`, revokes grantable role after active-work checks (rejects `project_manager` and last role), increments `token_version`. |
 | `/api/projects/{id}/permission-matrix/` (`PermissionMatrixView`) | `GET` | `VIEW_PROJECT`; read-only `CAPABILITY_ROLES` and `implied_roles`. |
-| `/api/projects/{id}/cvat-sync/` (`ProjectCvatSyncView`) | `POST` | `MANAGE_DATA`; body `{"count_objects": bool}`; syncs CVAT Projects→`Dataset`, Tasks→`Batch`, annotation Jobs→`Job` outside DB transaction, respects `SYNCABLE_STATUSES` + Hybrid A2 gate (`QC1_PASSED` until `batch.qc2_confirmed_at`), pushes assignees, maps `CvatError` to `502`. |
-| `/api/projects/{id}/datasets/` & `.../{pk}/`, `.../{pk}/labels/`, `.../{pk}/lock/`, `.../{pk}/unlock/` (`DatasetViewSet`) | `GET`, `PUT`, `PATCH`, `POST` | `VIEW_JOBS` for list/retrieve, `MANAGE_DATA` for update/labels/lock/unlock; no `create`/`destroy`. |
-| `/api/projects/{id}/batches/` & `.../{pk}/`, `.../{pk}/lock/`, `.../{pk}/unlock/`, `.../{pk}/confirm-qc2/` (`BatchViewSet`) | `GET`, `PUT`, `PATCH`, `POST` | `VIEW_PROJECT` for list, `VIEW_JOBS` for retrieve, `MANAGE_DATA` for update/actions. `confirm-qc2` enforces 100% QC1 passed (`QC2_NON_BLOCKING_STATUSES`) & 0 locked jobs, sets `qc2_confirmed_at`/`qc2_confirmed_by`, moves `QC1_PASSED` → `PENDING_QC2`, creates `AuditSample` rows, schedules CVAT assignee push. No per-batch `import-cvat`/`sync-cvat` action exists on `BatchViewSet`. |
-| `/api/projects/{id}/deliveries/` (`list`, `create`, `candidates`) & `.../{pk}/` (`update`, `partial_update`; no `retrieve`) (`DeliveryViewSet`) | `GET` (list/`candidates`), `POST`, `PUT`, `PATCH` (`405` on `GET .../{pk}/`) | `MANAGE_DELIVERY` / `VIEW_DASHBOARD` (list & `candidates`), `MANAGE_DELIVERY` (create/update). `perform_create` requires all batch jobs `APPROVED`, 0 locked, 0 pending `AuditSample`s; transitions jobs + batch to `DELIVERED` and closes open `Audit`s to `COMPLETED`. |
-| `/api/projects/{id}/activity/` & `.../{pk}/` (`ActivityLogViewSet`) | `GET` | `VIEW_ACTIVITY`; read-only paginated audit trail (`StandardPagination`). |
+| `/api/projects/{id}/cvat-sync/` (`ProjectCvatSyncView`) | `POST` | `MANAGE_DATA`; body `{"count_objects": bool}`; guarded by PostgreSQL advisory lock and `CVAT_SYNC_COOLDOWN_SECONDS` (default `10s`, `400` `ValidationError`; CLI `sync_cvat` uses `cooldown_seconds=0`); pulls CVAT Projects→`Dataset`, Tasks→`Batch`, annotation Jobs→`Job` outside DB transaction (`CVAT_MAX_REQUEST_DURATION`, `CVAT_MAX_RESPONSE_BYTES`, `CVAT_HOST_HEADER`, `allow_missing_meta=False`), freezes `object_count`/`DailyOutputRecord` outside `SYNCABLE_STATUSES` and skips writes on locked/delivered batches/datasets/jobs, cascades `Batch.source_missing=True` to unlocked/non-delivered child jobs, respects Hybrid A2 gate (`QC1_PASSED` until `batch.qc2_confirmed_at`), pushes assignees per job via `push_assignees` (queuing failures to `CvatAssigneeOutbox`), maps `CvatError` to `502`. |
+| `/api/projects/{id}/datasets/` & `.../{pk}/`, `.../{pk}/labels/`, `.../{pk}/lock/`, `.../{pk}/unlock/` (`DatasetViewSet`) | `GET`, `PUT`, `PATCH`, `POST` | `VIEW_JOBS` for list/retrieve, `MANAGE_DATA` for update/labels/lock/unlock (`lock`/`unlock` use `select_for_update()`); no `create`/`destroy`. |
+| `/api/projects/{id}/batches/` & `.../{pk}/`, `.../{pk}/lock/`, `.../{pk}/unlock/`, `.../{pk}/confirm-qc2/` (`BatchViewSet`) | `GET`, `PUT`, `PATCH`, `POST` | `VIEW_PROJECT` for list, `VIEW_JOBS` for retrieve, `MANAGE_DATA` for update/actions (`perform_update` and `lock`/`unlock` use `select_for_update()`). `confirm-qc2` locks `Dataset → Batch → Job`, enforces 100% QC1 passed (`QC2_NON_BLOCKING_STATUSES`) & 0 locked jobs, sets `qc2_confirmed_at`/`qc2_confirmed_by`, moves `QC1_PASSED` → `PENDING_QC2`, creates `AuditSample` rows, unpins ready-for-QC2 `UserNotification`s (`batch`), schedules `CvatAssigneeOutbox` push. |
+| `/api/projects/{id}/deliveries/` (`list`, `create`, `candidates`) & `.../{pk}/` (`update`, `partial_update`; no `retrieve`) (`DeliveryViewSet`) | `GET` (list/`candidates`), `POST`, `PUT`, `PATCH` (`405` on `GET .../{pk}/`) | `MANAGE_DELIVERY` / `VIEW_DASHBOARD` (list & `candidates`), `MANAGE_DELIVERY` (create/update). `DeliverySerializer.batch` is read-only on update (`PUT`/`PATCH .../deliveries/{pk}/` enabled) and adds read-only `deadline` and `is_on_time`; `candidates` returns `status`, `dataset_status`, `deadline`, `is_overdue`, `due_state`, `locked_jobs`, `pending_qc2_samples`, `in_progress_audits`, `open_audits` (compat alias), and `ready`. `perform_create` locks `Dataset → Batch → Job`, requires active batch/dataset, all jobs `APPROVED`, 0 locked, 0 pending `AuditSample`s; transitions jobs + batch to `DELIVERED`, closes open `Audit`s to `COMPLETED`, and unpins batch `review_needed` notifications. |
+| `/api/projects/{id}/activity/` & `.../{pk}/` (`ActivityLogViewSet`) | `GET` | `VIEW_ACTIVITY`; read-only paginated audit trail (`StandardPagination`) supporting `actor`, `action` (prefix match), `date_from`, and `date_to`. |
 | `/api/projects/{id}/announcements/` (`AnnouncementViewSet`) | `GET`, `POST` | `VIEW_PROJECT` / `SEND_ANNOUNCEMENT`; role/team-filtered reads. |
 | `/api/projects/{id}/guidelines/` (`GuidelineViewSet`) | `GET`, `POST` | `VIEW_GUIDELINES` / `MANAGE_QUALITY_CATALOG`; append-only versioned Markdown. |
-| `/api/projects/{id}/notifications/` & `.../mark-read/` (`ProjectNotificationsView`, `MarkNotificationsReadView`) | `GET`, `POST` | `VIEW_PROJECT`; merges persisted `UserNotification`, dynamic deadline warnings, and unread `Announcement`s. |
+| `/api/projects/{id}/notifications/` & `.../mark-read/` (`ProjectNotificationsView`, `MarkNotificationsReadView`) | `GET`, `POST` | `VIEW_PROJECT`; merges persisted `UserNotification`, dynamic deadline warnings (`due-*`), and unread `Announcement`s. |
 
 ### Teams (`/api/projects/{id}/teams/`)
 
 | Endpoint / View | Methods | Auth / Capability & Behavior |
 | --- | --- | --- |
-| `/api/projects/{id}/teams/` & `.../{pk}/` (`TeamViewSet`) | `GET`, `POST`, `PUT`, `PATCH`, `DELETE` | `MANAGE_TEAM` / `VIEW_DASHBOARD` (reads), `MANAGE_TEAM` (writes). |
-| `.../teams/{pk}/add-member/`, `.../remove-member/`, `.../set-capacity/`, `.../teams/transfer/` (`TeamViewSet`) | `POST` | `MANAGE_TEAM`; defaults unroled new members to `annotator` and logs `ActivityLog`. |
+| `/api/projects/{id}/teams/` & `.../{pk}/` (`TeamViewSet`) | `GET`, `POST`, `PUT`, `PATCH`, `DELETE` | `MANAGE_TEAM` / `VIEW_DASHBOARD` (reads), `MANAGE_TEAM` (writes; `select_for_update` + `IntegrityError` → `400`). |
+| `.../teams/{pk}/add-member/`, `.../remove-member/`, `.../set-capacity/`, `.../teams/transfer/` (`TeamViewSet`) | `POST` | `MANAGE_TEAM`; locks `Team`/`User`, defaults unroled new members to `annotator`, logs `ActivityLog`, maps `IntegrityError` → `400`. |
 | `/api/projects/{id}/teams/workload/` (`TeamViewSet`) | `GET` | `MANAGE_TEAM` / `VIEW_DASHBOARD`; annotator/QC1 active holding, overdue, due-soon, escalated counts. |
 
 ### Jobs & Annotator Workflow (`/api/projects/{id}/...`)
@@ -73,35 +73,37 @@ All `/api/projects/{id}/...` views inherit `ProjectScopedViewMixin` + `HasProjec
 | Endpoint / View | Methods | Auth / Capability & Behavior |
 | --- | --- | --- |
 | `/api/projects/{id}/jobs/` & `.../{pk}/` (`JobViewSet`) | `GET` | `VIEW_JOBS`; paginated list (`StandardPagination`) and detail with `timeline` and `errors`. |
-| `.../jobs/{pk}/assign/`, `deadline/`, `lock/`, `unlock/`, `resolve-escalation/`, `.../jobs/bulk-assign/`, `bulk-deadline/`, `bulk-move-batch/` (`JobViewSet`) | `POST` | `MANAGE_JOBS`; enforces four-eyes, `ASSIGN_LOCKED_STATUSES`, and `schedule_assignee_push`; `bulk-move-batch` rejects `cvat_job_id`-linked jobs. |
+| `.../jobs/{pk}/assign/`, `deadline/`, `lock/`, `unlock/`, `resolve-escalation/`, `.../jobs/bulk-assign/`, `bulk-deadline/`, `bulk-move-batch/` (`JobViewSet`) | `POST` | `MANAGE_JOBS`; enforces four-eyes, `ASSIGN_LOCKED_STATUSES` (including on `resolve-escalation`), and `schedule_assignee_push` (`CvatAssigneeOutbox`); `bulk-move-batch` rejects `cvat_job_id`-linked jobs. |
 | `/api/projects/{id}/job-queue/` (`JobQueueView`) | `GET` | `VIEW_JOBS`; stage aggregates (`annotation`, `qc1`, `qc2`, `done`). |
-| `/api/projects/{id}/annotator/jobs/`, `.../{pk}/`, `.../claim/`, `.../{pk}/start/`, `.../{pk}/submit/` (`AnnotatorJobViewSet`) | `GET`, `POST` | `ANNOTATE_JOBS`; `claim` enforces WIP limit (`skip_locked`, team pool, four-eyes); `submit` currently still accepts optional manual `object_count` (open under D05). |
-| `/api/projects/{id}/annotator/requests/`, `.../{pk}/`, `.../{pk}/resolve/` (`AnnotatorRequestViewSet`) | `GET`, `POST` | `ANNOTATE_JOBS` / `MANAGE_JOBS` (read), `ANNOTATE_JOBS` (create `error_dispute`/`data_issue`), `MANAGE_JOBS` (`resolve` voids linked `ReviewError` on `resolved`). |
+| `/api/projects/{id}/annotator/jobs/`, `.../{pk}/`, `.../claim/`, `.../{pk}/start/`, `.../{pk}/submit/` (`AnnotatorJobViewSet`) | `GET`, `POST` | `ANNOTATE_JOBS`; `claim` locks `User` inside `transaction.atomic()` before reading roles/`team_ids`/WIP limit (`skip_locked`, team pool, full four-eyes exclusions); `submit` validates optional `object_count` in `0..PG_INT32_MAX` and **ignores** client-supplied `object_count` when `cvat_job_id is not None` (manual input still allowed on non-CVAT jobs; `S0` remains open under `D05`). |
+| `/api/projects/{id}/annotator/requests/`, `.../{pk}/`, `.../{pk}/resolve/` (`AnnotatorRequestViewSet`) | `GET`, `POST` | `ANNOTATE_JOBS` / `MANAGE_JOBS` (read), `ANNOTATE_JOBS` (create `error_dispute`/`data_issue` when not `approved`/`delivered`), `MANAGE_JOBS` (`resolve` voids linked `ReviewError` on `resolved`). |
 | `/api/projects/{id}/annotator/search/?q=` (`AnnotatorQuickSearchView`) | `GET` | `ANNOTATE_JOBS`; top 8 matching annotator jobs ordered by DB06 priority. |
 
 ### Quality (`/api/projects/{id}/...`)
 
 | Endpoint / View | Methods | Auth / Capability & Behavior |
 | --- | --- | --- |
-| `/api/projects/{id}/error-categories/` & `.../{pk}/` (`ErrorCategoryViewSet`) | `GET` (list), `POST`, `PUT`, `PATCH` | `VIEW_PROJECT` (list), `MANAGE_QUALITY_CATALOG` (writes); no retrieve/delete (`is_active` toggle only). |
+| `/api/projects/{id}/error-categories/` & `.../{pk}/` (`ErrorCategoryViewSet`) | `GET` (list), `POST`, `PUT`, `PATCH` | `VIEW_PROJECT` (list), `MANAGE_QUALITY_CATALOG` (writes with `select_for_update` + `IntegrityError` → `400`); no retrieve/delete (`is_active` toggle only). |
 | `/api/projects/{id}/audits/` & `.../{pk}/` (`AuditViewSet`) | `GET` | **Read-only** (`MANAGE_AUDITS`, `PERFORM_AUDIT`, `VIEW_DASHBOARD`). Audits are auto-created by `ensure_qc2_sample` and closed on `Delivery`. No manual `create`, `preview`, `accept`, `reject`, or `partial_reject` endpoints exist. |
 | `/api/projects/{id}/audit-samples/` & `.../{pk}/` (`AuditSampleViewSet`) | `GET` | `PERFORM_AUDIT` (PM with `MANAGE_AUDITS` sees project unless `?mine=1`). Exposes `frames` (frame-level QC2) and `checked_object_count` (`null` until D05 settles frame denominator). |
-| `/api/projects/{id}/audit-samples/{pk}/pass/`, `.../reject/` (`AuditSampleViewSet`) | `POST` | `PERFORM_AUDIT`; enforces four-eyes & active batch. `pass/` moves `PENDING_QC2` → `APPROVED`. `reject/` requires `errors[]` (`category`, optional `severity`, `verdict` `fail|edge`, `frame_number`, `cvat_object_id`, `is_missing_object`, `location`, `description`) and `rework_scope`; moves job → `REWORK` and schedules CVAT assignee push. |
-| `/api/projects/{id}/audit-samples/{pk}/assign/` (`AuditSampleViewSet`) | `POST` | `MANAGE_AUDITS`; reassigns pending sample auditor (checks `Role.QC2` and four-eyes). |
+| `/api/projects/{id}/audit-samples/{pk}/pass/`, `.../reject/` (`AuditSampleViewSet`) | `POST` | `PERFORM_AUDIT`; enforces four-eyes & active batch. `pass/` moves `PENDING_QC2` → `APPROVED`. `reject/` requires `errors[]` (`category`, optional `severity`, `verdict` `fail|edge`, `frame_number`, `cvat_object_id`, `is_missing_object`, `location`, `description`) and `rework_scope`; moves job → `REWORK`. Both unpin job/batch `review_needed` notifications and schedule `CvatAssigneeOutbox` push (`current_holder` returns `None` for `QC1_PASSED`/`APPROVED`/`DELIVERED` to clear CVAT assignee). |
+| `/api/projects/{id}/audit-samples/{pk}/assign/` (`AuditSampleViewSet`) | `POST` | `MANAGE_AUDITS`; enforces active batch, `PENDING` sample, `ensure_editable`, `ensure_not_escalated`, `job.status == PENDING_QC2`, `Role.QC2`, and four-eyes; schedules `CvatAssigneeOutbox` push. |
 | `/api/projects/{id}/audit-strategy/` (`AuditStrategyView`) | `GET` | `MANAGE_AUDITS`; returns `sampling_rate`, `can_edit`, settings change history, and sample counts. |
-| `/api/projects/{id}/qc1/jobs/`, `.../{pk}/`, `.../start/`, `.../pass/`, `.../reject/` (`Qc1JobViewSet`) | `GET`, `POST` | `PERFORM_QC1`; excludes four-eyes conflicts and enforces team pool. `pass/` moves to `QC1_PASSED` (pre-`confirm-qc2`) or straight to `PENDING_QC2` + `ensure_qc2_sample` (post-`confirm-qc2`). `reject/` requires structured `errors[]` + `rework_scope`. |
+| `/api/projects/{id}/qc1/jobs/`, `.../{pk}/`, `.../start/`, `.../pass/`, `.../reject/` (`Qc1JobViewSet`) | `GET`, `POST` | `PERFORM_QC1`; excludes four-eyes conflicts and enforces team pool. `pass/` moves to `QC1_PASSED` (pre-`confirm-qc2`) or straight to `PENDING_QC2` + `ensure_qc2_sample` (post-`confirm-qc2`), and queues `CvatAssigneeOutbox` push (`None` on `QC1_PASSED`). `reject/` requires structured `errors[]` + `rework_scope`. |
 
 ### Analytics (`/api/projects/{id}/...`)
 
 | Endpoint / View | Methods | Auth / Capability & Behavior |
 | --- | --- | --- |
-| `/api/projects/{id}/overview/` (`ProjectOverviewView`) | `GET` | `VIEW_DASHBOARD` |
+| `/api/projects/{id}/overview/` (`ProjectOverviewView`) | `GET` | `VIEW_DASHBOARD`; `pending_decisions.batches_ready_for_qc2_confirm` (and alias `batches_ready_for_qc2`) requires `locked_jobs == 0`; `thresholds.{quality_cl, defect_error_rate}` serialize as `"0.00"` strings \| `null` matching `ProjectSettingsSerializer`; includes `counts.overdue_batches` and `metrics.delivery_on_time_rate` (`DH07`: `on_time_deliveries`, `due_deliveries`, `late_deliveries`, `overdue_undelivered`). |
 | `/api/projects/{id}/team-ranking/` (`TeamRankingView`) | `GET` | `VIEW_DASHBOARD` |
 | `/api/projects/{id}/member-performance/` (`MemberPerformanceView`) | `GET` | `VIEW_DASHBOARD` |
-| `/api/projects/{id}/annotator/dashboard/` (`AnnotatorDashboardView`) | `GET` | `ANNOTATE_JOBS` |
-| `/api/projects/{id}/annotator/analytics/` (`AnnotatorAnalyticsView`) | `GET` | `ANNOTATE_JOBS` |
-| `/api/projects/{id}/qc1-summary/` (`Qc1SummaryView`) | `GET` | `PERFORM_QC1` or `VIEW_DASHBOARD` |
-| `/api/projects/{id}/qc2-summary/` (`Qc2SummaryView`) | `GET` | `PERFORM_AUDIT` or `VIEW_DASHBOARD` |
+| `/api/projects/{id}/annotator/dashboard/` (`AnnotatorDashboardView`) | `GET` | `ANNOTATE_JOBS` (`meta` omits removed `team_leader_name`) |
+| `/api/projects/{id}/annotator/analytics/` (`AnnotatorAnalyticsView`) | `GET` | `ANNOTATE_JOBS`; `objects_per_hour`, `first_pass_per_hour`, and `rework_per_hour` return `null` (never `0`) when hours `== 0`; `avg_productivity` exposes `measured_objects`, `total_objects`, `submitted_objects`, `unsubmitted_cvat_objects`, `status` (`"provisional" \| "unavailable"`), `formula`, and `hours_provenance`; `daily_productivity[]` exposes `submitted_objects`, `unsubmitted_cvat_objects`, `measured_objects`, and `hours_status`. |
+| `/api/projects/{id}/qc1-summary/` (`Qc1SummaryView`) | `GET` | `PERFORM_QC1` or `VIEW_DASHBOARD`; `scope=project` restricts `stats.assigned` to `qc1_reviewer__isnull=False` and `stats.pending` to `(status=PENDING_QC1 & qc1_reviewer__isnull=False) \| pool_q`, aligned with `scope=mine`. |
+| `/api/projects/{id}/qc2-summary/` (`Qc2SummaryView`) | `GET` | `PERFORM_AUDIT` or `VIEW_DASHBOARD`; includes `stats.audited_today` matching `Qc1SummaryView.stats.reviewed_today` and `kpi_summary.actual`. |
+
+**Durable outbound CVAT queue (`D03`, internal worker surface):** `CvatAssigneeOutbox` (`backend/cvat_integration/models.py`, migration `0002_cvatassigneeoutbox`) persists assignee sync jobs inside the mutating DB transaction, executes bounded `on_commit` drains (`CVAT_OUTBOX_ON_COMMIT_LIMIT`, `CVAT_OUTBOX_ON_COMMIT_TIMEOUT`), and drains asynchronously via `python manage.py drain_cvat_outbox` (`--limit`, `--force`, `--max-attempts`) with PostgreSQL advisory locking, exponential backoff up to `DEAD`, stale-write suppression, and `ActivityLog` entries (`cvat.assignee_push`, `cvat.org_invite` with `actor=None`).
 
 **Pending-definition metrics (`backend/analytics/views.py`):** In `ProjectOverviewView` and `Qc2SummaryView`, `CL02` (`defect_error_rate` / `error_percent_in_job`), `CL05` (`defect_rate_by_severity`), and `CL11` (`quality_cl`) currently return `{"value": null, "status": "pending_definition", "formula": ...}` alongside `NS04` (`audit_speed`) and `DB02`/`DB03` (`estimated_completion`) until frame-level `checked_object_count` (`D05`) and duration semantics (`D06`) are settled.
 

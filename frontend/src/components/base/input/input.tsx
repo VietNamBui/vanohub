@@ -61,8 +61,8 @@ export const InputBase = ({
 }: InputBaseProps) => {
     const [isPasswordVisible, setIsPasswordVisible] = useState(false);
 
-    // Check if the input has a leading icon or tooltip
-    const hasTrailingIcon = tooltip || isInvalid;
+    // Check if the input has a leading icon, tooltip, invalid icon, or password visibility toggle
+    const hasTrailingIcon = tooltip || isInvalid || type === "password";
     const hasLeadingIcon = Icon;
 
     // If the input is inside a `TextFieldContext`, use its context to simplify applying styles
@@ -169,8 +169,8 @@ export const InputBase = ({
             {/* Password visibility toggle */}
             {type === "password" && (
                 <AriaButton
-                    aria-label="Toggle password visibility"
-                    onClick={() => setIsPasswordVisible(!isPasswordVisible)}
+                    aria-label={isPasswordVisible ? "Ẩn mật khẩu" : "Hiện mật khẩu"}
+                    onPress={() => setIsPasswordVisible((v) => !v)}
                     className={cx(
                         "absolute flex cursor-pointer items-center justify-center text-fg-quaternary transition duration-100 ease-linear hover:text-fg-quaternary_hover focus:text-fg-quaternary_hover focus:outline-hidden",
                         sizes[inputSize].iconTrailing,

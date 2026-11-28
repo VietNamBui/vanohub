@@ -1,38 +1,48 @@
-import { AlertCircle, ArrowRight, Eye, EyeOff, Lock01, User01 } from '@untitledui/icons'
+import { AlertCircle, ArrowRight, Lock01, User01 } from '@untitledui/icons'
 import { useState, type FormEvent } from 'react'
-import { Button as AriaButton } from 'react-aria-components'
 import { Navigate, useLocation, useNavigate } from 'react-router'
 import { Button } from '@/components/base/buttons/button'
 import { Input } from '@/components/base/input/input'
 import { getErrorKind, getErrorMessage } from '../../shared/api/errors'
 import { useAuth } from './useAuth'
 
+type LoginLocationState = { from?: string; expectedUsername?: string } | null
+
 export default function LoginPage() {
-  const { status, login } = useAuth()
+  const { status, user, login } = useAuth()
   const navigate = useNavigate()
   const location = useLocation()
-  const from = (location.state as { from?: string } | null)?.from ?? '/'
+  const navState = (location.state as LoginLocationState) ?? null
+  const requestedFrom = navState?.from ?? '/'
+  const expectedUsername = navState?.expectedUsername
   const [username, setUsername] = useState('')
   const [password, setPassword] = useState('')
-  const [showPassword, setShowPassword] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [triedSubmit, setTriedSubmit] = useState(false)
   const [submitting, setSubmitting] = useState(false)
 
-  if (status === 'authenticated') return <Navigate to={from} replace />
+  const resolveRedirect = (loggedInUsername?: string | null) => {
+    if (expectedUsername && loggedInUsername && expectedUsername !== loggedInUsername) {
+      return '/'
+    }
+    return requestedFrom
+  }
+
+  if (status === 'authenticated') return <Navigate to={resolveRedirect(user?.username)} replace />
 
   async function handleSubmit(event: FormEvent) {
     event.preventDefault()
     setTriedSubmit(true)
-    if (!username.trim() || !password) {
+    const trimmedUsername = username.trim()
+    if (!trimmedUsername || !password) {
       setError('Vui lòng nhập tên đăng nhập và mật khẩu.')
       return
     }
     setSubmitting(true)
     setError(null)
     try {
-      await login(username.trim(), password)
-      navigate(from, { replace: true })
+      await login(trimmedUsername, password)
+      navigate(resolveRedirect(trimmedUsername), { replace: true })
     } catch (err) {
       setError(getErrorKind(err) === 'unauthorized' ? 'Sai tên đăng nhập hoặc mật khẩu.' : getErrorMessage(err))
     } finally {
@@ -53,6 +63,7 @@ export default function LoginPage() {
 
             <form className="mt-8 flex flex-col gap-5" onSubmit={handleSubmit} noValidate>
               <Input
+                name="username"
                 label="Tên đăng nhập"
                 placeholder="Nhập tên đăng nhập"
                 icon={User01}
@@ -63,25 +74,16 @@ export default function LoginPage() {
                 isInvalid={triedSubmit && !username.trim()}
               />
 
-              <div className="relative">
-                <Input
-                  label="Mật khẩu"
-                  placeholder="Nhập mật khẩu"
-                  icon={Lock01}
-                  type={showPassword ? 'text' : 'password'}
-                  autoComplete="current-password"
-                  value={password}
-                  onChange={setPassword}
-                  inputClassName="pr-11"
-                />
-                <AriaButton
-                  aria-label={showPassword ? 'Ẩn mật khẩu' : 'Hiện mật khẩu'}
-                  onPress={() => setShowPassword((v) => !v)}
-                  className="absolute right-1.5 bottom-1.5 flex size-8 cursor-pointer items-center justify-center rounded-md text-fg-quaternary outline-focus-ring transition duration-100 hover:bg-primary_hover hover:text-fg-quaternary_hover focus-visible:outline-2"
-                >
-                  {showPassword ? <EyeOff className="size-4.5" /> : <Eye className="size-4.5" />}
-                </AriaButton>
-              </div>
+              <Input
+                name="password"
+                label="Mật khẩu"
+                placeholder="Nhập mật khẩu"
+                icon={Lock01}
+                type="password"
+                autoComplete="current-password"
+                value={password}
+                onChange={setPassword}
+              />
 
               {error && (
                 <div role="alert" className="flex items-start gap-3 rounded-xl bg-error-primary p-3.5 ring-1 ring-error_subtle ring-inset">
