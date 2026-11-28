@@ -70,7 +70,7 @@ export default function SupportCenterDrawer({ open, projectId, onClose }: Props)
     <div className="fixed inset-0 z-50 flex justify-end" role="dialog" aria-modal="true" aria-label="Trung tâm hỗ trợ">
       <div className="fixed inset-0 bg-overlay/70 backdrop-blur-[2px]" onClick={onClose} />
 
-      <aside className="relative z-10 flex h-full w-full max-w-[440px] flex-col border-l border-secondary bg-primary p-6 shadow-2xl">
+      <aside className="relative z-10 flex h-full w-full max-w-110 flex-col border-l border-secondary bg-primary p-6 shadow-2xl">
         <div className="flex items-center justify-between">
           <h2 className="text-xl font-semibold text-primary">Trung tâm hỗ trợ</h2>
           <Button

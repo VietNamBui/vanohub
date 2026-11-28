@@ -427,7 +427,7 @@ export default function AnnotatorJobDetailPage() {
                   return (
                     <li key={ev.id} className="relative flex gap-3 pb-4 last:pb-0">
                       {i < job.timeline.length - 1 && (
-                        <span className="absolute top-3.5 bottom-0 left-[6px] w-px bg-border-secondary" />
+                        <span className="absolute top-3.5 bottom-0 left-1.5 w-px bg-border-secondary" />
                       )}
                       <span className="mt-1 size-3.5 shrink-0 rounded-full bg-brand-solid" />
                       <div className="text-sm">

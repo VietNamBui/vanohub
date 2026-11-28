@@ -108,8 +108,8 @@ export default function LoginPage() {
 
       {/* Cột phải: thông điệp + hình minh hoạ dashboard (ẩn trên màn hình nhỏ) */}
       <aside className="relative hidden flex-1 overflow-hidden bg-brand-section lg:flex lg:flex-col">
-        <div aria-hidden className="pointer-events-none absolute -top-40 -right-40 size-[480px] rounded-full bg-brand-solid opacity-40 blur-3xl" />
-        <div aria-hidden className="pointer-events-none absolute -bottom-48 -left-32 size-[420px] rounded-full bg-brand-solid_hover opacity-30 blur-3xl" />
+        <div aria-hidden className="pointer-events-none absolute -top-40 -right-40 size-120 rounded-full bg-brand-solid opacity-40 blur-3xl" />
+        <div aria-hidden className="pointer-events-none absolute -bottom-48 -left-32 size-105 rounded-full bg-brand-solid_hover opacity-30 blur-3xl" />
 
         <div className="relative px-16 pt-24 xl:px-24 xl:pt-32">
           <p className="text-sm font-semibold tracking-wide text-tertiary_on-brand uppercase">Annotation Project Management</p>
@@ -152,7 +152,7 @@ function DashboardIllustration() {
   return (
     <div aria-hidden className="pointer-events-none relative mt-14 flex-1 select-none">
       {/* Cửa sổ chính, tràn ra mép phải/dưới */}
-      <div className="absolute top-0 left-16 w-[960px] rounded-tl-2xl bg-white/10 p-3 shadow-2xl ring-1 ring-white/20 backdrop-blur-md xl:left-24">
+      <div className="absolute top-0 left-16 w-240 rounded-tl-2xl bg-white/10 p-3 shadow-2xl ring-1 ring-white/20 backdrop-blur-md xl:left-24">
         <div className="mb-3 flex gap-1.5 px-1">
           <span className="size-2.5 rounded-full bg-white/30" />
           <span className="size-2.5 rounded-full bg-white/30" />

@@ -208,7 +208,7 @@ export default function AnnotatorJobsPage() {
           />
         ) : (
           <div className="overflow-x-auto">
-            <table className="w-full min-w-[820px] text-left text-sm">
+            <table className="w-full min-w-205 text-left text-sm">
               <thead className="bg-secondary text-xs font-semibold text-quaternary">
                 <tr>
                   <th className="px-5 py-3">Job</th>

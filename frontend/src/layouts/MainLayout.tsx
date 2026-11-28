@@ -120,7 +120,7 @@ export default function MainLayout() {
   return (
     <ShellContext.Provider value={shellValue}>
       <div className="flex min-h-screen flex-col bg-secondary">
-        <header className="sticky top-0 z-30 flex h-[72px] items-center gap-4 border-b border-secondary bg-primary px-6">
+        <header className="sticky top-0 z-30 flex h-18 items-center gap-4 border-b border-secondary bg-primary px-6">
           <Link to="/projects" className="flex shrink-0 items-center gap-2.5">
             <svg viewBox="0 0 32 32" className="size-8 rounded-lg bg-brand-solid shadow-xs" aria-hidden>
               <path d="M16 7.5 24 12v8l-8 4.5L8 20v-8z" fill="none" stroke="white" strokeWidth="1.8" strokeLinejoin="round" />
@@ -189,7 +189,7 @@ export default function MainLayout() {
               </button>
 
               {menuOpen && (
-                <div className="absolute right-0 mt-2 w-[264px] overflow-hidden rounded-xl border border-secondary bg-primary shadow-xl">
+                <div className="absolute right-0 mt-2 w-66 overflow-hidden rounded-xl border border-secondary bg-primary shadow-xl">
                   <div className="flex items-center gap-3 border-b border-secondary px-4 py-3">
                     <span className="relative flex size-10 shrink-0 items-center justify-center rounded-full bg-brand-secondary text-sm font-bold text-brand-secondary">
                       {user?.avatar_url ? (

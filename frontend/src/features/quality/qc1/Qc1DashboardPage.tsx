@@ -269,7 +269,7 @@ export default function Qc1DashboardPage() {
                   {data.qc2_escape_errors > escapeErrors.length ? ` / ${data.qc2_escape_errors}` : ''})
                 </div>
                 <div className="overflow-x-auto">
-                  <table className="w-full min-w-[640px] text-left text-sm">
+                  <table className="w-full min-w-160 text-left text-sm">
                     <thead className="border-t border-secondary bg-secondary text-xs font-semibold text-quaternary">
                       <tr>
                         <th className="px-4 py-2">Job / Task</th>

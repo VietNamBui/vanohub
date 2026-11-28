@@ -135,7 +135,7 @@ export default function AuditsPage() {
       <Slideover
         isOpen={openAudit !== null}
         onClose={() => setOpenAudit(null)}
-        maxWidthClass="max-w-[860px]"
+        maxWidthClass="max-w-215"
         title={openAudit ? `QC2 · ${openAudit.dataset_name} / ${openAudit.batch_name}` : ''}
       >
         {activeAudit && (

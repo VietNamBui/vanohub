@@ -57,7 +57,7 @@ export default function GuidelinesPage() {
   }
 
   return (
-    <div className="mx-auto flex max-w-[1160px] flex-col gap-6 px-6 py-7">
+    <div className="mx-auto flex max-w-290 flex-col gap-6 px-6 py-7">
       <AnnotatorBreadcrumb projectId={projectId} items={[{ label: 'Guidelines' }]} />
 
       <header className="flex flex-wrap items-start justify-between gap-4">

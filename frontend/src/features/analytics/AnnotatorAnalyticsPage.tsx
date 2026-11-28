@@ -213,7 +213,7 @@ function ProductivityLineChart({ data }: { data: AnnotatorAnalytics['daily_produ
 
   if (nonNullRates.length === 0) {
     return (
-      <div className="mt-4 flex h-[220px] items-center justify-center rounded-xl border border-dashed border-secondary bg-secondary_subtle px-4 text-center text-sm text-tertiary">
+      <div className="mt-4 flex h-55 items-center justify-center rounded-xl border border-dashed border-secondary bg-secondary_subtle px-4 text-center text-sm text-tertiary">
         Chưa có phiên nộp đủ dữ liệu thời gian ước tính trong kỳ để vẽ biểu đồ.
       </div>
     )
@@ -241,7 +241,7 @@ function ProductivityLineChart({ data }: { data: AnnotatorAnalytics['daily_produ
 
   return (
     <div className="mt-4 w-full overflow-x-auto">
-      <svg viewBox={`0 0 ${width} ${height}`} className="h-[220px] w-full" role="img" aria-label="Năng suất theo ngày">
+      <svg viewBox={`0 0 ${width} ${height}`} className="h-55 w-full" role="img" aria-label="Năng suất theo ngày">
         <defs>
           <linearGradient id="fpAreaGrad" x1="0" y1="0" x2="0" y2="1">
             <stop offset="0%" stopColor="var(--color-bg-brand-solid)" stopOpacity="0.18" />
@@ -341,14 +341,14 @@ function ForecastBarChart({
   return (
     <div className="mt-4">
       <div className="flex gap-3">
-        <div className="flex h-[200px] flex-col justify-between text-right text-xs text-quaternary tabular-nums">
+        <div className="flex h-50 flex-col justify-between text-right text-xs text-quaternary tabular-nums">
           <span>{formatNumber(maxY)}</span>
           <span>{formatNumber(Math.round(maxY / 2))}</span>
           <span>0</span>
         </div>
 
         <div className="relative flex-1">
-          <div className="pointer-events-none absolute inset-x-0 top-0 flex h-[200px] flex-col justify-between">
+          <div className="pointer-events-none absolute inset-x-0 top-0 flex h-50 flex-col justify-between">
             <div className="h-px bg-border-tertiary" />
             <div className="h-px bg-border-tertiary" />
             <div className="h-px bg-border-secondary" />
@@ -361,7 +361,7 @@ function ForecastBarChart({
             />
           )}
 
-          <div className="relative flex h-[200px] items-end justify-between gap-2 px-2">
+          <div className="relative flex h-50 items-end justify-between gap-2 px-2">
             {series.map((item) => {
               const val = item.is_forecast ? item.forecast_objects : item.actual_objects
               const hPct = Math.min(100, (val / maxY) * 100)

@@ -268,7 +268,7 @@ function QuickSearchPalette({
     <div className="fixed inset-0 z-50 flex items-start justify-center px-4 pt-[12vh]" role="dialog" aria-modal="true" aria-label="Tìm kiếm nhanh">
       <div className="fixed inset-0 bg-overlay/50 backdrop-blur-[2px]" onClick={onClose} />
 
-      <div className="relative z-10 flex w-full max-w-[640px] flex-col overflow-hidden rounded-xl border border-secondary bg-primary shadow-2xl">
+      <div className="relative z-10 flex w-full max-w-160 flex-col overflow-hidden rounded-xl border border-secondary bg-primary shadow-2xl">
         <div className="flex items-center gap-3 border-b border-secondary px-5 py-3.5">
           <SearchLg className="size-5 shrink-0 text-fg-quaternary" />
           <input
@@ -294,7 +294,7 @@ function QuickSearchPalette({
           </button>
         </div>
 
-        <div className="max-h-[380px] overflow-y-auto p-2">
+        <div className="max-h-95 overflow-y-auto p-2">
           {searchMode !== 'none' && (
             <div className="mb-2">
               <div className="px-3 py-1.5 text-xs font-semibold text-tertiary">Job</div>

@@ -169,7 +169,7 @@ export default function AnnotatorReworkPage() {
                   </div>
                 ) : (
                   <div className="overflow-x-auto">
-                    <table className="w-full min-w-[760px] text-left text-sm">
+                    <table className="w-full min-w-190 text-left text-sm">
                       <thead className="bg-secondary text-xs font-semibold text-quaternary">
                         <tr>
                           <th className="px-5 py-3">Lỗi</th>

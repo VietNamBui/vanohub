@@ -242,7 +242,7 @@ export default function NotificationBell({ projects }: { projects: ProjectSummar
         <div className="fixed inset-0 z-50 flex justify-end" role="dialog" aria-modal="true" aria-label="Thông báo">
           <div className="fixed inset-0 bg-overlay/70 backdrop-blur-[2px]" onClick={() => setOpen(false)} />
 
-          <aside className="relative z-10 flex h-full w-full max-w-[440px] flex-col border-l border-secondary bg-primary shadow-2xl">
+          <aside className="relative z-10 flex h-full w-full max-w-110 flex-col border-l border-secondary bg-primary shadow-2xl">
             <div className="flex items-center justify-between px-6 pt-6 pb-4">
               <h2 className="text-xl font-semibold text-primary">Thông báo</h2>
               <div className="flex items-center gap-2">

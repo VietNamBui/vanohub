@@ -58,7 +58,7 @@ export default function AccountSettingsPage() {
   const cvatLinkPath = projectId ? `/projects/${projectId}/cvat-link` : '/cvat-link'
 
   return (
-    <div className="mx-auto flex w-full max-w-[1160px] flex-col gap-6 px-6 py-7">
+    <div className="mx-auto flex w-full max-w-290 flex-col gap-6 px-6 py-7">
       <AnnotatorBreadcrumb projectId={projectId} items={[{ label: 'Cài đặt tài khoản' }]} />
 
       <header>
@@ -187,14 +187,14 @@ function ProfileTab({
 
           <div className="grid grid-cols-1 gap-4 py-5 md:grid-cols-12 md:items-center">
             <label className="text-sm font-semibold text-secondary md:col-span-4">Họ và tên</label>
-            <div className="max-w-[480px] md:col-span-8">
+            <div className="max-w-120 md:col-span-8">
               <Input aria-label="Họ và tên" value={fullName} onChange={setFullName} placeholder="Nhập họ và tên" />
             </div>
           </div>
 
           <div className="grid grid-cols-1 gap-4 py-5 md:grid-cols-12 md:items-center">
             <label className="text-sm font-semibold text-secondary md:col-span-4">Email</label>
-            <div className="max-w-[480px] md:col-span-8">
+            <div className="max-w-120 md:col-span-8">
               <Input aria-label="Email" type="email" value={email} onChange={setEmail} placeholder="name@vanohub.vn" />
             </div>
           </div>
@@ -296,7 +296,7 @@ function SecurityTab() {
       description="Dùng mật khẩu mạnh tối thiểu 8 ký tự để bảo vệ tài khoản làm việc của bạn."
     >
       <form onSubmit={savePassword}>
-        <div className="max-w-[520px] space-y-4">
+        <div className="max-w-130 space-y-4">
           <Input
             type="password"
             label="Mật khẩu hiện tại"

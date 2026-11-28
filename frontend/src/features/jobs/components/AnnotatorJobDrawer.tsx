@@ -53,7 +53,7 @@ export default function AnnotatorJobDrawer({ projectId, jobId, onClose }: Props)
     <div className="fixed inset-0 z-50 flex justify-end" role="dialog" aria-modal="true" aria-label={job?.name ?? 'Chi tiết Job'}>
       <div className="fixed inset-0 bg-overlay/70 backdrop-blur-[2px]" onClick={onClose} />
 
-      <aside className="relative z-10 flex h-full w-full max-w-[560px] flex-col border-l border-secondary bg-primary shadow-2xl">
+      <aside className="relative z-10 flex h-full w-full max-w-140 flex-col border-l border-secondary bg-primary shadow-2xl">
         <div className="flex items-center justify-between gap-3 border-b border-secondary px-6 py-5">
           <div className="flex flex-wrap items-center gap-2.5">
             <h2 className="text-lg font-semibold text-primary">{job?.name ?? 'Chi tiết job'}</h2>
@@ -123,7 +123,7 @@ export default function AnnotatorJobDrawer({ projectId, jobId, onClose }: Props)
                       return (
                         <li key={ev.id} className="relative flex gap-3 pb-5 last:pb-0">
                           {i < job.timeline.length - 1 && (
-                            <span className="absolute top-3.5 bottom-0 left-[6px] w-px bg-border-secondary" />
+                            <span className="absolute top-3.5 bottom-0 left-1.5 w-px bg-border-secondary" />
                           )}
                           <span
                             className={`mt-1 size-3.5 shrink-0 rounded-full ${

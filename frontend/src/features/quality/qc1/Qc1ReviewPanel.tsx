@@ -216,7 +216,7 @@ export default function Qc1ReviewPanel({ projectId, jobId, version, onDone }: Pr
                 return (
                   <li key={e.id} className="relative flex gap-3 pb-4 last:pb-0">
                     {i < job.timeline.length - 1 && (
-                      <span aria-hidden className="absolute top-3 bottom-0 left-[4px] w-px bg-border-secondary" />
+                      <span aria-hidden className="absolute top-3 bottom-0 left-1 w-px bg-border-secondary" />
                     )}
                     <span className="mt-1.5 size-2.5 shrink-0 rounded-full bg-brand-solid" />
                     <div className="text-sm">

@@ -235,7 +235,7 @@ export default function JobDetailDrawer({ jobId, onClose, onChanged }: Props) {
                   return (
                     <li key={e.id} className="relative flex gap-3 pb-4 last:pb-0">
                       {i < job.timeline.length - 1 && (
-                        <span className="absolute top-3.5 bottom-0 left-[5px] w-px bg-border-secondary" aria-hidden="true" />
+                        <span className="absolute top-3.5 bottom-0 left-1.25 w-px bg-border-secondary" aria-hidden="true" />
                       )}
                       <span className={`mt-1.5 size-3 shrink-0 rounded-full ${timelineDotColor(e.action)}`} aria-hidden="true" />
                       <div className="min-w-0 text-sm">

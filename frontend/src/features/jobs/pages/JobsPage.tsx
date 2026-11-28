@@ -404,7 +404,7 @@ export default function JobsPage() {
             <Table
               aria-label="Danh sách job"
               size="sm"
-              className="min-w-[1100px]"
+              className="min-w-275"
               selectionMode={canManage ? 'multiple' : 'none'}
               selectionBehavior="toggle"
               selectedKeys={canManage ? new Set(selected) : undefined}

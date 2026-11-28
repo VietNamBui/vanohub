@@ -344,7 +344,7 @@ export default function ProjectLayout() {
   return (
     <ProjectContext.Provider value={context}>
       <div className="flex min-h-[calc(100vh-72px)] flex-1">
-        <aside className="sticky top-[72px] hidden h-[calc(100vh-72px)] w-[280px] shrink-0 overflow-y-auto border-r border-secondary bg-primary lg:block">
+        <aside className="sticky top-18 hidden h-[calc(100vh-72px)] w-70 shrink-0 overflow-y-auto border-r border-secondary bg-primary lg:block">
           {sidebarContent}
         </aside>
 

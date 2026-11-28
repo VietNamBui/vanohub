@@ -21,7 +21,7 @@ export default function Slideover({
   title,
   extra,
   footer,
-  maxWidthClass = 'max-w-[680px]',
+  maxWidthClass = 'max-w-170',
   children,
 }: SlideoverProps) {
   return (

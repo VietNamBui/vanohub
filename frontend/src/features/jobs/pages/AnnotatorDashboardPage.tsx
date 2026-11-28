@@ -193,7 +193,7 @@ export default function AnnotatorDashboardPage() {
               />
             ) : (
               <div className="overflow-x-auto">
-                <table className="w-full min-w-[780px] text-left text-sm">
+                <table className="w-full min-w-195 text-left text-sm">
                   <thead className="bg-secondary text-xs font-semibold text-quaternary">
                     <tr>
                       <th className="px-5 py-3">Job</th>
@@ -458,7 +458,7 @@ export default function AnnotatorDashboardPage() {
               />
             ) : (
               <div className="overflow-x-auto">
-                <table className="w-full min-w-[700px] text-left text-sm">
+                <table className="w-full min-w-175 text-left text-sm">
                   <thead className="bg-secondary text-xs font-semibold text-quaternary">
                     <tr>
                       <th className="px-5 py-3">Loại</th>
@@ -573,14 +573,14 @@ function DailyStackedChart({ data, target }: { data: AnnotatorDailyResult[]; tar
   return (
     <div className="relative mt-4">
       <div className="flex gap-3">
-        <div className="flex h-[120px] flex-col justify-between text-right text-xs text-quaternary tabular-nums">
+        <div className="flex h-30 flex-col justify-between text-right text-xs text-quaternary tabular-nums">
           <span>{formatNumber(maxY)}</span>
           <span>{formatNumber(Math.round(maxY / 2))}</span>
           <span>0</span>
         </div>
 
         <div className="relative flex-1">
-          <div className="pointer-events-none absolute inset-x-0 top-0 flex h-[120px] flex-col justify-between">
+          <div className="pointer-events-none absolute inset-x-0 top-0 flex h-30 flex-col justify-between">
             <div className="h-px bg-border-tertiary" />
             <div className="h-px bg-border-tertiary" />
             <div className="h-px bg-border-secondary" />
@@ -593,7 +593,7 @@ function DailyStackedChart({ data, target }: { data: AnnotatorDailyResult[]; tar
             />
           )}
 
-          <div className="relative flex h-[120px] items-end justify-between gap-2 px-1" onMouseLeave={() => setHoverIdx(null)}>
+          <div className="relative flex h-30 items-end justify-between gap-2 px-1" onMouseLeave={() => setHoverIdx(null)}>
             {data.map((d, idx) => {
               const fpH = (d.first_pass_objects / maxY) * 100
               const rwH = (d.rework_objects / maxY) * 100
