@@ -1,6 +1,6 @@
 # VanoHub refactoring documentation
 
-Prepared: 2026-11-27, Asia/Ho_Chi_Minh. Status: adopted and reconciled against `feature/issue-logger @ 0beace7` (`T00`/`T02` closed; `T05` Ant Design migration complete; `D01`–`D04` accepted — `D04` pending `PV04` amendment & implementation; `D05`–`D06` open with Dec 4 MVP defaults proposed; `T08` Dec 4 MVP active).
+Prepared: 2026-11-27 (reconciled 2026-11-28), Asia/Ho_Chi_Minh. Status: adopted and reconciled on `feature/annotator-qclv1` (`T00`/`T02` closed; `T05` Ant Design migration complete; `D01`–`D04` accepted — `D04` strict stock CVAT API-only with `PV04` intact and external CVAT extensions decoupled; `D05`–`D06` open with Dec 4 MVP defaults proposed).
 
 This documentation supports the refactor already in progress. Start from the active local checkout and reuse completed work. The remote snapshots in [baseline.md](baseline.md) are reference evidence, not a replacement for the local working tree.
 

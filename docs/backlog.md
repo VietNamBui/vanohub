@@ -26,12 +26,11 @@
 
 ## 2. Active Milestone & Pre-Release Blockers
 
-### `BL-REL-01` — Gate 0 & `T08` Telemetry / Export Ingestion (`D04`, `PV04`)
-- Amend `PV04` in [`docs/platform-spec.md`](./platform-spec.md) to authorize the slim in-process CVAT extension; sign off `D05`/`D06` MVP defaults.
+### `BL-REL-01` — Gate 0 & `T08` Stock CVAT Export Ingestion (`D04`, `PV04` intact)
+- Preserve `PV04` in [`docs/platform-spec.md`](./platform-spec.md) (**stock `cvat-base` REST APIs only; zero CVAT fork/patch/in-process extension owned by VanoHub**); sign off `D05`/`D06` MVP defaults.
 - Provision dedicated read-only CVAT export service account (`user` global + `maintainer`/`owner` org + `read_only=True` PAT), persistent `/home/django/events` & `/vector-data-dir` with Vector buffer/ack, and `CVAT_EXPORT_CACHE_TTL=3600`.
-- Extend [`CvatClient`](../backend/cvat_integration/client.py) with separate read-only export token config, org-header-free `create_events_export(?org_id=...)`, `get_request_status`, `CVAT_HOST_HEADER`-safe `stream_download(result_url)` (`allow_redirects=False`), and `target_frames` support on `count_job_objects`.
-- Add PostgreSQL telemetry tables (`CvatSyncScope`, `CvatExportBatch`, `CvatEventLedger`, `CvatWorkingTimeEvent`, `CvatEventQuarantine`) and `manage.py ingest_cvat_events` (PII redaction, `org_id=null`/foreign-org quarantine, isolated from `ActivityLog` four-eyes & workflow transitions).
-- Strip conflicting 5-tier workflow/OPA/client-gate hooks (`EV-02`) from `cvat-di-ext` and emit 3D-first `payload.cvat_ext` v2 events via `record_server_event(..., on_commit=True)`.
+- Extend [`CvatClient`](../backend/cvat_integration/client.py) with separate read-only export token config, org-header-free `create_events_export` (never combining `X-Organization` with `?org_id=`), `get_request_status`, `CVAT_HOST_HEADER`-safe `stream_download(result_url)` (`allow_redirects=False`), and `target_frames` support on `count_job_objects`.
+- Add PostgreSQL telemetry tables (`CvatSyncScope`, `CvatExportBatch`, `CvatEventLedger`, `CvatWorkingTimeEvent`, `CvatEventQuarantine`) and `manage.py ingest_cvat_events` (stock `send:working_time`, PII redaction, `org_id=null`/foreign-org quarantine, isolated from `ActivityLog` four-eyes & workflow transitions).
 
 ### `BL-REL-02` — Unblock `pending_definition` Metrics & QC2 Sampling Edge Cases (`D05`, `D06`)
 - Compute and persist `AuditSample.checked_object_count` in [`backend/quality/views.py`](../backend/quality/views.py) / [`qc2.py`](../backend/quality/qc2.py) to unblock `CL02`, `CL05`, and `CL11` on `ProjectOverviewView` and `Qc2SummaryView` (currently `value=None`, `status="pending_definition"`).
@@ -90,9 +89,8 @@
 - **6 missing P2 metrics:** `NS02`, `NS05`, `CL08`, `CL13`, `DB01`, `DA02` (plus `NS04`, `DB02`–`DB04`, `NS09`, `NS10`).
 - **2-axis `AND` evaluation (`SL × CL` matrix + 3-tier thresholds + `Edge %`)** and missing role/scope breakdowns (`SL02` initial vs re-check, `DH06` on `QC2`, `CS08` `last_cvat_sync_at` on `ProjectOverviewView`, `Qc1SummaryView` `NS04`, `TeamRankingView`/`MemberPerformanceView` period filters & `KPI08`/`KPI09`/`NS06`).
 
-### `BL-FEAT-03` — Post-Dec 4 CVAT Telemetry, Outbox Alerting & Plugin Stubs (`B1`–`B5`)
-- 2D CVAT extension parity (`R03`/`R14` 2D), CVAT-side `QcEventOutbox` feed (`R21`), `JobAnnotationRevision` split/merge lineage (`ID-01`, `R15`), external Pre-QC worker (`R07`).
-- Plugin `Protocol` hooks (`B1`), `JobTelemetryEvent` (`B2`), Auto-QC `ReviewError` fields & `POST .../plugin-findings/` (`B3`), `POST .../telemetry/` (`B4`), and CVAT HMAC webhook ingest (`B5`).
+### `BL-FEAT-03` — Post-Dec 4 Telemetry, Outbox Alerting & Plug-in Stubs (`B1`–`B5`, `PV04` intact)
+- Plugin `Protocol` hooks (`B1`), `JobTelemetryEvent` (`B2`), Auto-QC `ReviewError` fields & `POST .../plugin-findings/` (`B3`), `POST .../telemetry/` (`B4`), and stock CVAT HMAC webhook ingest (`B5`).
 - PM alert / status surface for `CvatAssigneeOutbox.Status.DEAD` failures (`D03`).
 
 ---

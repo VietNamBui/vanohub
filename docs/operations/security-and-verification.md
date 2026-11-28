@@ -44,12 +44,12 @@ Avoid disabling certificate verification to make HTTPS work. Configure a trusted
 - Specify partial failure and retry outcomes. A durable external-write workflow needs explicit persistence/retry design if required; `on_commit` alone does not supply it.
 - For webhook/telemetry work, verify the deployed protocol, signature, scope, deduplication, late delivery, and acknowledgment semantics before enabling it.
 
-### CVAT telemetry & export controls (`cvat-event-pipeline-v2`)
+### Stock CVAT telemetry & export controls (`D04` / `PV04`)
 
 - **Dedicated least-privilege token:** Provision a separate CVAT service account with global privilege `user`, org role `maintainer` or `owner` (not `supervisor`/`worker`, which scope OPA exports to self, and not global `worker`, which triggers an undefined OPA filter in `events.rego`), and a `read_only=True` Bearer PAT. Never reuse VanoHub's write `CVAT_ACCESS_TOKEN` for event exports.
 - **Header/query mutual exclusion & origin validation:** Never send `X-Organization` or `org` alongside `?org_id=` on `POST /api/events/export` (CVAT `iam/middleware.py` rejects combinations with HTTP `400`). Validate `result_url` scheme, host/port (accounting for `CVAT_HOST_HEADER` when set), and `/api/...` path before attaching Bearer credentials, keeping `allow_redirects=False` and `CVAT_REQUIRE_HTTPS`.
-- **Tenant, PII, and provenance quarantine:** Reject or quarantine `org_id=null` (personal workspaces) and foreign-org rows; enforce `ProjectScopedViewMixin` (`404` isolation) on all VanoHub telemetry read endpoints. Stream-redact `create:comment` `obj_name` (raw message text) and `user_email` prior to persistence. Keep `origin="client"` (`qc:client_*`) quarantined from `SL*`/`KPI*`/`CL*` metrics and workflow/sampling gates.
-- **CVAT-side durability & typing:** Require persistent mounts for `/home/django/events` (`EVENTS_LOCAL_DB_FILE`) and `/vector-data-dir` plus Vector disk buffering/acknowledgements, lower `CVAT_EXPORT_CACHE_TTL` (e.g., `3600`) to avoid `cvat_data/cache/export/` bloat, and enforce strict outer ClickHouse types (`UInt32` non-null `duration`, `UInt16` `count`, epoch-seconds `timestamp`) to prevent non-retryable `400` batch drops.
+- **Tenant, PII, and provenance quarantine:** Reject or quarantine `org_id=null` (personal workspaces) and foreign-org rows; enforce `ProjectScopedViewMixin` (`404` isolation) on all VanoHub telemetry read endpoints. Stream-redact comment bodies (`create:comment` `obj_name`) and `user_email` prior to persistence. Keep any untrusted client telemetry strictly quarantined from `SL*`/`KPI*`/`CL*` metrics and workflow/sampling gates.
+- **CVAT Compose durability:** Require persistent mounts for `/home/django/events` (`EVENTS_LOCAL_DB_FILE`) and `/vector-data-dir` plus Vector disk buffering/acknowledgements, and lower `CVAT_EXPORT_CACHE_TTL` (e.g., `3600`) to avoid `cvat_data/cache/export/` bloat. VanoHub requires no custom CVAT-side extension (`PV04` intact).
 
 These checks apply to changed boundaries. Do not add a new service, authentication framework, broker, or audit subsystem to a documentation-only task.
 

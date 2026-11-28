@@ -24,3 +24,6 @@ Thumbs.db
 # Local docs archives & starter package
 VanoHub-Docs-and-Plan-*.zip
 vanohub-docs-starter/
+
+# External CVAT extensions stay strictly decoupled from VanoHub
+issue-logging-management/cvat-di-ext/

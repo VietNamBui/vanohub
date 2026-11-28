@@ -1,6 +1,8 @@
+from pathlib import Path
+
 from django.core.exceptions import ValidationError as DjangoValidationError
 from django.db import IntegrityError, transaction
-from django.test import TestCase
+from django.test import SimpleTestCase, TestCase
 from django.utils import timezone
 
 from accounts.models import Role
@@ -185,3 +187,38 @@ class DatabaseIntegrityAndBoundaryTests(TestCase):
                 work_date=timezone.localdate(),
                 object_count=0,
             )
+
+
+class ExternalCvatExtensionDecouplingTests(SimpleTestCase):
+    """Enforce PV04 / D04 invariant: VanoHub stays completely decoupled from cvat-di-ext."""
+
+    FORBIDDEN_TOKENS = ("cvat-di-ext", "cvat_ext")
+    SCANNED_SUFFIXES = frozenset({".py", ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".json", ".scss", ".css"})
+    IGNORED_DIRS = frozenset({"__pycache__", "node_modules", "dist", ".venv", ".git"})
+
+    def test_runtime_code_and_repo_exclude_cvat_di_ext(self):
+        this_file = Path(__file__).resolve()
+        repo_root = this_file.parents[2]
+
+        self.assertFalse(
+            (repo_root / "issue-logging-management" / "cvat-di-ext").exists(),
+            "issue-logging-management/cvat-di-ext must not be vendored inside VanoHub.",
+        )
+
+        offenders: list[str] = []
+        for root in (repo_root / "backend", repo_root / "frontend" / "src"):
+            if not root.exists():
+                continue
+            for path in root.rglob("*"):
+                if not path.is_file() or path.resolve() == this_file:
+                    continue
+                if any(part in self.IGNORED_DIRS for part in path.parts):
+                    continue
+                if path.suffix.lower() not in self.SCANNED_SUFFIXES:
+                    continue
+                content = path.read_text(encoding="utf-8", errors="ignore").lower()
+                for token in self.FORBIDDEN_TOKENS:
+                    if token in content:
+                        offenders.append(f"{path.relative_to(repo_root)} ({token})")
+
+        self.assertEqual(offenders, [], f"Forbidden external CVAT extension coupling detected: {offenders}")

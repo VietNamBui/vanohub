@@ -1,6 +1,6 @@
 # Refactor decisions
 
-Prepared: 2026-11-27. Status on `feature/issue-logger @ 0beace7`: **D01–D03 are accepted and implemented** (via `8d66adc`, reconciled below); **D04 is accepted** (pending `PV04` amendment & implementation); **D05–D06 remain open** with Dec 4 MVP defaults proposed.
+Prepared: 2026-11-27 (reconciled 2026-11-28). Status on `feature/annotator-qclv1`: **D01–D04 are accepted** (`D01`–`D03` implemented; `D04` updated 2026-11-28 to strict stock CVAT API-only consumption with `PV04` intact and external CVAT extensions completely decoupled); **D05–D06 remain open** with Dec 4 MVP defaults proposed.
 
 Use this file for the small number of choices that cross data, API, workflow, and UI boundaries. Split an individual record into an ADR only when its size or independent lifecycle warrants it. Link to the product specification rather than duplicating its full rules.
 
@@ -11,7 +11,7 @@ Use this file for the small number of choices that cross data, API, workflow, an
 | D01 | CVAT hierarchy and tenant identity | Accepted (`8d66adc`) | Related migrations, identifiers, routes, and navigation |
 | D02 | QC1-to-QC2 gate and sampling unit | Accepted (`8d66adc`) | Related transition, audit, and review UI changes |
 | D03 | Identity linking and CVAT write scope | Accepted with reliability gap (`8d66adc`) | Account migration, assignee push, invitations, unlink behavior |
-| D04 | Telemetry source and API extension placement | Accepted (pending `PV04` amendment & implementation) | Telemetry/export ingestion (`T08`) and slim CVAT-side v2 extension |
+| D04 | Telemetry source and API extension placement | Accepted (stock CVAT API only; `PV04` intact) | Stock CVAT export ingestion (`T08`); zero CVAT extension dependency |
 | D05 | Object counts, baseline snapshots, and output attribution | Open (Dec 4 defaults proposed) | Changes to counting, productivity, quality denominators |
 | D06 | Time, provenance, and missing-data semantics | Open (Dec 4 defaults proposed) | New time-based metrics and their UI/API contracts |
 
@@ -129,17 +129,16 @@ Extending “API docs” has two meanings: documenting existing routes or implem
 ### Resolution (D04)
 
 ```text
-Status and date: Accepted (pending PV04 amendment & implementation), reconciled 2026-11-27.
-Selected option and reason: Hybrid split with VanoHub as sole workflow/RBAC/QC SSoT and a slim (~1.5–2.5k LOC) in-process CVAT-side Django extension implementing `cvat-event-pipeline-v2` (non-authoritative for workflow/gating), paired with API-only VanoHub consumption via CVAT `POST /api/events/export` -> `GET /api/requests/{rq_id}` -> streamed CSV download (using a dedicated `read_only=True` PAT with global privilege `user` + org role `maintainer`/`owner`). Direct CVAT PostgreSQL, ClickHouse, Vector, and NAS access remains prohibited. A pure out-of-process sidecar container cannot hook `record_server_event(..., on_commit=True)`, Django ORM signals, or pre-write `S0` snapshots; heavy 3D/2D Pre-QC checks stay out-of-process.
-Authority/evidence: User architectural decision (2026-11-27), `/media/bang/Work/projects/cvat-docs/cvat-event-pipeline-v2/` (`event-payloads-v2.schema.json`, `event-registry.json`, `docs/01-remediation-and-parity.md`–`05-acceptance-matrix.md`), `backend/cvat_integration/{client,sync,schemas}.py`, `cvat-base/cvat/apps/{events,access_tokens,iam}/`, and `cvat-di-ext/backend/cvat_ext/`.
+Status and date: Accepted (supersedes 2026-11-27 hybrid extension resolution), updated 2026-11-28.
+Selected option and reason: Strict stock CVAT API-only integration (`PV04` preserved intact — no CVAT fork, patch, or in-process CVAT extension owned by or coupled to VanoHub). VanoHub remains the sole workflow/RBAC/QC SSoT and consumes stock CVAT REST endpoints only (`GET /api/issues`, `GET /api/comments`, `POST /api/events/export` -> `GET /api/requests/{rq_id}` -> streamed CSV download using a dedicated `read_only=True` PAT with global privilege `user` + org role `maintainer`/`owner`, plus existing sync/assignee/invitation APIs). Direct CVAT PostgreSQL, ClickHouse, Vector, and NAS access remain prohibited. Any external CVAT extension (such as `cvat-di-ext`) is kept strictly outside VanoHub's repository, roadmap, and deployment boundary; optional structured CVAT comment prefixes or future plug-in inputs (`B1`–`B5`) degrade cleanly to plain stock CVAT when absent.
+Authority/evidence: User architectural decision (2026-11-28: keep `cvat-di-ext` completely decoupled from VanoHub), `docs/platform-spec.md` (`PV04` and Backlog `B1`–`B5`), and `backend/cvat_integration/{client,sync,assignee,schemas}.py`.
 Affected code, data, API, and UI:
-  - Prerequisite spec update: amend `PV04` in `docs/platform-spec.md` (currently "không fork/patch CVAT") to authorize the slim in-process CVAT extension before CVAT deployment.
-  - VanoHub (`backend/cvat_integration/`, `backend/analytics/`): add dedicated read-only export token config, org-header-free `create_events_export(?org_id=...)` (never combined with `X-Organization`), `CVAT_HOST_HEADER`-aware `stream_download(result_url)` (`allow_redirects=False`), `CvatSyncScope`/`CvatExportBatch`/`CvatEventLedger`/`CvatWorkingTimeEvent`/`CvatEventQuarantine` tables, and `manage.py ingest_cvat_events` (5-min cron + `pg_try_advisory_lock`).
-  - Boundary invariants: ingested CVAT/sidecar events never mutate `Job.status`, `rework_round`, `AuditSample`, `Delivery`, `ReviewError`, `AnnotatorRequest`, or write into `ActivityLog` four-eyes history; `actor_role` is opaque metadata; actors resolve strictly via `CvatAccount.cvat_user_id`; `org_id=null` / foreign-org rows are dropped/quarantined; telemetry reads enforce `ProjectScopedViewMixin` (`404` isolation).
-  - CVAT sidecar (`cvat-di-ext` slimmed): strip 5-tier workflow/roster/OPA monkey-patches & `qc:client_*` sampling-gate authority (`EV-02`); emit `payload.cvat_ext` v2 via `record_server_event(..., on_commit=True)` with `org_id`, strict `UInt32`/`UInt16`/epoch typing, and 5-scope client allowlist.
-Migration/compatibility and external effects: Preserves existing VanoHub APIs and `SYNCABLE_STATUSES` / Hybrid A2 invariants; requires CVAT Compose durability hardening (persistent `/home/django/events` and `/vector-data-dir`, Vector disk buffer/ack, `CVAT_EXPORT_CACHE_TTL=3600`).
-Verification required and evidence: Schema validation via `/media/bang/Work/projects/cvat-docs/cvat-event-pipeline-v2/scripts/validate-export.py`, ClickHouse checks via `scripts/validate-qc-events.sh`, Dec 4 priority runtime acceptance cases (`R01`, `R02`, `R03` 3D, `R04`–`R06`, `R11`–`R13`, `R17`–`R20`), and full VanoHub CI gates.
-Supersedes / superseded by: Supersedes strict no-extension baseline assumption for telemetry (`D04` open table); conditional on `PV04` amendment before CVAT extension deployment.
+  - Spec invariant: `PV04` in `docs/platform-spec.md` ("không fork/patch CVAT") remains intact with zero amendment required.
+  - VanoHub (`backend/cvat_integration/`, `backend/analytics/`): add dedicated read-only export token config, org-header-free `create_events_export` (`CvatClient(organization=org_slug)`, never combining `X-Organization` with `?org_id=`), `CVAT_HOST_HEADER`-aware `stream_download(result_url)` (`allow_redirects=False`), `CvatSyncScope`/`CvatExportBatch`/`CvatEventLedger`/`CvatWorkingTimeEvent`/`CvatEventQuarantine` tables, and `manage.py ingest_cvat_events` (stock `send:working_time` allowlisted by default; optional generic external plugin scopes strictly behind `B1`–`B5` contracts).
+  - Boundary invariants: ingested CVAT events never mutate `Job.status`, `rework_round`, `AuditSample`, `Delivery`, `ReviewError`, `AnnotatorRequest`, or write into `ActivityLog` four-eyes history; actors resolve strictly via `CvatAccount.cvat_user_id`; `org_id=null` / foreign-org rows are dropped/quarantined; telemetry reads enforce `ProjectScopedViewMixin` (`404` isolation); VanoHub issues no CVAT plugin role tokens and vendors no external CVAT extension code.
+Migration/compatibility and external effects: Preserves existing VanoHub APIs, `SYNCABLE_STATUSES`, and Hybrid A2 invariants; requires CVAT Compose durability hardening (persistent `/home/django/events` and `/vector-data-dir`, Vector disk buffer/ack, `CVAT_EXPORT_CACHE_TTL=3600`) before enabling `ingest_cvat_events`.
+Verification required and evidence: Stock CVAT export ingestion tests, decoupling guardrail test in `backend/projects/test_integrity.py`, live stock CVAT E2E (`NT02`), and full VanoHub CI gates.
+Supersedes / superseded by: Supersedes the 2026-11-27 `D04` hybrid in-process CVAT extension resolution; aligns fully with `PV04`.
 ```
 
 ## D05 — Counting, snapshots, and attribution *(Open)*
