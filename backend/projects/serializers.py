@@ -386,7 +386,18 @@ class BatchSerializer(ProjectScopedSerializer):
         qc1_passed = getattr(batch, "qc1_passed_count", 0) or 0
         blocking = getattr(batch, "blocking_qc2_count", 0) or 0
         locked = getattr(batch, "locked_jobs", 0) or 0
-        return qc1_passed > 0 and blocking == 0 and locked == 0
+        if not (qc1_passed > 0 and blocking == 0 and locked == 0):
+            return False
+        project = self.context.get("project")
+        if project is not None and getattr(project, "issue_gate_enabled", False):
+            blocked_batch_ids = self.context.get("blocked_batch_ids")
+            if blocked_batch_ids is None:
+                from quality.issues import acceptance_blocking_batch_ids
+
+                blocked_batch_ids = acceptance_blocking_batch_ids(project)
+            if batch.id in blocked_batch_ids:
+                return False
+        return True
 
     def get_fields(self):
         fields = super().get_fields()

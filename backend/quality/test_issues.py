@@ -884,8 +884,9 @@ class JobIssueWorkflowTests(TestCase):
             authority_status=JobIssue.AuthorityStatus.VALID,
             status=JobIssue.Status.ADDRESSED,
         )
-        self.assertEqual(self.qc2.post(self.f.url(f"issues/{ji_qc1.id}/resolve/"), {}, format="json").status_code, 403)
-        self.assertEqual(self.qc2.post(self.f.url(f"issues/{ji_qc1.id}/reopen/"), {}, format="json").status_code, 403)
+        # P0-1a: Standalone QC2 without assigned AuditSample & not author gets 404 (PQ01 isolation, matching GET)
+        self.assertEqual(self.qc2.post(self.f.url(f"issues/{ji_qc1.id}/resolve/"), {}, format="json").status_code, 404)
+        self.assertEqual(self.qc2.post(self.f.url(f"issues/{ji_qc1.id}/reopen/"), {}, format="json").status_code, 404)
 
         # P0-1b: Dual QC1+QC2 who was qc1_reviewer on a job CANNOT bypass PENDING_QC2 stage lock
         dual_qc = User.objects.create_user(username="dual_qc_audit", password="x")
@@ -1168,3 +1169,119 @@ class JobIssueWorkflowTests(TestCase):
         # Suppress unused variable lint
         self.assertIsNotNone(AuditSample.objects)
         self.assertIsNotNone(cand_ji.pk)
+
+    def test_slice4_issue_rule_pq01_scoping_and_import_error_paths(self) -> None:
+        from unittest.mock import patch
+
+        from accounts.models import Role, RoleAssignment
+        from cvat_integration.client import CvatError
+
+        # 1. PM rule direct not_an_issue, resolved, DELIVERED (400), invalid ruling_attributes (400), dual PM+Anno (403)
+        job_active = self.f.job(status=JobStatus.REWORK, annotator=self.f.ann1, qc1_reviewer=self.f.qc1, cvat_job_id=9201)
+        ji_na = JobIssue.objects.create(
+            project=self.f.project,
+            job=job_active,
+            cvat_issue_id=92011,
+            defect_code="LBL-01",
+            severity="major",
+            frame_number=0,
+            author=self.f.qc1,
+            author_stage=JobIssue.AuthorStage.QC1,
+            authority_status=JobIssue.AuthorityStatus.VALID,
+            status=JobIssue.Status.OPEN,
+        )
+        r_bad_attrs = self.pm.post(
+            self.f.url(f"issues/{ji_na.id}/rule/"),
+            {"decision": "ruling", "ruling_label": "Car", "ruling_attributes": {"nested": {"bad": 1}}},
+            format="json",
+        )
+        self.assertEqual(r_bad_attrs.status_code, 400)
+
+        r_na = self.pm.post(
+            self.f.url(f"issues/{ji_na.id}/rule/"),
+            {"decision": "not_an_issue", "ruling_note": "False positive"},
+            format="json",
+        )
+        self.assertEqual(r_na.status_code, 200, r_na.data)
+        self.assertEqual(r_na.data["status"], JobIssue.Status.NOT_AN_ISSUE)
+
+        ji_res = JobIssue.objects.create(
+            project=self.f.project,
+            job=job_active,
+            cvat_issue_id=92012,
+            defect_code="LBL-01",
+            severity="major",
+            frame_number=1,
+            author=self.f.qc1,
+            author_stage=JobIssue.AuthorStage.QC1,
+            authority_status=JobIssue.AuthorityStatus.VALID,
+            status=JobIssue.Status.OPEN,
+        )
+        r_res = self.pm.post(
+            self.f.url(f"issues/{ji_res.id}/rule/"),
+            {"decision": "resolved", "ruling_note": "Confirmed fixed"},
+            format="json",
+        )
+        self.assertEqual(r_res.status_code, 200, r_res.data)
+        self.assertEqual(r_res.data["status"], JobIssue.Status.RESOLVED)
+
+        job_deliv = self.f.job(status=JobStatus.DELIVERED, annotator=self.f.ann1, qc1_reviewer=self.f.qc1, cvat_job_id=9202)
+        ji_deliv = JobIssue.objects.create(
+            project=self.f.project,
+            job=job_deliv,
+            cvat_issue_id=92021,
+            defect_code="LBL-01",
+            severity="major",
+            frame_number=0,
+            author=self.f.qc1,
+            author_stage=JobIssue.AuthorStage.QC1,
+            authority_status=JobIssue.AuthorityStatus.VALID,
+            status=JobIssue.Status.OPEN,
+        )
+        self.assertEqual(
+            self.pm.post(self.f.url(f"issues/{ji_deliv.id}/rule/"), {"decision": "resolved"}, format="json").status_code,
+            400,
+        )
+
+        # Dual PM+Annotator blocked 403 on rule not_an_issue for own annotated job
+        RoleAssignment.objects.create(project=self.f.project, user=self.f.pm, role=Role.ANNOTATOR)
+        job_pm_ann = self.f.job(status=JobStatus.REWORK, annotator=self.f.pm, qc1_reviewer=self.f.qc1, cvat_job_id=9203)
+        ji_pm_ann = JobIssue.objects.create(
+            project=self.f.project,
+            job=job_pm_ann,
+            cvat_issue_id=92031,
+            defect_code="LBL-01",
+            severity="major",
+            frame_number=0,
+            author=self.f.qc1,
+            author_stage=JobIssue.AuthorStage.QC1,
+            authority_status=JobIssue.AuthorityStatus.VALID,
+            status=JobIssue.Status.OPEN,
+        )
+        self.assertEqual(
+            self.pm.post(self.f.url(f"issues/{ji_pm_ann.id}/rule/"), {"decision": "not_an_issue"}, format="json").status_code,
+            403,
+        )
+
+        # 2. PQ01 scoping on GET /issues/ for Ann / QC1 / QC2
+        ann2_ids = [r["id"] for r in self.f.client(self.f.ann2).get(self.f.url("issues/")).data["results"]]
+        self.assertNotIn(ji_na.id, ann2_ids)
+        ann1_ids = [r["id"] for r in self.ann1.get(self.f.url("issues/")).data["results"]]
+        self.assertIn(ji_na.id, ann1_ids)
+        self.assertNotIn(ji_pm_ann.id, ann1_ids)
+        qc2_ids = [r["id"] for r in self.qc2.get(self.f.url("issues/")).data["results"]]
+        self.assertNotIn(ji_na.id, qc2_ids)
+
+        # 3. import_ 403 (unauthorized job), 400 (unlinked CVAT job), 502 (CvatError)
+        self.assertEqual(
+            self.f.client(self.f.ann2).post(self.f.url("issues/import/"), {"job": job_active.id}, format="json").status_code,
+            403,
+        )
+        unlinked_job = self.f.job(status=JobStatus.ANNOTATING, annotator=self.f.ann1, cvat_job_id=None)
+        self.assertEqual(
+            self.pm.post(self.f.url("issues/import/"), {"job": unlinked_job.id}, format="json").status_code,
+            400,
+        )
+        with patch("quality.views.import_job_issues", side_effect=CvatError("cvat timeout")):
+            res_502 = self.pm.post(self.f.url("issues/import/"), {"job": job_active.id}, format="json")
+        self.assertEqual(res_502.status_code, 502)

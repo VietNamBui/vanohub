@@ -421,6 +421,14 @@ def assign_job(job, data, actor, project, *, push_cvat=True):
         raise ValidationError(
             f"Không thể đổi annotator hoặc người QC1 khi job ở trạng thái {job.get_status_display()}."
         )
+    if (
+        "annotator" in data
+        and data["annotator"] is None
+        and job.status in (JobStatus.ANNOTATING, JobStatus.REWORK)
+    ):
+        raise ValidationError(
+            {"annotator": f"Không thể bỏ annotator khi job đang ở trạng thái {job.get_status_display()}."}
+        )
 
     lock_user_ids = sorted({
         user.pk
@@ -553,6 +561,9 @@ class JobViewSet(ProjectScopedViewMixin, mixins.ListModelMixin, mixins.RetrieveM
             queryset = queryset.filter(is_escalated=True)
         if p.get("locked") == "1":
             queryset = queryset.filter(is_locked=True)
+        if p.get("issue"):
+            issue_num = parse_int_param(p["issue"], "issue")
+            queryset = queryset.filter(Q(issues__id=issue_num) | Q(issues__cvat_issue_id=issue_num)).distinct()
         if p.get("unassigned") == "1":
             queryset = queryset.filter(annotator__isnull=True)
         if p.get("overdue") == "1":
@@ -855,7 +866,7 @@ class AnnotatorJobViewSet(
         if p.get("escalated") == "1":
             queryset = queryset.filter(is_escalated=True)
         if p.get("overdue") == "1":
-            queryset = queryset.filter(deadline__lt=timezone.now(), status__in=OPEN_STATUSES)
+            queryset = queryset.filter(deadline__lt=timezone.now(), status__in=ACTIVE_ANNOTATOR_STATUSES)
         if p.get("due_soon") == "1":
             now = timezone.now()
             queryset = queryset.filter(
@@ -922,6 +933,19 @@ class AnnotatorJobViewSet(
                 .exclude(
                     events__action__in=["qc1.start", "qc1.pass", "qc1.reject"],
                     events__actor=locked_user,
+                )
+                .exclude(
+                    events__action__in=["job.status", "job.assign"],
+                    events__after__event__in=["qc1.start", "qc1.pass", "qc1.reject"],
+                    events__actor=locked_user,
+                )
+                .exclude(
+                    events__action__in=["job.assign", "job.import"],
+                    events__before__qc1_reviewer=locked_user.pk,
+                )
+                .exclude(
+                    events__action__in=["job.assign", "job.import"],
+                    events__after__qc1_reviewer=locked_user.pk,
                 )
                 .exclude(audit_samples__auditor=locked_user)
                 .exclude(audit_samples__reviewed_by=locked_user)

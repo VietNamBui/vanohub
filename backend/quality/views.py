@@ -18,7 +18,7 @@ from accounts.serializers import UserBriefSerializer
 from accounts.validation import validated_dict
 from cvat_integration.assignee import schedule_assignee_push
 from cvat_integration.client import CvatError
-from jobs.models import OPEN_STATUSES, FirstQc1Result, Job, JobStatus, ReworkScope
+from jobs.models import OPEN_STATUSES, DailyOutputRecord, FirstQc1Result, Job, JobStatus, ReworkScope
 from jobs.serializers import JobDetailSerializer, JobSerializer
 from jobs.views import ensure_editable, ensure_not_escalated, lock_job, lock_job_with_batch, order_by_db06_priority
 from projects.models import ActivityLog, DataStatus, EscalationPolicy, UserNotification
@@ -221,8 +221,8 @@ class AuditSampleViewSet(
             raise ValidationError("Task đã bàn giao, đợt QC2 đã chốt.")
         if sample.result != AuditSample.Result.PENDING:
             raise ValidationError("Mẫu này đã có kết quả.")
-        if sample.auditor_id and sample.auditor_id != user.id and not self.has_cap(Cap.MANAGE_AUDITS):
-            raise PermissionDenied("Mẫu này được giao cho auditor khác.")
+        if not self.has_cap(Cap.MANAGE_AUDITS) and sample.auditor_id != user.id:
+            raise NotFound("Không tìm thấy mẫu QC2.")
         if user.id in four_eyes_conflicts(sample.job):
             raise PermissionDenied("Luật bốn mắt: bạn đã annotate hoặc QC1 job này.")
         ensure_editable(sample.job)
@@ -475,14 +475,28 @@ def _qc1_pool_filter(project: Any, user: Any) -> Q:
 
 def _exclude_qc1_four_eyes_conflicts(project: Any, queryset: Any, user: Any) -> Any:
     hist_ann_job_ids = (
-        ActivityLog.objects.filter(project=project, actor=user, job_id__isnull=False)
+        ActivityLog.objects.filter(project=project, job_id__isnull=False)
         .filter(
-            Q(action__in=ANNOTATOR_EVENTS)
-            | Q(action__in=("job.status", "job.assign"), after__event__in=ANNOTATOR_EVENTS)
-            | Q(action="job.status", after__status__in=[JobStatus.ANNOTATING, JobStatus.PENDING_QC1])
+            Q(
+                actor=user,
+                action__in=ANNOTATOR_EVENTS,
+            )
+            | Q(
+                actor=user,
+                action__in=("job.status", "job.assign"),
+                after__event__in=ANNOTATOR_EVENTS,
+            )
+            | Q(
+                actor=user,
+                action="job.status",
+                after__status__in=[JobStatus.ANNOTATING, JobStatus.PENDING_QC1],
+            )
+            | Q(action__in=("job.assign", "job.import"), before__annotator=user.pk)
+            | Q(action__in=("job.assign", "job.import"), after__annotator=user.pk)
         )
         .values("job_id")
     )
+    hist_ann_output_job_ids = DailyOutputRecord.objects.filter(job__project=project, user=user).values("job_id")
     hist_qc2_sample_job_ids = (
         AuditSample.objects.filter(audit__project=project)
         .filter(Q(auditor=user) | Q(reviewed_by=user))
@@ -500,6 +514,7 @@ def _exclude_qc1_four_eyes_conflicts(project: Any, queryset: Any, user: Any) -> 
     return queryset.exclude(
         Q(annotator=user)
         | Q(pk__in=hist_ann_job_ids)
+        | Q(pk__in=hist_ann_output_job_ids)
         | Q(pk__in=hist_qc2_sample_job_ids)
         | Q(pk__in=hist_qc2_err_job_ids)
         | Q(pk__in=hist_qc2_issue_job_ids)
@@ -1015,23 +1030,29 @@ class JobIssueViewSet(
             }
         )
 
+    def _require_visible_issue(self, pk: Any) -> int:
+        issue_pk = self._parse_issue_pk(pk)
+        if not self.get_queryset().filter(pk=issue_pk).exists():
+            raise NotFound("Không tìm thấy issue trong organization.")
+        return issue_pk
+
     @action(detail=True, methods=["post"])
     def address(self, request: Any, project_id: Any, pk: Any = None) -> Response:
-        issue_pk = self._parse_issue_pk(pk)
+        issue_pk = self._require_visible_issue(pk)
         data = validated_dict(JobIssueNoteSerializer(data=request.data))
         issue = address_job_issue(self.project, issue_pk, actor=request.user, note=data["note"])
         return Response(self._serialized_issue(issue.pk))
 
     @action(detail=True, methods=["post"])
     def dispute(self, request: Any, project_id: Any, pk: Any = None) -> Response:
-        issue_pk = self._parse_issue_pk(pk)
+        issue_pk = self._require_visible_issue(pk)
         data = validated_dict(JobIssueDisputeSerializer(data=request.data))
         issue, req = dispute_job_issue(self.project, issue_pk, actor=request.user, reason=data["reason"])
         return Response({"issue": self._serialized_issue(issue.pk), "request_id": req.pk})
 
     @action(detail=True, methods=["post"])
     def resolve(self, request: Any, project_id: Any, pk: Any = None) -> Response:
-        issue_pk = self._parse_issue_pk(pk)
+        issue_pk = self._require_visible_issue(pk)
         data = validated_dict(JobIssueNoteSerializer(data=request.data))
         issue = resolve_job_issue(
             self.project,
@@ -1045,7 +1066,7 @@ class JobIssueViewSet(
 
     @action(detail=True, methods=["post"])
     def reopen(self, request: Any, project_id: Any, pk: Any = None) -> Response:
-        issue_pk = self._parse_issue_pk(pk)
+        issue_pk = self._require_visible_issue(pk)
         data = validated_dict(JobIssueNoteSerializer(data=request.data))
         issue = reopen_job_issue(
             self.project,

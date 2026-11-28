@@ -827,6 +827,13 @@ def submit_blocking_issues(job: Job) -> list[JobIssue]:
     )
 
 
+def _acceptance_blocking_q() -> Q:
+    return Q(status=JobIssue.Status.UNCLEAR) | (
+        Q(status__in=[JobIssue.Status.OPEN, JobIssue.Status.REOPENED, JobIssue.Status.ADDRESSED])
+        & (Q(severity__in=_BLOCKING_SEVERITIES) | Q(ruled_at__isnull=False))
+    )
+
+
 def acceptance_blocking_issues(job: Job) -> list[JobIssue]:
     """Acceptance Gate: blocks unclear holds and unverified open/reopened/addressed blockers."""
     if not job.project.issue_gate_enabled:
@@ -837,13 +844,7 @@ def acceptance_blocking_issues(job: Job) -> list[JobIssue]:
             authority_status=JobIssue.AuthorityStatus.VALID,
             source_missing=False,
         )
-        .filter(
-            Q(status=JobIssue.Status.UNCLEAR)
-            | (
-                Q(status__in=[JobIssue.Status.OPEN, JobIssue.Status.REOPENED, JobIssue.Status.ADDRESSED])
-                & (Q(severity__in=_BLOCKING_SEVERITIES) | Q(ruled_at__isnull=False))
-            )
-        )
+        .filter(_acceptance_blocking_q())
         .order_by("id")
     )
 
@@ -858,14 +859,23 @@ def acceptance_blocking_issues_for_jobs(project: Project, jobs: list[Job]) -> li
             authority_status=JobIssue.AuthorityStatus.VALID,
             source_missing=False,
         )
-        .filter(
-            Q(status=JobIssue.Status.UNCLEAR)
-            | (
-                Q(status__in=[JobIssue.Status.OPEN, JobIssue.Status.REOPENED, JobIssue.Status.ADDRESSED])
-                & (Q(severity__in=_BLOCKING_SEVERITIES) | Q(ruled_at__isnull=False))
-            )
-        )
+        .filter(_acceptance_blocking_q())
         .order_by("id")
+    )
+
+
+def acceptance_blocking_batch_ids(project: Project) -> set[int]:
+    if not project.issue_gate_enabled:
+        return set()
+    return set(
+        JobIssue.objects.filter(
+            project=project,
+            authority_status=JobIssue.AuthorityStatus.VALID,
+            source_missing=False,
+        )
+        .filter(_acceptance_blocking_q())
+        .values_list("job__batch_id", flat=True)
+        .distinct()
     )
 
 

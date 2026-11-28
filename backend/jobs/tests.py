@@ -9,7 +9,7 @@ from django.utils import timezone
 from accounts.models import Role, RoleAssignment
 from accounts.testing import ProjectFixture, make_user
 from projects.models import ActivityLog, Batch, Dataset, DataStatus, EscalationPolicy, UserNotification
-from quality.models import Audit, AuditSample, ReviewError, ReviewStage
+from quality.models import Audit, AuditSample, JobIssue, ReviewError, ReviewStage, Severity
 from teams.models import Team, TeamMember
 
 from .models import DailyOutputRecord, Job, JobStatus, ReworkScope
@@ -895,3 +895,103 @@ class JobHardeningAndSecurityTests(TestCase):
         user_lock_idx = next(i for i, s in enumerate(sqls) if "accounts_user" in s and "FOR UPDATE" in s)
         team_query_idx = next(i for i, s in enumerate(sqls) if "teams_teammember" in s)
         self.assertGreater(team_query_idx, user_lock_idx)
+
+    def test_slice3_assign_clear_guard_overdue_scope_claim_history_issue_filter_and_full_rework(self):
+        # 1. Clearing annotator is blocked on ANNOTATING and REWORK, allowed on PENDING_ANNOTATION
+        j_ann = self.f.job(status=JobStatus.ANNOTATING, annotator=self.f.ann1)
+        j_rew = self.f.job(status=JobStatus.REWORK, annotator=self.f.ann1)
+        j_pend = self.f.job(status=JobStatus.PENDING_ANNOTATION, annotator=self.f.ann1)
+        self.assertEqual(self.pm.post(self.f.url(f"jobs/{j_ann.id}/assign/"), {"annotator": None}, format="json").status_code, 400)
+        self.assertEqual(self.pm.post(self.f.url(f"jobs/{j_rew.id}/assign/"), {"annotator": None}, format="json").status_code, 400)
+        self.assertEqual(self.pm.post(self.f.url(f"jobs/{j_pend.id}/assign/"), {"annotator": None}, format="json").status_code, 200)
+
+        # 2. AnnotatorJobViewSet ?overdue=1 excludes PENDING_QC1 (only ACTIVE_ANNOTATOR_STATUSES)
+        past = timezone.now() - timedelta(hours=4)
+        j_overdue_active = self.f.job(status=JobStatus.ANNOTATING, annotator=self.f.ann2, deadline=past)
+        self.f.job(status=JobStatus.PENDING_QC1, annotator=self.f.ann2, deadline=past)
+        res_ov = self.f.client(self.f.ann2).get(self.f.url("annotator/jobs/?overdue=1"))
+        self.assertEqual(res_ov.status_code, 200)
+        self.assertEqual([r["id"] for r in res_ov.data["results"]], [j_overdue_active.id])
+
+        # 3. AnnotatorJobViewSet.claim excludes jobs where user was historical qc1_reviewer in ActivityLog
+        hist_qc1_user = make_user("hist_qc1_ann", Role.ANNOTATOR, Role.QC1, project=self.f.project)
+        Job.objects.filter(project=self.f.project, annotator__isnull=True).update(annotator=self.f.ann1)
+        blocked_pool = Job.objects.create(
+            project=self.f.project,
+            dataset=self.f.dataset,
+            batch=self.f.batch,
+            name="HIST-QC1-POOL",
+            status=JobStatus.PENDING_ANNOTATION,
+        )
+        ActivityLog.record(
+            project=self.f.project,
+            actor=self.f.pm,
+            action="job.assign",
+            target=blocked_pool,
+            job=blocked_pool,
+            before={"qc1_reviewer": None},
+            after={"qc1_reviewer": hist_qc1_user.pk},
+        )
+        res_claim_blocked = self.f.client(hist_qc1_user).post(self.f.url("annotator/jobs/claim/"), {}, format="json")
+        self.assertEqual(res_claim_blocked.status_code, 400)
+
+        # 4. JobViewSet retrieve, ?locked=1, and ?issue= (both JobIssue.id and cvat_issue_id)
+        j_locked = self.f.job(status=JobStatus.ANNOTATING, annotator=self.f.ann1, is_locked=True)
+        issue = JobIssue.objects.create(
+            project=self.f.project,
+            job=j_locked,
+            cvat_issue_id=77889,
+            frame_number=1,
+            defect_code="LBL-01",
+            severity=Severity.MAJOR,
+            status=JobIssue.Status.OPEN,
+            authority_status=JobIssue.AuthorityStatus.VALID,
+        )
+        self.assertEqual(self.pm.get(self.f.url(f"jobs/{j_locked.id}/")).status_code, 200)
+        res_locked = self.pm.get(self.f.url("jobs/?locked=1"))
+        self.assertIn(j_locked.id, [r["id"] for r in res_locked.data["results"]])
+        res_by_pk = self.pm.get(self.f.url(f"jobs/?issue={issue.id}"))
+        self.assertEqual([r["id"] for r in res_by_pk.data["results"]], [j_locked.id])
+        res_by_cvat = self.pm.get(self.f.url("jobs/?issue=77889"))
+        self.assertEqual([r["id"] for r in res_by_cvat.data["results"]], [j_locked.id])
+
+        # 5. bulk-move-batch rejects when job has an AuditSample in an in_progress Audit
+        target_batch = Batch.objects.create(project=self.f.project, dataset=self.f.dataset, name="Target Batch")
+        movable = self.f.job(status=JobStatus.PENDING_ANNOTATION, annotator=self.f.ann1)
+        open_audit = Audit.objects.create(
+            project=self.f.project,
+            batch=self.f.batch,
+            method="random",
+            sampling_rate=50,
+            seed=1,
+            eligible_count=1,
+            created_by=self.f.pm,
+            status=Audit.Status.IN_PROGRESS,
+        )
+        AuditSample.objects.create(audit=open_audit, job=movable, auditor=self.f.qc2)
+        res_move_blocked = self.pm.post(
+            self.f.url("jobs/bulk-move-batch/"),
+            {"ids": [movable.id], "batch": target_batch.id, "note": "move"},
+            format="json",
+        )
+        self.assertEqual(res_move_blocked.status_code, 400)
+
+        # 6. ReworkScope.FULL credit calculation in submit_annotation
+        full_job = self.f.job(
+            status=JobStatus.ANNOTATING,
+            annotator=self.f.ann1,
+            rework_round=1,
+            total_rework_rounds=1,
+            rework_scope=ReworkScope.FULL,
+            object_count=20,
+            last_counted_objects=20,
+            round_credited_objects=5,
+        )
+        res_full = self.ann1.post(
+            self.f.url(f"annotator/jobs/{full_job.id}/submit/"),
+            {"object_count": 20, "note": "full rework done"},
+            format="json",
+        )
+        self.assertEqual(res_full.status_code, 200, res_full.data)
+        rec = DailyOutputRecord.objects.get(job=full_job, user=self.f.ann1)
+        self.assertEqual(rec.object_count, 15)

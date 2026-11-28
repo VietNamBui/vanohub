@@ -22,7 +22,7 @@ from cvat_integration.assignee import schedule_assignee_push
 from cvat_integration.client import CvatError
 from cvat_integration.sync import dataset_labels, sync_organization
 from jobs.models import ACTIVE_ANNOTATOR_STATUSES, OPEN_STATUSES, STAGE_STATUSES, Job, JobStatus
-from quality.issues import acceptance_blocking_issues_for_jobs
+from quality.issues import acceptance_blocking_batch_ids, acceptance_blocking_issues_for_jobs
 from quality.models import Audit, AuditSample
 from quality.qc2 import ensure_qc2_sample
 from teams.models import Team, TeamMember
@@ -563,7 +563,7 @@ class PermissionMatrixView(ProjectScopedViewMixin, APIView):
         })
 
 
-def _set_status(obj, new_status, *, project, actor, action):
+def _set_status(obj, new_status, *, project, actor, action, note=""):
     before = obj.status
     if before == DataStatus.DELIVERED:
         raise ValidationError("Đã bàn giao, không thể thay đổi trạng thái.")
@@ -578,6 +578,7 @@ def _set_status(obj, new_status, *, project, actor, action):
         target=obj,
         before={"status": before},
         after={"status": new_status},
+        note=note,
     )
 
 
@@ -613,6 +614,48 @@ class DatasetViewSet(
         if search:
             queryset = queryset.filter(name__icontains=search)
         return queryset
+
+    def get_object(self):
+        lookup_url_kwarg = self.lookup_url_kwarg or self.lookup_field
+        try:
+            parse_int_param(self.kwargs.get(lookup_url_kwarg), "pk")
+        except ValidationError as exc:
+            raise NotFound("Không tìm thấy project trong organization.") from exc
+        return super().get_object()
+
+    def update(self, request, *args, **kwargs):
+        partial = kwargs.pop("partial", False)
+        instance = self.get_object()
+        serializer = self.get_serializer(instance, data=request.data, partial=partial)
+        serializer.is_valid(raise_exception=True)
+        self.perform_update(serializer)
+        fresh = self._base_queryset().get(pk=instance.pk)
+        return Response(self.get_serializer(fresh).data)
+
+    def perform_update(self, serializer):
+        instance = cast(Dataset, serializer.instance)
+        with transaction.atomic():
+            locked = (
+                Dataset.objects.select_for_update(of=("self",))
+                .filter(pk=instance.pk, project=self.project)
+                .first()
+            )
+            if locked is None:
+                raise NotFound("Không tìm thấy project trong organization.")
+            if locked.status != DataStatus.ACTIVE:
+                raise ValidationError("Project đã khoá hoặc đã bàn giao, không thể chỉnh sửa.")
+            before_desc = locked.description
+            serializer.instance = locked
+            dataset = cast(Dataset, serializer.save())
+            if dataset.description != before_desc:
+                ActivityLog.record(
+                    project=self.project,
+                    actor=self.request.user,
+                    action="dataset.update",
+                    target=dataset,
+                    before={"description": before_desc},
+                    after={"description": dataset.description},
+                )
 
     @action(detail=True)
     def labels(self, request, project_id, pk=None):
@@ -715,6 +758,20 @@ class BatchViewSet(
             queryset = queryset.filter(name__icontains=params["search"])
         return queryset
 
+    def get_object(self):
+        lookup_url_kwarg = self.lookup_url_kwarg or self.lookup_field
+        try:
+            parse_int_param(self.kwargs.get(lookup_url_kwarg), "pk")
+        except ValidationError as exc:
+            raise NotFound("Không tìm thấy task trong organization.") from exc
+        return super().get_object()
+
+    def get_serializer_context(self) -> dict[str, Any]:
+        context = super().get_serializer_context()
+        if self.project.issue_gate_enabled:
+            context["blocked_batch_ids"] = acceptance_blocking_batch_ids(self.project)
+        return context
+
     def update(self, request, *args, **kwargs):
         partial = kwargs.pop("partial", False)
         instance = self.get_object()
@@ -728,14 +785,30 @@ class BatchViewSet(
         instance = cast(Batch, serializer.instance)
         try:
             with transaction.atomic():
+                dataset_id = (
+                    Batch.objects.filter(pk=instance.pk, project=self.project)
+                    .values_list("dataset_id", flat=True)
+                    .first()
+                )
+                if dataset_id is None:
+                    raise NotFound("Không tìm thấy task trong organization.")
+                locked_dataset = (
+                    Dataset.objects.select_for_update(of=("self",))
+                    .filter(pk=dataset_id, project=self.project)
+                    .first()
+                )
                 locked_batch = (
                     Batch.objects.select_for_update(of=("self",))
                     .select_related("team", "dataset", "qc2_confirmed_by")
                     .filter(pk=instance.pk, project=self.project)
                     .first()
                 )
-                if locked_batch is None:
+                if locked_batch is None or locked_dataset is None or locked_batch.dataset_id != locked_dataset.id:
                     raise NotFound("Không tìm thấy task trong organization.")
+                if locked_batch.status != DataStatus.ACTIVE:
+                    raise ValidationError("Task đã khoá hoặc đã bàn giao, không thể chỉnh sửa.")
+                if locked_dataset.status != DataStatus.ACTIVE:
+                    raise ValidationError("Project của task đã khoá hoặc đã bàn giao, không thể chỉnh sửa.")
                 before_deadline = locked_batch.deadline
                 before_team = locked_batch.team
                 serializer.instance = locked_batch
@@ -772,6 +845,7 @@ class BatchViewSet(
             raise ValidationError("Không thể cập nhật task do dữ liệu tham chiếu không hợp lệ.") from exc
 
     def _set_batch_status(self, request, pk, new_status, action_name):
+        note = validated_dict(BatchNoteSerializer(data=request.data))["note"].strip()
         try:
             batch_pk = parse_int_param(pk, "pk")
         except ValidationError as exc:
@@ -784,7 +858,7 @@ class BatchViewSet(
             )
             if batch is None:
                 raise NotFound("Không tìm thấy task trong organization.")
-            _set_status(batch, new_status, project=self.project, actor=request.user, action=action_name)
+            _set_status(batch, new_status, project=self.project, actor=request.user, action=action_name, note=note)
         fresh = self._base_queryset().get(pk=batch.pk)
         return Response(self.get_serializer(fresh).data)
 

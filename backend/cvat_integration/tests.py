@@ -16,7 +16,15 @@ from rest_framework.exceptions import ValidationError as DrfValidationError
 from accounts.models import Role, RoleAssignment, User
 from accounts.testing import ProjectFixture
 from jobs.models import DailyOutputRecord, Job, JobStatus, user_work_date
-from projects.models import ActivityLog, Batch, Dataset, DataStatus, EscalationPolicy, Project
+from projects.models import (
+    ActivityLog,
+    Batch,
+    Dataset,
+    DataStatus,
+    EscalationPolicy,
+    Project,
+    UserNotification,
+)
 from quality.models import Audit, AuditSample, ErrorCategory
 from quality.qc2 import four_eyes_conflicts
 
@@ -1650,3 +1658,67 @@ class Phase1CvatHardeningRegressionTests(TestCase):
         self.assertEqual(cvat_job.status, JobStatus.PENDING_QC1)
         self.assertEqual(cvat_job.object_count, 30)
         self.assertFalse(DailyOutputRecord.objects.filter(job=cvat_job).exists())
+
+    def test_project_cvat_sync_view_returns_200_and_502_on_cvat_error(self) -> None:
+        with patch("projects.views.sync_organization", return_value={"jobs_created": 1, "jobs_updated": 2}) as mock_sync:
+            res_ok = self.f.client(self.f.pm).post(self.f.url("cvat-sync/"), {"count_objects": True}, format="json")
+        self.assertEqual(res_ok.status_code, 200, res_ok.data)
+        self.assertEqual(res_ok.data, {"jobs_created": 1, "jobs_updated": 2})
+        mock_sync.assert_called_once_with(self.f.project, actor=self.f.pm, count_objects=True)
+
+        with patch("projects.views.sync_organization", side_effect=CvatError("CVAT unreachable")):
+            res_err = self.f.client(self.f.pm).post(self.f.url("cvat-sync/"), {"count_objects": False}, format="json")
+        self.assertEqual(res_err.status_code, 502)
+        self.assertIn("CVAT unreachable", res_err.data["detail"])
+
+    def test_sync_cvat_management_command_handles_count_objects_and_cvat_errors(self) -> None:
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        with (
+            patch(
+                "cvat_integration.management.commands.sync_cvat.sync_organizations",
+                return_value={"created": ["Org A"], "pm_added": [], "waiting": []},
+            ) as mock_orgs,
+            patch(
+                "cvat_integration.management.commands.sync_cvat.sync_organization",
+                side_effect=CvatError("boom"),
+            ) as mock_org,
+        ):
+            call_command("sync_cvat", "--count-objects", stdout=stdout, stderr=stderr)
+        mock_orgs.assert_called_once_with()
+        mock_org.assert_called_once_with(self.f.project, None, count_objects=True, cooldown_seconds=0)
+        self.assertIn("Organization: tạo 1", stdout.getvalue())
+        self.assertIn("LỖI boom", stderr.getvalue())
+
+    def test_cvat_sync_notifies_pm_once_when_batch_becomes_ready_for_qc2(self) -> None:
+        job = self.f.job(status=JobStatus.QC1_REVIEWING, annotator=self.f.ann1, cvat_job_id=960)
+        client = _FakeSyncClient([{"id": 960, "stage": "validation", "state": "completed"}])
+        sync.sync_organization(self.f.project, self.f.pm, client=client, cooldown_seconds=0)
+        job.refresh_from_db()
+        self.assertEqual(job.status, JobStatus.QC1_PASSED)
+        notifs = UserNotification.objects.filter(
+            project=self.f.project,
+            recipient=self.f.pm,
+            category=UserNotification.Category.REVIEW_NEEDED,
+            batch=self.f.batch,
+        )
+        self.assertEqual(notifs.count(), 1)
+        first_notif = notifs.first()
+        self.assertIsNotNone(first_notif)
+        assert first_notif is not None
+        self.assertTrue(first_notif.is_pinned_pending)
+
+        # Re-syncing does not create duplicate pinned notifications
+        sync.sync_organization(self.f.project, self.f.pm, client=client, cooldown_seconds=0)
+        self.assertEqual(notifs.count(), 1)
+
+    def test_dataset_labels_fetches_from_org_scoped_client(self) -> None:
+        fake_labels = [{"id": 1, "name": "Pedestrian", "color": "#00ff00", "type": "cuboid"}]
+        mock_client = MagicMock()
+        mock_client.__enter__.return_value = mock_client
+        mock_client.list_project_labels.return_value = fake_labels
+        with patch("cvat_integration.sync.CvatClient", return_value=mock_client) as mock_cls:
+            labels = sync.dataset_labels(self.f.dataset)
+        self.assertEqual(labels, fake_labels)
+        mock_cls.assert_called_once_with(organization=self.f.project.cvat_org_slug)
+        mock_client.list_project_labels.assert_called_once_with(self.f.dataset.cvat_project_id)

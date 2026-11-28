@@ -45,8 +45,8 @@ from jobs.models import (
     JobStatus,
     record_daily_output,
 )
-from projects.models import ActivityLog, Batch, Dataset, DataStatus, EscalationPolicy, Project
-from projects.notifications import notify_escalated
+from projects.models import ActivityLog, Batch, Dataset, DataStatus, EscalationPolicy, Project, UserNotification
+from projects.notifications import notify_batch_ready_for_qc2, notify_escalated
 from quality.issues import (
     CvatIssueSnapshot,
     acceptance_blocking_issues,
@@ -178,6 +178,21 @@ def _map_cvat_status(stage: str, state: str, *, batch: Batch) -> str | None:
     if (stage, state) in POST_QC1_CVAT_STATES:
         return JobStatus.PENDING_QC2 if batch.qc2_confirmed_at is not None else JobStatus.QC1_PASSED
     return CVAT_STATUS_MAP.get((stage, state))
+
+
+def _maybe_notify_batch_ready_for_qc2(project: Project, batch: Batch, actor: Any = None) -> None:
+    """Gửi thông báo Task sẵn sàng xác nhận QC2 nếu chưa có thông báo đang ghim cho task."""
+    if batch.qc2_confirmed_at is not None:
+        return
+    if UserNotification.objects.filter(
+        project=project,
+        batch=batch,
+        category=UserNotification.Category.REVIEW_NEEDED,
+        is_pinned_pending=True,
+    ).exists():
+        return
+    # Sự kiện đạt QC1 diễn ra trên CVAT, nên không loại trừ PM chạy đồng bộ khỏi danh sách nhận thông báo.
+    notify_batch_ready_for_qc2(project, batch, actor=None)
 
 
 def _is_workflow_frozen(job: Job) -> bool:
@@ -1019,6 +1034,7 @@ def sync_organization(
                     }
 
                     seen_job_ids: set[int] = set()
+                    qc1_passed_entered = False
                     for remote_job in remote_task.jobs:
                         cvat_job = remote_job.payload
                         if remote_job.missing:
@@ -1069,7 +1085,25 @@ def sync_organization(
                                     issue_fetch_error=remote_job.issue_fetch_error,
                                 )
                                 summary["jobs_created"] += 1
-                            elif job.batch_id == task.id and _apply_cvat_state(
+                                if job.status == JobStatus.QC1_PASSED:
+                                    qc1_passed_entered = True
+                            elif job.batch_id == task.id:
+                                prev_status = job.status
+                                if _apply_cvat_state(
+                                    job,
+                                    cvat_job,
+                                    actor,
+                                    object_count=remote_job.object_count,
+                                    linked=linked,
+                                    issue_snapshot=remote_job.issue_snapshot,
+                                    issue_fetch_error=remote_job.issue_fetch_error,
+                                ):
+                                    summary["jobs_updated"] += 1
+                                    if prev_status != JobStatus.QC1_PASSED and job.status == JobStatus.QC1_PASSED:
+                                        qc1_passed_entered = True
+                        elif job.batch_id == task.id:
+                            prev_status = job.status
+                            if _apply_cvat_state(
                                 job,
                                 cvat_job,
                                 actor,
@@ -1079,20 +1113,15 @@ def sync_organization(
                                 issue_fetch_error=remote_job.issue_fetch_error,
                             ):
                                 summary["jobs_updated"] += 1
-                        elif job.batch_id == task.id and _apply_cvat_state(
-                            job,
-                            cvat_job,
-                            actor,
-                            object_count=remote_job.object_count,
-                            linked=linked,
-                            issue_snapshot=remote_job.issue_snapshot,
-                            issue_fetch_error=remote_job.issue_fetch_error,
-                        ):
-                            summary["jobs_updated"] += 1
+                                if prev_status != JobStatus.QC1_PASSED and job.status == JobStatus.QC1_PASSED:
+                                    qc1_passed_entered = True
 
                         # Hybrid A2 gate: chỉ tạo lượt QC2 khi job đã thật sự ở PENDING_QC2 (không tạo cho QC1_PASSED).
                         if not _is_workflow_frozen(job) and job.status == JobStatus.PENDING_QC2:
                             ensure_qc2_sample(job)
+
+                    if qc1_passed_entered and not batch_frozen:
+                        _maybe_notify_batch_ready_for_qc2(project, task, actor=actor)
 
                     if not batch_frozen:
                         # Các job của task này không còn xuất hiện trên CVAT → đánh dấu source_missing=True.
@@ -1242,6 +1271,7 @@ def import_task_jobs(batch: Batch, task_id: int, actor: Any, client: Any = None)
                 .filter(cvat_job_id__in=[cj.id for cj in cvat_jobs])
                 .order_by("id")
             }
+            qc1_passed_entered = False
             for cvat_job in cvat_jobs:
                 issue_snap, issue_err = prefetched_issues.get(cvat_job.id, (None, None))
                 job = locked_jobs.get(cvat_job.id)
@@ -1274,9 +1304,28 @@ def import_task_jobs(batch: Batch, task_id: int, actor: Any, client: Any = None)
                             issue_fetch_error=issue_err,
                         )
                         created += 1
+                        if job.status == JobStatus.QC1_PASSED:
+                            qc1_passed_entered = True
                     elif job.batch_id != locked_batch.id:
                         continue
-                    elif _apply_cvat_state(
+                    else:
+                        prev_status = job.status
+                        if _apply_cvat_state(
+                            job,
+                            cvat_job,
+                            actor,
+                            linked=linked,
+                            issue_snapshot=issue_snap,
+                            issue_fetch_error=issue_err,
+                        ):
+                            updated += 1
+                            if prev_status != JobStatus.QC1_PASSED and job.status == JobStatus.QC1_PASSED:
+                                qc1_passed_entered = True
+                elif job.batch_id != locked_batch.id:
+                    continue  # job thuộc batch khác → không động vào
+                else:
+                    prev_status = job.status
+                    if _apply_cvat_state(
                         job,
                         cvat_job,
                         actor,
@@ -1285,20 +1334,14 @@ def import_task_jobs(batch: Batch, task_id: int, actor: Any, client: Any = None)
                         issue_fetch_error=issue_err,
                     ):
                         updated += 1
-                elif job.batch_id != locked_batch.id:
-                    continue  # job thuộc batch khác → không động vào
-                elif _apply_cvat_state(
-                    job,
-                    cvat_job,
-                    actor,
-                    linked=linked,
-                    issue_snapshot=issue_snap,
-                    issue_fetch_error=issue_err,
-                ):
-                    updated += 1
+                        if prev_status != JobStatus.QC1_PASSED and job.status == JobStatus.QC1_PASSED:
+                            qc1_passed_entered = True
 
                 if not _is_workflow_frozen(job) and job.status == JobStatus.PENDING_QC2:
                     ensure_qc2_sample(job)
+
+            if qc1_passed_entered:
+                _maybe_notify_batch_ready_for_qc2(project, locked_batch, actor=actor)
 
         batch.cvat_task_id = locked_batch.cvat_task_id
         batch.source_missing = locked_batch.source_missing
@@ -1406,6 +1449,7 @@ def sync_batch(
                 .filter(cvat_job_id__isnull=False)
                 .order_by("id")
             )
+            qc1_passed_entered = False
             for job in jobs:
                 assert job.cvat_job_id is not None
                 cvat_job = by_id.get(job.cvat_job_id)
@@ -1418,6 +1462,7 @@ def sync_batch(
 
                 obj_count = fetched_counts.get(job.cvat_job_id) if count_objects else None
                 issue_snap, issue_err = prefetched_issues.get(job.cvat_job_id, (None, None))
+                prev_status = job.status
                 if _apply_cvat_state(
                     job,
                     cvat_job,
@@ -1428,9 +1473,14 @@ def sync_batch(
                     issue_fetch_error=issue_err,
                 ):
                     updated += 1
+                    if prev_status != JobStatus.QC1_PASSED and job.status == JobStatus.QC1_PASSED:
+                        qc1_passed_entered = True
 
                 if not _is_workflow_frozen(job) and job.status == JobStatus.PENDING_QC2:
                     ensure_qc2_sample(job)
+
+            if qc1_passed_entered:
+                _maybe_notify_batch_ready_for_qc2(project, locked_batch, actor=actor)
 
             locked_batch.source_missing = False
             locked_batch.last_synced_at = timezone.now()

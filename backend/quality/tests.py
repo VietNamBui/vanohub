@@ -663,6 +663,8 @@ class QualityBugFixTests(TestCase):
             400,
         )
         AuditSample.objects.filter(pk=sample.pk).update(auditor=None)
+        self.assertEqual(multi_client.post(self.f.url(f"audit-samples/{sample.id}/pass/"), {}, format="json").status_code, 404)
+        AuditSample.objects.filter(pk=sample.pk).update(auditor=multi)
         self.assertEqual(multi_client.post(self.f.url(f"audit-samples/{sample.id}/pass/"), {}, format="json").status_code, 403)
 
         # Ngược lại: người đã audit QC2 không được QC1 lại job đó sau rework
@@ -1056,3 +1058,26 @@ class P0RegressionTests(TestCase):
         self.assertEqual(r_foreign_qc2.status_code, 400)
         self.assertEqual(r_missing_qc2.status_code, 400)
         self.assertEqual(r_foreign_qc2.data, r_missing_qc2.data)
+
+    def test_non_pm_qc2_gets_404_on_unassigned_or_other_auditor_sample(self) -> None:
+        other_qc2 = make_user("qc2_other_iso", Role.QC2, project=self.f.project)
+        job = self.f.job(status=JobStatus.PENDING_QC2, annotator=self.f.ann1, frame_count=10)
+        sample = ensure_qc2_sample(job)
+        assert sample is not None
+
+        # Assigned to self.f.qc2 -> other_qc2 gets 404 on pass/reject
+        other_client = self.f.client(other_qc2)
+        self.assertEqual(other_client.post(self.f.url(f"audit-samples/{sample.id}/pass/"), {}, format="json").status_code, 404)
+        self.assertEqual(
+            other_client.post(
+                self.f.url(f"audit-samples/{sample.id}/reject/"),
+                {"errors": [{"category": self.f.category.id, "description": "x"}]},
+                format="json",
+            ).status_code,
+            404,
+        )
+
+        # Unassigned (auditor=None) -> non-PM QC2 gets 404 (no silent auto-claim), PM can still pass
+        AuditSample.objects.filter(pk=sample.pk).update(auditor=None)
+        self.assertEqual(other_client.post(self.f.url(f"audit-samples/{sample.id}/pass/"), {}, format="json").status_code, 404)
+        self.assertEqual(self.f.client(self.f.pm).post(self.f.url(f"audit-samples/{sample.id}/pass/"), {}, format="json").status_code, 200)

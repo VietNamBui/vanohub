@@ -14,7 +14,7 @@ from accounts.testing import ProjectFixture, make_user
 from cvat_integration import sync
 from cvat_integration.models import CvatAccount
 from jobs.models import DailyOutputRecord, Job, JobStatus
-from quality.models import Audit, AuditSample
+from quality.models import Audit, AuditSample, JobIssue, Severity
 from teams.models import Team
 
 from .models import (
@@ -1151,3 +1151,127 @@ class Phase1HardeningAndP2Tests(TestCase):
         self.assertEqual(r_f_del.status_code, 400)
         self.assertEqual(r_m_del.status_code, 400)
         self.assertEqual(r_f_del.data, r_m_del.data)
+
+    def test_batch_update_rejects_locked_or_delivered_batch_and_locked_dataset(self):
+        self.f.batch.status = DataStatus.LOCKED
+        self.f.batch.save(update_fields=["status"])
+        res_locked = self.pm.patch(
+            self.f.url(f"batches/{self.f.batch.id}/"),
+            {"deadline": "2026-12-10T00:00:00Z"},
+            format="json",
+        )
+        self.assertEqual(res_locked.status_code, 400)
+
+        self.f.batch.status = DataStatus.DELIVERED
+        self.f.batch.save(update_fields=["status"])
+        res_delivered = self.pm.patch(
+            self.f.url(f"batches/{self.f.batch.id}/"),
+            {"deadline": "2026-12-10T00:00:00Z"},
+            format="json",
+        )
+        self.assertEqual(res_delivered.status_code, 400)
+
+        self.f.batch.status = DataStatus.ACTIVE
+        self.f.batch.save(update_fields=["status"])
+        self.f.dataset.status = DataStatus.LOCKED
+        self.f.dataset.save(update_fields=["status"])
+        res_ds_locked = self.pm.patch(
+            self.f.url(f"batches/{self.f.batch.id}/"),
+            {"deadline": "2026-12-10T00:00:00Z"},
+            format="json",
+        )
+        self.assertEqual(res_ds_locked.status_code, 400)
+
+    def test_batch_ready_for_qc2_confirm_reflects_issue_gate(self):
+        self.f.project.issue_gate_enabled = True
+        self.f.project.save(update_fields=["issue_gate_enabled"])
+        job = self.f.job(status=JobStatus.QC1_PASSED)
+
+        issue = JobIssue.objects.create(
+            project=self.f.project,
+            job=job,
+            cvat_issue_id=9001,
+            frame_number=0,
+            defect_code="LBL-01",
+            severity=Severity.MAJOR,
+            source=JobIssue.Source.MANUAL,
+            author_stage=JobIssue.AuthorStage.QC1,
+            status=JobIssue.Status.OPEN,
+            authority_status=JobIssue.AuthorityStatus.VALID,
+        )
+
+        res_blocked = self.pm.get(self.f.url(f"batches/{self.f.batch.id}/"))
+        self.assertEqual(res_blocked.status_code, 200)
+        self.assertFalse(res_blocked.data["ready_for_qc2_confirm"])
+
+        res_list_blocked = self.pm.get(self.f.url("batches/"))
+        self.assertEqual(res_list_blocked.status_code, 200)
+        row = next(b for b in res_list_blocked.data if b["id"] == self.f.batch.id)
+        self.assertFalse(row["ready_for_qc2_confirm"])
+
+        issue.status = JobIssue.Status.RESOLVED
+        issue.save(update_fields=["status"])
+
+        res_ready = self.pm.get(self.f.url(f"batches/{self.f.batch.id}/"))
+        self.assertEqual(res_ready.status_code, 200)
+        self.assertTrue(res_ready.data["ready_for_qc2_confirm"])
+
+    def test_dataset_retrieve_update_labels_and_batch_lock_note(self):
+        # Retrieve & overflow PK -> 404
+        res_get = self.pm.get(self.f.url(f"datasets/{self.f.dataset.id}/"))
+        self.assertEqual(res_get.status_code, 200)
+        self.assertEqual(res_get.data["id"], self.f.dataset.id)
+        self.assertEqual(self.pm.get(self.f.url("datasets/9999999999999/")).status_code, 404)
+
+        # Partial update active dataset records ActivityLog
+        res_patch = self.pm.patch(
+            self.f.url(f"datasets/{self.f.dataset.id}/"),
+            {"description": "Dataset lidar 2026"},
+            format="json",
+        )
+        self.assertEqual(res_patch.status_code, 200, res_patch.data)
+        self.assertEqual(res_patch.data["description"], "Dataset lidar 2026")
+        self.assertTrue(
+            ActivityLog.objects.filter(
+                project=self.f.project,
+                action="dataset.update",
+                after={"description": "Dataset lidar 2026"},
+            ).exists()
+        )
+
+        # Labels endpoint when unlinked vs linked
+        res_unlinked = self.pm.get(self.f.url(f"datasets/{self.f.dataset.id}/labels/"))
+        self.assertEqual(res_unlinked.status_code, 200)
+        self.assertEqual(res_unlinked.data["labels"], [])
+
+        self.f.dataset.cvat_project_id = 321
+        self.f.dataset.save(update_fields=["cvat_project_id"])
+        with patch("projects.views.dataset_labels", return_value=[{"id": 1, "name": "Car", "color": "#ff0000"}]):
+            res_labels = self.pm.get(self.f.url(f"datasets/{self.f.dataset.id}/labels/"))
+        self.assertEqual(res_labels.status_code, 200)
+        self.assertEqual(res_labels.data["labels"], [{"id": 1, "name": "Car", "color": "#ff0000"}])
+
+        # Locked dataset rejects update
+        self.f.dataset.status = DataStatus.LOCKED
+        self.f.dataset.save(update_fields=["status"])
+        res_locked = self.pm.patch(
+            self.f.url(f"datasets/{self.f.dataset.id}/"),
+            {"description": "Should fail"},
+            format="json",
+        )
+        self.assertEqual(res_locked.status_code, 400)
+
+        # Batch lock/unlock records note in ActivityLog
+        res_lock = self.pm.post(
+            self.f.url(f"batches/{self.f.batch.id}/lock/"),
+            {"note": "Tạm dừng kiểm tra dữ liệu"},
+            format="json",
+        )
+        self.assertEqual(res_lock.status_code, 200)
+        self.assertTrue(
+            ActivityLog.objects.filter(
+                project=self.f.project,
+                action="batch.lock",
+                note="Tạm dừng kiểm tra dữ liệu",
+            ).exists()
+        )
