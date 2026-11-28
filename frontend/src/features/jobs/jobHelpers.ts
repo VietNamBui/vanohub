@@ -47,6 +47,8 @@ export function parseJobUrlFilters(
     overdue: sp.get('overdue') === '1',
     due_soon: sp.get('due_soon') === '1',
     unassigned: sp.get('unassigned') === '1',
+    locked: sp.get('locked') === '1',
+    issue: parsePositiveInt(sp.get('issue')),
   }
 }
 
@@ -65,6 +67,8 @@ export function serializeJobUrlFilters(
   if (filters.overdue) params.set('overdue', '1')
   if (filters.due_soon) params.set('due_soon', '1')
   if (filters.unassigned) params.set('unassigned', '1')
+  if (filters.locked) params.set('locked', '1')
+  if (filters.issue) params.set('issue', String(filters.issue))
   return params
 }
 
@@ -119,6 +123,20 @@ export function getBulkDeadlineBlockReason(
   return null
 }
 
+/** Lý do không thể chuyển task hàng loạt (chỉ hỗ trợ job không gắn CVAT, chưa khoá/bàn giao). */
+export function getBulkMoveBatchBlockReason(
+  canManage: boolean,
+  jobs: Pick<Job, 'is_locked' | 'status' | 'cvat_job_id'>[],
+): string | null {
+  if (!canManage) return 'Bạn không có quyền chuyển task'
+  for (const job of jobs) {
+    if (job.cvat_job_id != null) return 'Không thể chuyển task cho job đang gắn CVAT'
+    if (job.is_locked) return 'Trong vùng chọn có job đang bị khoá'
+    if (job.status === 'delivered') return 'Trong vùng chọn có job đã bàn giao'
+  }
+  return null
+}
+
 /** Lý do không sửa được người kiểm QC2 của mẫu audit đang mở. */
 export function getQc2AssignBlockReason(
   canManageAudits: boolean,
@@ -154,13 +172,14 @@ export function splitActiveErrors(
   return { active, history }
 }
 
-/** Kiểm tra bản ghi lỗi có metadata cấu trúc (frame, object, thiếu đối tượng, verdict, void) hay không. */
+/** Kiểm tra bản ghi lỗi có metadata cấu trúc (frame, object, thiếu đối tượng, verdict, void, issue CVAT) hay không. */
 export function hasStructuredErrorMeta(
-  err: Pick<JobErrorBrief, 'frame_number' | 'cvat_object_id' | 'is_missing_object' | 'verdict' | 'is_voided'>,
+  err: Pick<JobErrorBrief, 'frame_number' | 'cvat_object_id' | 'is_missing_object' | 'verdict' | 'is_voided' | 'cvat_issue_id'>,
 ): boolean {
   return (
     err.frame_number != null ||
     err.cvat_object_id != null ||
+    err.cvat_issue_id != null ||
     Boolean(err.is_missing_object) ||
     err.verdict === 'edge' ||
     err.verdict === 'fail' ||

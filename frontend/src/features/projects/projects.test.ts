@@ -116,12 +116,13 @@ describe('projects helpers', () => {
     expect(sorted.map((item) => item.id)).toEqual(['4', '3', '2', '1'])
   })
 
-  it('validates all 9 ProjectSettings fields and formats decimal thresholds', () => {
+  it('validates all ProjectSettings fields including issue_gate_enabled and formats decimal thresholds', () => {
     const ok = validateProjectSettingsDraft({
       max_rework_rounds: 3,
       escalation_policy: 'warn_only',
       annotator_wip_limit: 5,
       sampling_rate: 25,
+      issue_gate_enabled: true,
       quality_cl_threshold: '95.5',
       defect_rate_threshold: '',
       kpi_annotation_target: '200',
@@ -136,6 +137,7 @@ describe('projects helpers', () => {
         escalation_policy: 'warn_only',
         annotator_wip_limit: 5,
         sampling_rate: 25,
+        issue_gate_enabled: true,
         quality_cl_threshold: '95.50',
         defect_rate_threshold: null,
         kpi_annotation_target: 200,
@@ -149,6 +151,7 @@ describe('projects helpers', () => {
       escalation_policy: 'block',
       annotator_wip_limit: 51,
       sampling_rate: 101,
+      issue_gate_enabled: false,
       quality_cl_threshold: '120',
       defect_rate_threshold: 'abc',
       kpi_annotation_target: '0',

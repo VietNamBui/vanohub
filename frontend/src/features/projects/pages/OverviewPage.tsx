@@ -119,10 +119,15 @@ export default function OverviewPage() {
           {(() => {
             const decisions = data.pending_decisions
             const batchesReady = decisions.batches_ready_for_qc2_confirm ?? decisions.batches_ready_for_qc2 ?? 0
+            const pendingIssueRulings = decisions.pending_issue_rulings ?? 0
             const escalatedJobs = decisions.escalated_jobs ?? decisions.escalated ?? 0
             const totalDecisions =
               decisions.total ??
-              batchesReady + decisions.pending_qc2_samples + decisions.pending_requests + escalatedJobs
+              batchesReady +
+                decisions.pending_qc2_samples +
+                decisions.pending_requests +
+                pendingIssueRulings +
+                escalatedJobs
             const decisionRows = [
               {
                 key: 'qc2-confirm',
@@ -148,6 +153,18 @@ export default function OverviewPage() {
                 action: 'Xử lý yêu cầu',
                 tone: decisions.pending_requests > 0 ? ('warning' as const) : ('gray' as const),
               },
+              ...(decisions.pending_issue_rulings !== undefined
+                ? [
+                    {
+                      key: 'issue-rulings',
+                      label: 'Issue chờ PM phán quyết',
+                      count: pendingIssueRulings,
+                      to: '../jobs',
+                      action: 'Mở Jobs',
+                      tone: pendingIssueRulings > 0 ? ('warning' as const) : ('gray' as const),
+                    },
+                  ]
+                : []),
               {
                 key: 'escalated',
                 label: 'Job bị Escalated',
@@ -172,7 +189,11 @@ export default function OverviewPage() {
                   </span>
                 }
               >
-                <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4">
+                <div
+                  className={`grid grid-cols-1 gap-3 sm:grid-cols-2 ${
+                    decisionRows.length >= 5 ? 'lg:grid-cols-5' : 'lg:grid-cols-4'
+                  }`}
+                >
                   {decisionRows.map((item) => (
                     <Link
                       key={item.key}

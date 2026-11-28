@@ -4,6 +4,7 @@ import { Button } from '@/components/base/buttons/button'
 import { Input } from '@/components/base/input/input'
 import { InputNumber } from '@/components/base/input/input-number'
 import { Select } from '@/components/base/select/select'
+import { Toggle } from '@/components/base/toggle/toggle'
 import { getErrorMessage } from '../../../shared/api/errors'
 import PageState from '../../../shared/components/ui/PageState'
 import ProjectBreadcrumb from '../../../shared/components/ui/ProjectBreadcrumb'
@@ -27,6 +28,7 @@ function toDraft(settings: ProjectSettings): ProjectSettingsDraft {
     escalation_policy: settings.escalation_policy,
     annotator_wip_limit: settings.annotator_wip_limit,
     sampling_rate: settings.sampling_rate,
+    issue_gate_enabled: Boolean(settings.issue_gate_enabled),
     quality_cl_threshold: settings.quality_cl_threshold ?? '',
     defect_rate_threshold: settings.defect_rate_threshold ?? '',
     kpi_annotation_target: settings.kpi_annotation_target != null ? String(settings.kpi_annotation_target) : '',
@@ -49,7 +51,7 @@ export default function ProjectSettingsPage() {
   }
 
   const formKey = data
-    ? `${projectId}:${version}:${data.max_rework_rounds}:${data.escalation_policy}:${data.annotator_wip_limit}:${data.sampling_rate}:${data.quality_cl_threshold ?? ''}:${data.defect_rate_threshold ?? ''}:${data.kpi_annotation_target ?? ''}:${data.kpi_qc1_target ?? ''}:${data.kpi_qc2_target ?? ''}`
+    ? `${projectId}:${version}:${data.max_rework_rounds}:${data.escalation_policy}:${data.annotator_wip_limit}:${data.sampling_rate}:${Boolean(data.issue_gate_enabled)}:${data.quality_cl_threshold ?? ''}:${data.defect_rate_threshold ?? ''}:${data.kpi_annotation_target ?? ''}:${data.kpi_qc1_target ?? ''}:${data.kpi_qc2_target ?? ''}`
     : `empty:${projectId}`
 
   return (
@@ -180,6 +182,16 @@ function SettingsForm({
               (showErrors && validation.errors.annotator_wip_limit) ||
               'Số job tối đa mỗi Annotator được giữ đồng thời (1–50).'
             }
+          />
+        </div>
+
+        <div className="mt-5 border-t border-secondary pt-5">
+          <Toggle
+            size="sm"
+            isSelected={draft.issue_gate_enabled}
+            onChange={(checked) => setDraft((prev) => ({ ...prev, issue_gate_enabled: checked }))}
+            label="Bắt buộc đóng issue CVAT trước khi nộp / duyệt"
+            hint="Chặn Annotator nộp bài khi còn issue mức Nặng/Nghiêm trọng (hoặc đã có phán quyết PM) đang mở, và chặn QC1/QC2 duyệt đạt hoặc bàn giao khi còn issue/yêu cầu làm rõ chưa xử lý."
           />
         </div>
       </SectionCard>

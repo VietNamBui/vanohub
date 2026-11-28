@@ -24,8 +24,10 @@ import {
 import type { JobDetail, JobStatus, ReworkScope } from '../../jobs/types'
 import { useProject } from '../../projects/projectContext'
 import { getQc1Job, listErrorCategories, passQc1Job, rejectQc1Job, startQc1Job } from '../api'
+import JobIssuesPanel from '../components/JobIssuesPanel'
 import { SEVERITY_LABELS } from '../constants'
-import type { ErrorInput, ErrorVerdict, Severity } from '../types'
+import { buildRejectPrefillFromIssue } from '../issueHelpers'
+import type { ErrorInput, ErrorVerdict, JobIssue, Severity } from '../types'
 
 interface Props {
   projectId: number
@@ -36,6 +38,8 @@ interface Props {
 
 type ErrorRow = {
   key: number
+  job_issue?: number | null
+  cvat_issue_id?: number | null
   category: number | null
   severity: Severity | null
   verdict: ErrorVerdict
@@ -239,6 +243,7 @@ export default function Qc1ReviewPanel({ projectId, jobId, version, onDone }: Pr
 }
 
 function Qc1ReviewForm({ projectId, job, onDone }: { projectId: number; job: JobDetail; onDone: () => void }) {
+  const { can } = useProject()
   const { run, pending } = useAction()
   const { data: categories } = useRequest(`error-categories:${projectId}:qc1`, () => listErrorCategories(projectId, 'qc1'))
   const [rows, setRows] = useState<ErrorRow[]>([])
@@ -248,6 +253,28 @@ function Qc1ReviewForm({ projectId, job, onDone }: { projectId: number; job: Job
   const nextKey = () => Math.max(0, ...rows.map((r) => r.key)) + 1
   const patch = (key: number, change: Partial<ErrorRow>) =>
     setRows((rs) => rs.map((r) => (r.key === key ? { ...r, ...change } : r)))
+
+  const selectedIssueIds = rows.map((r) => r.job_issue).filter((id): id is number => id != null)
+
+  function handleSelectIssueForReject(issue: JobIssue) {
+    const prefill = buildRejectPrefillFromIssue(issue, categories ?? [])
+    setRows((rs) => [
+      ...rs,
+      {
+        key: Math.max(0, ...rs.map((r) => r.key)) + 1,
+        job_issue: prefill.job_issue,
+        cvat_issue_id: prefill.cvat_issue_id,
+        category: prefill.category,
+        severity: prefill.severity,
+        verdict: prefill.verdict,
+        is_missing_object: prefill.is_missing_object,
+        frame_number: prefill.frame_number,
+        cvat_object_id: prefill.cvat_object_id,
+        location: prefill.location,
+        description: prefill.description,
+      },
+    ])
+  }
 
   async function start() {
     if (await run(() => startQc1Job(projectId, job.id), `Đã nhận kiểm tra ${job.name}`)) onDone()
@@ -269,6 +296,7 @@ function Qc1ReviewForm({ projectId, job, onDone }: { projectId: number; job: Job
       if (!frame.valid || !objId.valid) return
       errors.push({
         category: r.category,
+        ...(r.job_issue != null ? { job_issue: r.job_issue } : {}),
         severity: r.severity ?? undefined,
         verdict: r.is_missing_object ? 'fail' : r.verdict,
         is_missing_object: r.is_missing_object,
@@ -291,6 +319,19 @@ function Qc1ReviewForm({ projectId, job, onDone }: { projectId: number; job: Job
 
   return (
     <div className="flex flex-col gap-4 border-t border-secondary pt-4">
+      <JobIssuesPanel
+        projectId={projectId}
+        jobId={job.id}
+        jobStatus={job.status}
+        cvatJobId={job.cvat_job_id}
+        isLocked={job.is_locked}
+        mode="qc1"
+        canManageJobs={can('manage_jobs')}
+        selectedIssueIds={selectedIssueIds}
+        onSelectForReject={handleSelectIssueForReject}
+        onChanged={onDone}
+      />
+
       {job.status === 'pending_qc1' && (
         <div className="flex items-center justify-between gap-3 rounded-xl bg-secondary p-3.5">
           <p className="text-sm text-secondary">
@@ -313,7 +354,14 @@ function Qc1ReviewForm({ projectId, job, onDone }: { projectId: number; job: Job
         return (
           <div key={row.key} className="flex flex-col gap-3 rounded-xl bg-secondary p-3.5 ring-1 ring-secondary ring-inset">
             <div className="flex items-center justify-between">
-              <span className="text-xs font-semibold text-tertiary">Lỗi {index + 1}</span>
+              <div className="flex items-center gap-1.5">
+                <span className="text-xs font-semibold text-tertiary">Lỗi {index + 1}</span>
+                {row.cvat_issue_id != null && (
+                  <Badge type="pill-color" size="sm" color="purple">
+                    Issue #{row.cvat_issue_id}
+                  </Badge>
+                )}
+              </div>
               <Button
                 size="xs"
                 color="tertiary-destructive"
@@ -331,7 +379,11 @@ function Qc1ReviewForm({ projectId, job, onDone }: { projectId: number; job: Job
                 placeholder="Chọn loại lỗi"
                 isInvalid={showErrors && row.category == null}
                 hint={showErrors && row.category == null ? 'Chọn loại lỗi' : undefined}
-                items={(categories ?? []).map((c) => ({ id: c.id, label: c.name, supportingText: SEVERITY_LABELS[c.severity] }))}
+                items={(categories ?? []).map((c) => ({
+                  id: c.id,
+                  label: c.code ? `${c.code} · ${c.name}` : c.name,
+                  supportingText: [c.primary_category, SEVERITY_LABELS[c.severity]].filter(Boolean).join(' · '),
+                }))}
                 selectedKey={row.category}
                 onSelectionChange={(k) => {
                   const category = categories?.find((c) => c.id === Number(k))

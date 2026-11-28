@@ -6,7 +6,7 @@ import { listJobs, quickSearchAnnotator } from '../features/jobs/api'
 import { JOB_STATUS_LABELS } from '../features/jobs/constants'
 import type { JobStatus } from '../features/jobs/types'
 import type { ProjectSummary } from '../features/projects/types'
-import { listQc1Jobs } from '../features/quality/api'
+import { listAuditSamples, listQc1Jobs } from '../features/quality/api'
 import type { Capability } from '../shared/types/capabilities'
 import type { Role } from '../shared/types/roles'
 import { cx } from '@/utils/cx'
@@ -102,11 +102,12 @@ function QuickSearchPalette({
     return new Set<Capability>()
   }, [projectId, projectCapabilities, currentProject])
 
-  const searchMode = useMemo<'annotate' | 'jobs' | 'qc1' | 'none'>(() => {
+  const searchMode = useMemo<'annotate' | 'jobs' | 'qc1' | 'qc2' | 'none'>(() => {
     if (projectId == null) return 'none'
-    if (capSet.has('annotate_jobs')) return 'annotate'
     if (capSet.has('view_jobs')) return 'jobs'
+    if (capSet.has('annotate_jobs')) return 'annotate'
     if (capSet.has('perform_qc1')) return 'qc1'
+    if (capSet.has('perform_audit')) return 'qc2'
     return 'none'
   }, [projectId, capSet])
 
@@ -216,7 +217,31 @@ function QuickSearchPalette({
                 status: job.status,
                 statusLabel: job.status_label || JOB_STATUS_LABELS[job.status],
                 meta: job.batch_name,
-                path: `/projects/${projectId}/qc1/work`,
+                path: `/projects/${projectId}/qc1/work?job=${job.id}`,
+              })),
+            )
+          }
+        } else if (searchMode === 'qc2') {
+          const samples = await listAuditSamples(projectId, { open: true })
+          const needle = trimmed.toLowerCase()
+          const filtered = samples
+            .filter(
+              (s) =>
+                !needle ||
+                [s.job.name, s.job.batch_name, String(s.job.cvat_job_id ?? ''), String(s.job.id)].some((v) =>
+                  v.toLowerCase().includes(needle),
+                ),
+            )
+            .slice(0, 8)
+          if (!cancelled) {
+            setJobs(
+              filtered.map((s) => ({
+                id: s.id,
+                name: s.job.name,
+                status: s.job.status,
+                statusLabel: JOB_STATUS_LABELS[s.job.status] ?? s.job.status,
+                meta: `${s.job.batch_name} · ${s.frames.length} frame`,
+                path: `/projects/${projectId}/qc2/work`,
               })),
             )
           }

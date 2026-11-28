@@ -15,12 +15,15 @@ import { useRequest } from '../../../shared/hooks/useRequest'
 import { formatDateTime } from '../../../shared/utils/format'
 import MemberSelect from '../../projects/components/MemberSelect'
 import { useProject } from '../../projects/projectContext'
+import JobIssuesPanel from '../../quality/components/JobIssuesPanel'
 import { assignJob, getJob, resolveEscalation, setJobDeadline, setJobLock } from '../api'
 import { ACTION_LABELS } from '../constants'
 import { describeTimelineEvent, getJobLockReason, timelineDotColor } from '../jobHelpers'
+import type { JobErrorBrief } from '../types'
 import AssignModal from './AssignModal'
 import DeadlineModal from './DeadlineModal'
 import JobStatusBadge from './JobStatusBadge'
+import ReviewErrorChips from './ReviewErrorChips'
 
 interface Props {
   jobId: number | null
@@ -223,6 +226,19 @@ export default function JobDetailDrawer({ jobId, onClose, onChanged }: Props) {
           </dl>
 
           <section>
+            <JobIssuesPanel
+              projectId={projectId}
+              jobId={job.id}
+              jobStatus={job.status}
+              cvatJobId={job.cvat_job_id}
+              isLocked={job.is_locked}
+              mode="pm"
+              canManageJobs={canManage}
+              onChanged={refresh}
+            />
+          </section>
+
+          <section>
             <h3 className="mb-3 text-sm font-semibold text-primary">Dòng thời gian</h3>
             {job.timeline.length === 0 ? (
               <div className="rounded-xl border border-secondary bg-primary">
@@ -267,9 +283,12 @@ export default function JobDetailDrawer({ jobId, onClose, onChanged }: Props) {
                   <Table.Head id="description" label="Mô tả" />
                 </Table.Header>
                 <Table.Body items={job.errors} renderEmptyState={() => <EmptyRow text="Chưa có lỗi" />}>
-                  {(err) => {
+                  {(err: JobErrorBrief) => {
                     const hasStructured =
-                      err.frame_number != null || err.cvat_object_id != null || Boolean(err.is_missing_object)
+                      err.frame_number != null ||
+                      err.cvat_object_id != null ||
+                      err.cvat_issue_id != null ||
+                      Boolean(err.is_missing_object)
                     return (
                       <Table.Row id={err.id} className={err.is_voided ? 'opacity-60' : undefined}>
                         <Table.Cell>
@@ -279,55 +298,18 @@ export default function JobDetailDrawer({ jobId, onClose, onChanged }: Props) {
                         </Table.Cell>
                         <Table.Cell className="tabular-nums">{err.rework_round}</Table.Cell>
                         <Table.Cell>
-                          <div className="flex flex-col gap-1">
-                            <span className={err.is_voided ? 'text-tertiary line-through' : 'font-medium text-primary'}>
-                              {err.category}
-                            </span>
-                            <div className="flex flex-wrap gap-1">
-                              {err.verdict === 'edge' && (
-                                <Badge type="pill-color" size="sm" color="warning">
-                                  Cận biên
-                                </Badge>
-                              )}
-                              {err.verdict === 'fail' && (
-                                <Badge type="pill-color" size="sm" color="error">
-                                  Lỗi
-                                </Badge>
-                              )}
-                              {err.is_voided && (
-                                <Badge type="pill-color" size="sm" color="gray">
-                                  Đã huỷ lỗi
-                                </Badge>
-                              )}
-                            </div>
-                          </div>
+                          <span className={err.is_voided ? 'text-tertiary line-through' : 'font-medium text-primary'}>
+                            {err.category}
+                          </span>
                         </Table.Cell>
                         <Table.Cell>
                           <div className="flex flex-col gap-1">
-                            {hasStructured && (
-                              <div className="flex flex-wrap gap-1">
-                                {err.frame_number != null && (
-                                  <Badge type="pill-color" size="sm" color="gray">
-                                    Frame #{err.frame_number}
-                                  </Badge>
-                                )}
-                                {err.cvat_object_id != null && (
-                                  <Badge type="pill-color" size="sm" color="blue">
-                                    Object #{err.cvat_object_id}
-                                  </Badge>
-                                )}
-                                {err.is_missing_object && (
-                                  <Badge type="pill-color" size="sm" color="orange">
-                                    Thiếu đối tượng
-                                  </Badge>
-                                )}
-                              </div>
-                            )}
+                            <ReviewErrorChips err={err} />
                             {err.location ? (
                               <span className={err.is_voided ? 'text-xs text-tertiary line-through' : 'text-xs text-secondary'}>
                                 {err.location}
                               </span>
-                            ) : !hasStructured ? (
+                            ) : !hasStructured && err.verdict !== 'edge' && err.verdict !== 'fail' && !err.is_voided ? (
                               <span className="text-xs text-tertiary">—</span>
                             ) : null}
                           </div>

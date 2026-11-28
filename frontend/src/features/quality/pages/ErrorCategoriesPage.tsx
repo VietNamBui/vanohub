@@ -2,7 +2,6 @@ import { Edit05, Plus, SearchLg } from '@untitledui/icons'
 import { useState } from 'react'
 import { Table } from '@/components/application/table/table'
 import { Badge } from '@/components/base/badges/badges'
-import type { BadgeColors } from '@/components/base/badges/badge-types'
 import { Button } from '@/components/base/buttons/button'
 import { Input } from '@/components/base/input/input'
 import { Select } from '@/components/base/select/select'
@@ -17,8 +16,8 @@ import { useAction } from '../../../shared/hooks/useAction'
 import { useRequest } from '../../../shared/hooks/useRequest'
 import { useProject } from '../../projects/projectContext'
 import { createErrorCategory, listErrorCategories, updateErrorCategory } from '../api'
-import { SEVERITY_LABELS } from '../constants'
-import type { ErrorCategory, Severity } from '../types'
+import { PRIMARY_CATEGORY_LABELS, SEVERITY_BADGE_COLORS, SEVERITY_LABELS } from '../constants'
+import type { ErrorCategory, ErrorCategoryInput, PrimaryCategory, Severity } from '../types'
 
 const APPLIES_LABELS: Record<ErrorCategory['applies_to'], string> = {
   qc1: 'QC1',
@@ -26,14 +25,11 @@ const APPLIES_LABELS: Record<ErrorCategory['applies_to'], string> = {
   both: 'QC1 & QC2',
 }
 
-const SEVERITY_BADGE_COLORS: Record<Severity, BadgeColors> = {
-  minor: 'gray',
-  major: 'orange',
-  critical: 'error',
-}
-
 const SEVERITY_ITEMS = (Object.entries(SEVERITY_LABELS) as [Severity, string][]).map(([id, label]) => ({ id, label }))
 const APPLIES_ITEMS = (Object.entries(APPLIES_LABELS) as [ErrorCategory['applies_to'], string][]).map(([id, label]) => ({ id, label }))
+const PRIMARY_CATEGORY_ITEMS = (Object.entries(PRIMARY_CATEGORY_LABELS) as [PrimaryCategory, string][]).map(
+  ([id, label]) => ({ id: id || '__none__', label }),
+)
 
 type DialogState = { mode: 'create' } | { mode: 'edit'; category: ErrorCategory } | null
 
@@ -55,7 +51,12 @@ export default function ErrorCategoriesPage() {
   const rows = (data ?? []).filter((c) => {
     if (stageFilter !== 'all' && c.applies_to !== stageFilter) return false
     if (!keyword) return true
-    return c.name.toLowerCase().includes(keyword) || c.description.toLowerCase().includes(keyword)
+    return (
+      c.name.toLowerCase().includes(keyword) ||
+      c.code.toLowerCase().includes(keyword) ||
+      c.primary_category.toLowerCase().includes(keyword) ||
+      c.description.toLowerCase().includes(keyword)
+    )
   })
 
   async function toggleActive(category: ErrorCategory, isActive: boolean) {
@@ -99,7 +100,7 @@ export default function ErrorCategoriesPage() {
             size="sm"
             icon={SearchLg}
             aria-label="Tìm loại lỗi"
-            placeholder="Tìm theo tên hoặc mô tả…"
+            placeholder="Tìm theo mã, nhóm chính, tên hoặc mô tả…"
             value={search}
             onChange={setSearch}
           />
@@ -110,6 +111,8 @@ export default function ErrorCategoriesPage() {
         ) : (
           <Table aria-label="Danh mục lỗi" size="sm">
             <Table.Header>
+              <Table.Head id="code" label="Mã" />
+              <Table.Head id="primary_category" label="Nhóm chính" />
               <Table.Head id="name" label="Tên lỗi" isRowHeader />
               <Table.Head id="description" label="Mô tả" />
               <Table.Head id="severity" label="Mức độ" />
@@ -123,6 +126,24 @@ export default function ErrorCategoriesPage() {
             >
               {(c) => (
                 <Table.Row id={c.id}>
+                  <Table.Cell className="whitespace-nowrap">
+                    {c.code ? (
+                      <Badge type="color" size="sm" color="brand">
+                        {c.code}
+                      </Badge>
+                    ) : (
+                      <span className="text-quaternary">—</span>
+                    )}
+                  </Table.Cell>
+                  <Table.Cell className="whitespace-nowrap">
+                    {c.primary_category ? (
+                      <Badge type="pill-color" size="sm" color="blue">
+                        {c.primary_category}
+                      </Badge>
+                    ) : (
+                      <span className="text-xs text-quaternary">Chưa phân nhóm</span>
+                    )}
+                  </Table.Cell>
                   <Table.Cell className="font-medium text-primary">{c.name}</Table.Cell>
                   <Table.Cell className="max-w-sm truncate" title={c.description || undefined}>
                     {c.description || <span className="text-quaternary">—</span>}
@@ -173,6 +194,7 @@ export default function ErrorCategoriesPage() {
 
       {dialog && (
         <ErrorCategoryDialog
+          key={dialog.mode === 'edit' ? `edit:${dialog.category.id}` : 'create'}
           projectId={projectId}
           category={dialog.mode === 'edit' ? dialog.category : undefined}
           onClose={() => setDialog(null)}
@@ -197,21 +219,34 @@ function ErrorCategoryDialog({
   onClose: () => void
   onDone: () => void
 }) {
+  const [code, setCode] = useState(category?.code ?? '')
+  const [primaryCategory, setPrimaryCategory] = useState<PrimaryCategory>(category?.primary_category ?? '')
   const [name, setName] = useState(category?.name ?? '')
   const [description, setDescription] = useState(category?.description ?? '')
   const [severity, setSeverity] = useState<Severity>(category?.severity ?? 'minor')
   const [appliesTo, setAppliesTo] = useState<ErrorCategory['applies_to']>(category?.applies_to ?? 'both')
   const [isActive, setIsActive] = useState(category?.is_active ?? true)
+  const [codeError, setCodeError] = useState<string | null>(null)
   const [nameError, setNameError] = useState<string | null>(null)
   const { run, pending } = useAction()
 
   async function submit() {
+    const trimmedCode = code.trim()
     const trimmed = name.trim()
+    let hasErr = false
+    if (trimmedCode.length > 32) {
+      setCodeError('Mã lỗi tối đa 32 ký tự.')
+      hasErr = true
+    }
     if (!trimmed) {
       setNameError('Vui lòng nhập tên lỗi.')
-      return
+      hasErr = true
     }
-    const payload: Partial<ErrorCategory> = {
+    if (hasErr) return
+
+    const payload: ErrorCategoryInput = {
+      code: trimmedCode,
+      primary_category: primaryCategory,
       name: trimmed,
       description: description.trim(),
       severity,
@@ -234,6 +269,30 @@ function ErrorCategoryDialog({
       onSubmit={submit}
       pending={pending}
     >
+      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+        <Input
+          label="Mã lỗi"
+          value={code}
+          onChange={(v) => {
+            setCode(v)
+            if (codeError) setCodeError(null)
+          }}
+          isInvalid={!!codeError}
+          hint={codeError ?? 'Tối đa 32 ký tự, duy nhất trong organization (tuỳ chọn).'}
+          placeholder="VD: E1 hoặc EXI-MISS"
+        />
+        <Select
+          label="Nhóm lỗi chính"
+          items={PRIMARY_CATEGORY_ITEMS}
+          selectedKey={primaryCategory || '__none__'}
+          onSelectionChange={(k) => {
+            const key = String(k)
+            setPrimaryCategory(key === '__none__' ? '' : (key as PrimaryCategory))
+          }}
+        >
+          {(item) => <Select.Item id={item.id} label={item.label} />}
+        </Select>
+      </div>
       <Input
         label="Tên lỗi"
         isRequired

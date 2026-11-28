@@ -12,9 +12,12 @@ import { useRequest } from '../../../shared/hooks/useRequest'
 import { cvatFrameUrl } from '../../../shared/utils/cvat'
 import { formatDateTime } from '../../../shared/utils/format'
 import type { ReworkScope } from '../../jobs/types'
+import { useProject } from '../../projects/projectContext'
 import { listErrorCategories, passSample, rejectSample } from '../api'
+import JobIssuesPanel from '../components/JobIssuesPanel'
 import { RESULT_LABELS, SEVERITY_LABELS } from '../constants'
-import type { AuditSample, ErrorInput, ErrorVerdict, Severity } from '../types'
+import { buildRejectPrefillFromIssue } from '../issueHelpers'
+import type { AuditSample, ErrorInput, ErrorVerdict, JobIssue, Severity } from '../types'
 import { cx } from '@/utils/cx'
 
 interface Props {
@@ -27,6 +30,8 @@ interface Props {
 
 type ErrorRow = {
   key: number
+  job_issue?: number | null
+  cvat_issue_id?: number | null
   category: number | null
   severity: Severity | null
   verdict: ErrorVerdict
@@ -97,6 +102,7 @@ export default function ReviewPanel({ projectId, sample, conflict, onDone }: Pro
 }
 
 function ReviewForm({ projectId, sample, onDone }: { projectId: number; sample: AuditSample; onDone: () => void }) {
+  const { can } = useProject()
   const { run, pending } = useAction()
   const { data: categories } = useRequest(`error-categories:${projectId}:qc2`, () => listErrorCategories(projectId, 'qc2'))
   const [rows, setRows] = useState<ErrorRow[]>([])
@@ -105,6 +111,28 @@ function ReviewForm({ projectId, sample, onDone }: { projectId: number; sample: 
   const [showErrors, setShowErrors] = useState(false)
   const nextKey = () => Math.max(0, ...rows.map((r) => r.key)) + 1
   const patch = (key: number, change: Partial<ErrorRow>) => setRows((rs) => rs.map((r) => (r.key === key ? { ...r, ...change } : r)))
+
+  const selectedIssueIds = rows.map((r) => r.job_issue).filter((id): id is number => id != null)
+
+  function handleSelectIssueForReject(issue: JobIssue) {
+    const prefill = buildRejectPrefillFromIssue(issue, categories ?? [])
+    setRows((rs) => [
+      ...rs,
+      {
+        key: Math.max(0, ...rs.map((r) => r.key)) + 1,
+        job_issue: prefill.job_issue,
+        cvat_issue_id: prefill.cvat_issue_id,
+        category: prefill.category,
+        severity: prefill.severity,
+        verdict: prefill.verdict,
+        is_missing_object: prefill.is_missing_object,
+        frame_number: prefill.frame_number,
+        cvat_object_id: prefill.cvat_object_id,
+        location: prefill.location,
+        description: prefill.description,
+      },
+    ])
+  }
 
   async function pass() {
     if (await run(() => passSample(projectId, sample.id, comment.trim()), `Đã Pass ${sample.job.name}`)) onDone()
@@ -122,6 +150,7 @@ function ReviewForm({ projectId, sample, onDone }: { projectId: number; sample: 
       if (!frame.valid || !objId.valid) return
       errors.push({
         category: r.category,
+        ...(r.job_issue != null ? { job_issue: r.job_issue } : {}),
         severity: r.severity ?? undefined,
         verdict: r.is_missing_object ? 'fail' : r.verdict,
         is_missing_object: r.is_missing_object,
@@ -144,6 +173,19 @@ function ReviewForm({ projectId, sample, onDone }: { projectId: number; sample: 
 
   return (
     <div className="flex flex-col gap-4 border-t border-secondary pt-5">
+      <JobIssuesPanel
+        projectId={projectId}
+        jobId={sample.job.id}
+        jobStatus={sample.job.status}
+        cvatJobId={sample.job.cvat_job_id}
+        mode="qc2"
+        canManageJobs={can('manage_jobs')}
+        sampleFrames={sample.frames}
+        selectedIssueIds={selectedIssueIds}
+        onSelectForReject={handleSelectIssueForReject}
+        onChanged={onDone}
+      />
+
       <div className="flex items-center justify-between">
         <h3 className="text-sm font-semibold text-primary">Ghi lỗi audit</h3>
         <span className="text-xs text-tertiary">Bắt buộc ít nhất 1 lỗi khi Reject</span>
@@ -155,7 +197,14 @@ function ReviewForm({ projectId, sample, onDone }: { projectId: number; sample: 
         return (
           <div key={row.key} className="flex flex-col gap-3 rounded-xl bg-secondary p-3.5 ring-1 ring-secondary ring-inset">
             <div className="flex items-center justify-between">
-              <span className="text-xs font-semibold text-tertiary">Lỗi {index + 1}</span>
+              <div className="flex items-center gap-1.5">
+                <span className="text-xs font-semibold text-tertiary">Lỗi {index + 1}</span>
+                {row.cvat_issue_id != null && (
+                  <Badge type="pill-color" size="sm" color="purple">
+                    Issue #{row.cvat_issue_id}
+                  </Badge>
+                )}
+              </div>
               <Button
                 size="xs"
                 color="tertiary-destructive"
@@ -172,7 +221,11 @@ function ReviewForm({ projectId, sample, onDone }: { projectId: number; sample: 
                 placeholder="Chọn loại lỗi"
                 isInvalid={showErrors && row.category == null}
                 hint={showErrors && row.category == null ? 'Chọn loại lỗi' : undefined}
-                items={(categories ?? []).map((c) => ({ id: c.id, label: c.name, supportingText: SEVERITY_LABELS[c.severity] }))}
+                items={(categories ?? []).map((c) => ({
+                  id: c.id,
+                  label: c.code ? `${c.code} · ${c.name}` : c.name,
+                  supportingText: [c.primary_category, SEVERITY_LABELS[c.severity]].filter(Boolean).join(' · '),
+                }))}
                 selectedKey={row.category}
                 onSelectionChange={(k) => {
                   const category = categories?.find((c) => c.id === Number(k))

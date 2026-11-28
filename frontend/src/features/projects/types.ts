@@ -30,6 +30,7 @@ export interface ProjectDetail extends ProjectSummary {
   escalation_policy: EscalationPolicy
   max_rework_rounds: number
   annotator_wip_limit: number
+  issue_gate_enabled?: boolean
 }
 
 export interface ProjectWriteInput {
@@ -55,6 +56,7 @@ export interface ProjectSettings {
   /** % số frame của mỗi job QC2 kiểm (mọi job qua QC1 đều được kiểm). */
   sampling_rate: number
   stratify_by: StratifyBy
+  issue_gate_enabled?: boolean
   quality_cl_threshold: string | null
   defect_rate_threshold: string | null
   kpi_annotation_target: number | null
@@ -311,6 +313,7 @@ export interface ProjectOverview {
     batches_ready_for_qc2: number
     pending_qc2_samples: number
     pending_requests: number
+    pending_issue_rulings?: number
     escalated_jobs: number
     escalated: number
     total: number

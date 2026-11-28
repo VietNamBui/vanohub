@@ -60,6 +60,7 @@ function DisputeErrorForm({
         createAnnotatorRequest(projectId, {
           job: jobId,
           review_error: errObj ? errObj.id : null,
+          ...(errObj?.job_issue != null ? { job_issue: errObj.job_issue } : {}),
           request_type: 'error_dispute',
           title,
           reason: combinedReason,

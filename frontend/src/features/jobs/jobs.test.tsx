@@ -74,7 +74,14 @@ describe('jobs URL filters, sorting & lock helpers', () => {
       overdue: false,
       due_soon: false,
       unassigned: true,
+      locked: false,
+      issue: undefined,
     })
+
+    const withLockedAndIssue = parseJobUrlFilters(new URLSearchParams('locked=1&issue=42'))
+    expect(withLockedAndIssue.locked).toBe(true)
+    expect(withLockedAndIssue.issue).toBe(42)
+    expect(serializeJobUrlFilters({ locked: true, issue: 42 }).toString()).toBe('locked=1&issue=42')
 
     const badStage = parseJobUrlFilters(new URLSearchParams('stage=invalid&dataset=1.5&batch=0'))
     expect(badStage.stage).toBe('')

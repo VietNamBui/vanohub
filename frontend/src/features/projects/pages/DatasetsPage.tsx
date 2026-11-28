@@ -1,21 +1,24 @@
-import { AlertTriangle, ChevronDown, ChevronRight, LinkExternal01, Lock01, LockUnlocked01, SearchLg } from '@untitledui/icons'
+import { AlertTriangle, ChevronDown, ChevronRight, Edit05, LinkExternal01, Lock01, LockUnlocked01, SearchLg } from '@untitledui/icons'
 import { Fragment, useState } from 'react'
 import { Link } from 'react-router'
 import { Tabs } from '@/components/application/tabs/tabs'
 import { Button } from '@/components/base/buttons/button'
 import { Input } from '@/components/base/input/input'
 import { ProgressBarBase } from '@/components/base/progress-indicators/progress-indicators'
+import { TextArea } from '@/components/base/textarea/textarea'
 import { getErrorMessage } from '../../../shared/api/errors'
+import FormDialog from '../../../shared/components/ui/FormDialog'
 import PageState from '../../../shared/components/ui/PageState'
 import SectionCard from '../../../shared/components/ui/SectionCard'
 import { useAction } from '../../../shared/hooks/useAction'
 import { useRequest } from '../../../shared/hooks/useRequest'
 import { cvatProjectUrl } from '../../../shared/utils/cvat'
 import { formatDateTime } from '../../../shared/utils/format'
-import { getCvatStatus, getDatasetLabels, listDatasets, setDatasetLock } from '../api'
+import { getCvatStatus, getDatasetLabels, listDatasets, setDatasetLock, updateDataset } from '../api'
 import CvatSyncButton from '../components/CvatSyncButton'
 import DataStatusBadge from '../components/DataStatusBadge'
 import { useProject } from '../projectContext'
+import type { Dataset } from '../types'
 
 const TABS = [
   { id: '', label: 'Tất cả' },
@@ -35,6 +38,7 @@ export default function DatasetsPage() {
   const [search, setSearch] = useState('')
   const [version, setVersion] = useState(0)
   const [open, setOpen] = useState<number | null>(null)
+  const [editing, setEditing] = useState<Dataset | null>(null)
   const { run } = useAction()
   const { data, error, isLoading, retry } = useRequest(`datasets:${projectId}:${status}:${version}`, () =>
     listDatasets(projectId, { status }),
@@ -129,6 +133,9 @@ export default function DatasetsPage() {
                         </td>
                         <td className="px-3 py-3">
                           <Link to={`../batches?dataset=${d.id}`} relative="path" className="font-medium text-primary hover:underline">{d.name}</Link>
+                          {d.description && (
+                            <p className="mt-0.5 max-w-md text-xs text-secondary">{d.description}</p>
+                          )}
                           {d.cvat_project_id && (
                             <div className="text-xs text-tertiary">
                               CVAT project #{d.cvat_project_id}
@@ -154,11 +161,18 @@ export default function DatasetsPage() {
                         <td className="px-3 py-3 whitespace-nowrap">{formatDateTime(d.last_synced_at)}</td>
                         <td className="px-5 py-3 text-right">
                           {canManage && d.status !== 'delivered' && (
-                            <Button size="sm" color="link-gray" iconLeading={d.status === 'active' ? Lock01 : LockUnlocked01}
-                              onPress={async () => (await run(() => setDatasetLock(projectId, d.id, d.status === 'active'),
-                                d.status === 'active' ? 'Đã khoá project' : 'Đã mở khoá')) && reload()}>
-                              {d.status === 'active' ? 'Khoá' : 'Mở khoá'}
-                            </Button>
+                            <div className="flex items-center justify-end gap-2">
+                              {d.status === 'active' && (
+                                <Button size="sm" color="link-color" iconLeading={Edit05} onPress={() => setEditing(d)}>
+                                  Mô tả
+                                </Button>
+                              )}
+                              <Button size="sm" color="link-gray" iconLeading={d.status === 'active' ? Lock01 : LockUnlocked01}
+                                onPress={async () => (await run(() => setDatasetLock(projectId, d.id, d.status === 'active'),
+                                  d.status === 'active' ? 'Đã khoá project' : 'Đã mở khoá')) && reload()}>
+                                {d.status === 'active' ? 'Khoá' : 'Mở khoá'}
+                              </Button>
+                            </div>
                           )}
                         </td>
                       </tr>
@@ -176,7 +190,65 @@ export default function DatasetsPage() {
           </div>
         )}
       </SectionCard>
+
+      {editing && (
+        <DatasetDescriptionDialog
+          key={editing.id}
+          projectId={projectId}
+          dataset={editing}
+          onClose={() => setEditing(null)}
+          onDone={() => {
+            setEditing(null)
+            reload()
+          }}
+        />
+      )}
     </div>
+  )
+}
+
+function DatasetDescriptionDialog({
+  projectId,
+  dataset,
+  onClose,
+  onDone,
+}: {
+  projectId: number
+  dataset: Dataset
+  onClose: () => void
+  onDone: () => void
+}) {
+  const [description, setDescription] = useState(dataset.description ?? '')
+  const { run, pending } = useAction()
+
+  async function submit() {
+    if (
+      await run(
+        () => updateDataset(projectId, dataset.id, { description: description.trim() }),
+        `Đã cập nhật mô tả cho ${dataset.name}`,
+      )
+    ) {
+      onDone()
+    }
+  }
+
+  return (
+    <FormDialog
+      isOpen
+      title={`Cập nhật mô tả — ${dataset.name}`}
+      submitLabel="Lưu mô tả"
+      onClose={onClose}
+      onSubmit={submit}
+      pending={pending}
+    >
+      <TextArea
+        label="Mô tả project"
+        rows={4}
+        value={description}
+        onChange={setDescription}
+        placeholder="Ghi chú phạm vi dữ liệu, quy chuẩn hoặc lưu ý vận hành cho project này…"
+      />
+    </FormDialog>
   )
 }
 

@@ -11,7 +11,10 @@ import PageState from '../../../shared/components/ui/PageState'
 import SectionCard from '../../../shared/components/ui/SectionCard'
 import { useAction } from '../../../shared/hooks/useAction'
 import { useRequest } from '../../../shared/hooks/useRequest'
+import { useAuth } from '../../auth/useAuth'
 import { useProject } from '../../projects/projectContext'
+import { JOB_ISSUE_STATUS_BADGE_COLORS, JOB_ISSUE_STATUS_LABELS } from '../../quality/constants'
+import type { JobIssueStatus } from '../../quality/types'
 import { listAnnotatorRequests, resolveAnnotatorRequest } from '../api'
 import AnnotatorBreadcrumb from '../components/AnnotatorBreadcrumb'
 import type { AnnotatorRequest, AnnotatorRequestStatus } from '../types'
@@ -27,6 +30,7 @@ const STATUS_BADGE_COLOR: Record<AnnotatorRequestStatus, 'warning' | 'success' |
 /** Trang theo dõi phản hồi lỗi & báo dữ liệu bị chặn; Project Manager có thể xử lý / từ chối trực tiếp. */
 export default function AnnotatorRequestsPage() {
   const { projectId, can } = useProject()
+  const { user } = useAuth()
   const isManager = can('manage_jobs')
   const isAnnotator = can('annotate_jobs')
   const isManagerOnly = isManager && !isAnnotator
@@ -86,7 +90,9 @@ export default function AnnotatorRequestsPage() {
     : [{ label: pageTitle }]
 
   const jobLinkFor = (item: AnnotatorRequest) => {
-    if (isAnnotator) return `/projects/${projectId}/annotator/jobs/${item.job}`
+    if (isAnnotator && (!canViewJobs || item.created_by?.id === user?.id)) {
+      return `/projects/${projectId}/annotator/jobs/${item.job}`
+    }
     if (canViewJobs) return `/projects/${projectId}/jobs?search=${encodeURIComponent(item.job_name)}`
     return null
   }
@@ -152,11 +158,27 @@ export default function AnnotatorRequestsPage() {
                       </Badge>
                       {item.request_type === 'error_dispute' &&
                         item.status === 'resolved' &&
-                        item.review_error != null && (
+                        (item.review_error != null || item.job_issue != null) && (
                           <Badge size="sm" type="pill-color" color="gray">
                             Đã huỷ lỗi
                           </Badge>
                         )}
+                      {item.job_issue_cvat_id != null && (
+                        <Badge size="sm" type="pill-color" color="purple">
+                          Issue #{item.job_issue_cvat_id}
+                        </Badge>
+                      )}
+                      {item.job_issue_status && (
+                        <Badge
+                          size="sm"
+                          type="pill-color"
+                          color={
+                            JOB_ISSUE_STATUS_BADGE_COLORS[item.job_issue_status as JobIssueStatus] ?? 'gray'
+                          }
+                        >
+                          {JOB_ISSUE_STATUS_LABELS[item.job_issue_status as JobIssueStatus] ?? item.job_issue_status}
+                        </Badge>
+                      )}
                       <span className="text-sm font-semibold text-primary">{item.job_name}</span>
                     </div>
                     <p className="text-sm text-secondary">{item.title}</p>
@@ -179,14 +201,20 @@ export default function AnnotatorRequestsPage() {
                     <div className="flex flex-wrap items-center gap-2">
                       {isManager && item.status === 'pending_pm' && (
                         <>
-                          <Button
-                            size="sm"
-                            color="primary"
-                            isDisabled={pending}
-                            onPress={() => openResolveDialog(item, 'resolved')}
-                          >
-                            Xử lý
-                          </Button>
+                          {!(item.request_type === 'error_dispute' && item.created_by?.id === user?.id) ? (
+                            <Button
+                              size="sm"
+                              color="primary"
+                              isDisabled={pending}
+                              onPress={() => openResolveDialog(item, 'resolved')}
+                            >
+                              Xử lý
+                            </Button>
+                          ) : (
+                            <Badge size="sm" type="pill-color" color="warning">
+                              Bốn mắt: không tự duyệt lỗi của mình
+                            </Badge>
+                          )}
                           <Button
                             size="sm"
                             color="secondary-destructive"
@@ -232,9 +260,13 @@ export default function AnnotatorRequestsPage() {
         <div className="flex flex-col gap-3">
           {resolving?.status === 'resolved' &&
             resolving.item.request_type === 'error_dispute' &&
-            resolving.item.review_error != null && (
+            (resolving.item.review_error != null || resolving.item.job_issue != null) && (
               <p className="rounded-lg bg-secondary px-3 py-2 text-xs text-secondary">
-                Chấp nhận phản hồi lỗi sẽ đánh dấu lỗi QC liên quan là đã huỷ lỗi (giữ nguyên lịch sử và loại khỏi lỗi đang mở).
+                Chấp nhận phản hồi lỗi sẽ đánh dấu lỗi QC liên quan là đã huỷ lỗi
+                {resolving.item.job_issue_cvat_id != null
+                  ? ` và chuyển Issue #${resolving.item.job_issue_cvat_id} sang "Không phải lỗi"`
+                  : ''}{' '}
+                (giữ nguyên lịch sử và loại khỏi lỗi đang mở).
               </p>
             )}
           <TextArea

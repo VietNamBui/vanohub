@@ -2,6 +2,7 @@ import { AlertTriangle, CheckCircle, Edit05, LinkExternal01, Lock01, LockUnlocke
 import { useState } from 'react'
 import { Link, useSearchParams } from 'react-router'
 import { Table } from '@/components/application/table/table'
+import { Tabs } from '@/components/application/tabs/tabs'
 import { Badge } from '@/components/base/badges/badges'
 import { Button } from '@/components/base/buttons/button'
 import { Dropdown } from '@/components/base/dropdown/dropdown'
@@ -27,6 +28,12 @@ import { useProject } from '../projectContext'
 import type { Batch } from '../types'
 
 const ALL = 0
+const STATUS_TABS = [
+  { id: '', label: 'Tất cả' },
+  { id: 'active', label: 'Đang xử lý' },
+  { id: 'locked', label: 'Đã khoá' },
+  { id: 'delivered', label: 'Đã bàn giao' },
+]
 
 /**
  * Tasks — các CVAT task của organization (model Batch). Task đến từ đồng bộ CVAT.
@@ -36,13 +43,14 @@ export default function BatchesPage() {
   const { project: org, projectId, can } = useProject()
   const [searchParams, setSearchParams] = useSearchParams()
   const dataset = Number(searchParams.get('dataset')) || ALL
+  const status = searchParams.get('status') ?? ''
   const [search, setSearch] = useState('')
   const [version, setVersion] = useState(0)
   const [editing, setEditing] = useState<Batch | null>(null)
   const [confirmingQc2, setConfirmingQc2] = useState<Batch | null>(null)
-  const { run } = useAction()
-  const { data, error, isLoading, retry } = useRequest(`batches:${projectId}:${dataset}:${version}`, () =>
-    listBatches(projectId, { dataset: dataset === ALL ? undefined : dataset }),
+  const [locking, setLocking] = useState<Batch | null>(null)
+  const { data, error, isLoading, retry } = useRequest(`batches:${projectId}:${dataset}:${status}:${version}`, () =>
+    listBatches(projectId, { dataset: dataset === ALL ? undefined : dataset, status: status || undefined }),
   )
   const { data: datasets } = useRequest(`datasets:${projectId}:all`, () => listDatasets(projectId))
   const { data: teams } = useRequest(`teams:${projectId}`, () => listTeams(projectId))
@@ -85,6 +93,23 @@ export default function BatchesPage() {
 
       <SectionCard bodyClassName="p-0">
         <div className="flex flex-wrap items-center gap-3 border-b border-secondary p-4">
+          <Tabs
+            selectedKey={status}
+            onSelectionChange={(k) => {
+              const next = String(k)
+              const params = new URLSearchParams(searchParams)
+              if (!next) params.delete('status')
+              else params.set('status', next)
+              setSearchParams(params, { replace: true })
+            }}
+            className="w-auto"
+          >
+            <Tabs.List type="button-gray" size="sm" aria-label="Lọc theo trạng thái">
+              {STATUS_TABS.map((t) => (
+                <Tabs.Item key={t.id} id={t.id} label={t.label} />
+              ))}
+            </Tabs.List>
+          </Tabs>
           <Select
             className="w-64"
             size="sm"
@@ -234,9 +259,7 @@ export default function BatchesPage() {
                                 <Dropdown.Item
                                   icon={b.status === 'active' ? Lock01 : LockUnlocked01}
                                   label={b.status === 'active' ? 'Khoá task' : 'Mở khoá task'}
-                                  onAction={async () =>
-                                    (await run(() => setBatchLock(projectId, b.id, b.status === 'active'), 'Đã cập nhật')) && reload()
-                                  }
+                                  onAction={() => setLocking(b)}
                                 />
                               </Dropdown.Menu>
                             </Dropdown.Popover>
@@ -278,7 +301,71 @@ export default function BatchesPage() {
           }}
         />
       )}
+
+      {locking && (
+        <BatchLockDialog
+          key={`${locking.id}:${locking.status}`}
+          projectId={projectId}
+          task={locking}
+          onClose={() => setLocking(null)}
+          onDone={() => {
+            setLocking(null)
+            reload()
+          }}
+        />
+      )}
     </div>
+  )
+}
+
+function BatchLockDialog({
+  projectId,
+  task,
+  onClose,
+  onDone,
+}: {
+  projectId: number
+  task: Batch
+  onClose: () => void
+  onDone: () => void
+}) {
+  const [note, setNote] = useState('')
+  const { run, pending } = useAction()
+  const willLock = task.status === 'active'
+
+  async function submit() {
+    if (
+      await run(
+        () => setBatchLock(projectId, task.id, willLock, note.trim() || undefined),
+        willLock ? `Đã khoá task ${task.name}` : `Đã mở khoá task ${task.name}`,
+      )
+    ) {
+      onDone()
+    }
+  }
+
+  return (
+    <FormDialog
+      isOpen
+      title={willLock ? `Khoá task ${task.name}` : `Mở khoá task ${task.name}`}
+      description={
+        willLock
+          ? 'Khi khoá task, mọi thay đổi trên task và các job bên trong sẽ bị tạm dừng.'
+          : 'Mở khoá task để tiếp tục gán nhãn, kiểm duyệt và cập nhật deadline.'
+      }
+      submitLabel={willLock ? 'Khoá task' : 'Mở khoá task'}
+      onClose={onClose}
+      onSubmit={submit}
+      pending={pending}
+    >
+      <TextArea
+        label="Ghi chú / lý do (tuỳ chọn)"
+        rows={3}
+        value={note}
+        onChange={setNote}
+        placeholder={willLock ? 'Lý do tạm khoá task…' : 'Ghi chú khi mở khoá task…'}
+      />
+    </FormDialog>
   )
 }
 

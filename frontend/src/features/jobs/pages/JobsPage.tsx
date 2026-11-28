@@ -9,10 +9,12 @@ import { Button } from '@/components/base/buttons/button'
 import { Checkbox } from '@/components/base/checkbox/checkbox'
 import { Input } from '@/components/base/input/input'
 import { Select, type SelectItemType } from '@/components/base/select/select'
+import { TextArea } from '@/components/base/textarea/textarea'
 import { Tooltip, TooltipTrigger } from '@/components/base/tooltip/tooltip'
 import { getErrorMessage } from '../../../shared/api/errors'
 import StateView from '../../../shared/components/StateView'
 import EmptyRow from '../../../shared/components/ui/EmptyRow'
+import FormDialog from '../../../shared/components/ui/FormDialog'
 import SectionCard from '../../../shared/components/ui/SectionCard'
 import { useToast } from '../../../shared/hooks/toastContext'
 import { useAction } from '../../../shared/hooks/useAction'
@@ -21,7 +23,7 @@ import { formatDateTime } from '../../../shared/utils/format'
 import { listBatches, listDatasets, listMembers } from '../../projects/api'
 import { useProject } from '../../projects/projectContext'
 import { assignSampleAuditor } from '../../quality/api'
-import { assignJob, bulkAssign, bulkDeadline, listJobs } from '../api'
+import { assignJob, bulkAssign, bulkDeadline, bulkMoveBatch, listJobs } from '../api'
 import AssigneeSelect from '../components/AssigneeSelect'
 import AssignModal from '../components/AssignModal'
 import DeadlineModal from '../components/DeadlineModal'
@@ -31,6 +33,7 @@ import { JOB_STATUS_LABELS } from '../constants'
 import {
   getBulkAssignBlockReason,
   getBulkDeadlineBlockReason,
+  getBulkMoveBatchBlockReason,
   getJobLockReason,
   getQc2AssignBlockReason,
   nextJobSortOrdering,
@@ -87,7 +90,7 @@ export default function JobsPage() {
   const [version, setVersion] = useState(0)
   const [selected, setSelected] = useState<number[]>([])
   const [openJob, setOpenJob] = useState<number | null>(null)
-  const [bulk, setBulk] = useState<'assign' | 'deadline' | null>(null)
+  const [bulk, setBulk] = useState<'assign' | 'deadline' | 'move_batch' | null>(null)
   const { run, pending } = useAction()
   const toast = useToast()
 
@@ -193,6 +196,7 @@ export default function JobsPage() {
   }, [jobs, selected])
   const bulkAssignReason = getBulkAssignBlockReason(canManage, selectedJobs)
   const bulkDeadlineReason = getBulkDeadlineBlockReason(canManage, selectedJobs)
+  const bulkMoveBatchReason = getBulkMoveBatchBlockReason(canManage, selectedJobs)
   const datasetItems: SelectItemType[] = [
     { id: ALL_KEY, label: 'Tất cả project' },
     ...(datasets ?? []).map((d) => ({ id: String(d.id), label: d.name })),
@@ -348,6 +352,12 @@ export default function JobsPage() {
               onChange={(checked) => update({ unassigned: checked })}
               label="Chưa giao"
             />
+            <Checkbox
+              size="sm"
+              isSelected={Boolean(filters.locked)}
+              onChange={(checked) => update({ locked: checked })}
+              label="Đã khoá"
+            />
           </div>
 
           {filters.assignee != null && (
@@ -360,6 +370,19 @@ export default function JobsPage() {
                 aria-label="Bỏ lọc người phụ trách"
                 className="rounded-full p-0.5! text-utility-blue-500 hover:bg-utility-blue-100 hover:text-utility-blue-700"
                 onPress={() => update({ assignee: undefined })}
+              />
+            </Badge>
+          )}
+          {filters.issue != null && (
+            <Badge type="pill-color" size="sm" color="purple" className="gap-1 pr-1">
+              <span>Issue #{filters.issue}</span>
+              <Button
+                size="xs"
+                color="tertiary"
+                iconLeading={<XClose className="size-3" aria-hidden="true" />}
+                aria-label="Bỏ lọc issue"
+                className="rounded-full p-0.5! text-utility-purple-500 hover:bg-utility-purple-100 hover:text-utility-purple-700"
+                onPress={() => update({ issue: undefined })}
               />
             </Badge>
           )}
@@ -384,14 +407,20 @@ export default function JobsPage() {
             >
               Đặt deadline
             </Button>
+            <Button
+              size="xs"
+              color="secondary"
+              isDisabled={bulkMoveBatchReason !== null}
+              onPress={() => setBulk('move_batch')}
+            >
+              Chuyển task
+            </Button>
             <Button size="xs" color="link-gray" onPress={() => setSelected([])}>
               Bỏ chọn
             </Button>
-            {(bulkAssignReason ?? bulkDeadlineReason) && (
+            {(bulkAssignReason ?? bulkDeadlineReason ?? bulkMoveBatchReason) && (
               <span className="text-xs text-tertiary">
-                {bulkAssignReason && bulkDeadlineReason && bulkAssignReason !== bulkDeadlineReason
-                  ? `${bulkAssignReason} · ${bulkDeadlineReason}`
-                  : (bulkAssignReason ?? bulkDeadlineReason)}
+                {[...new Set([bulkAssignReason, bulkDeadlineReason, bulkMoveBatchReason].filter(Boolean))].join(' · ')}
               </span>
             )}
           </div>
@@ -583,6 +612,78 @@ export default function JobsPage() {
         onCancel={() => setBulk(null)}
         onSubmit={(deadline, note) => doBulk(() => bulkDeadline(projectId, selected, deadline, note))}
       />
+      {bulk === 'move_batch' && (
+        <MoveBatchModal
+          key={selected.join(',')}
+          count={selected.length}
+          batches={(batches ?? []).filter((b) => b.status === 'active')}
+          confirmLoading={pending}
+          onCancel={() => setBulk(null)}
+          onSubmit={(batchId, note) => doBulk(() => bulkMoveBatch(projectId, selected, batchId, note))}
+        />
+      )}
     </div>
+  )
+}
+
+function MoveBatchModal({
+  count,
+  batches,
+  confirmLoading,
+  onCancel,
+  onSubmit,
+}: {
+  count: number
+  batches: { id: number; name: string; dataset_name: string }[]
+  confirmLoading: boolean
+  onCancel: () => void
+  onSubmit: (batchId: number, note: string) => void
+}) {
+  const [targetBatch, setTargetBatch] = useState<string | null>(null)
+  const [note, setNote] = useState('')
+  const [showError, setShowError] = useState(false)
+
+  return (
+    <FormDialog
+      isOpen
+      title={`Chuyển ${count} job sang task khác`}
+      description="Chỉ áp dụng cho job chưa gắn CVAT, không bị khoá và không thuộc đợt audit QC2 đang mở."
+      submitLabel="Chuyển task"
+      onClose={onCancel}
+      onSubmit={() => {
+        if (!targetBatch) {
+          setShowError(true)
+          return
+        }
+        onSubmit(Number(targetBatch), note.trim())
+      }}
+      pending={confirmLoading}
+    >
+      <div className="flex flex-col gap-3">
+        <Select
+          label="Task đích"
+          size="sm"
+          isRequired
+          placeholder="Chọn task đang hoạt động"
+          isInvalid={showError && !targetBatch}
+          hint={showError && !targetBatch ? 'Vui lòng chọn task đích' : undefined}
+          items={batches.map((b) => ({ id: String(b.id), label: b.name, supportingText: b.dataset_name }))}
+          selectedKey={targetBatch}
+          onSelectionChange={(k) => {
+            setTargetBatch(k == null ? null : String(k))
+            if (showError) setShowError(false)
+          }}
+        >
+          {(item) => <Select.Item id={item.id} label={item.label} supportingText={item.supportingText} />}
+        </Select>
+        <TextArea
+          label="Ghi chú (tuỳ chọn)"
+          rows={2}
+          value={note}
+          onChange={setNote}
+          placeholder="Lý do chuyển task…"
+        />
+      </div>
+    </FormDialog>
   )
 }

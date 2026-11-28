@@ -42,6 +42,7 @@ export interface Job {
   first_qc1_result?: '' | 'pass' | 'reject'
   max_rework_rounds: number
   escalation_policy?: 'block' | 'warn_only'
+  issue_gate_enabled?: boolean
   rework_scope?: ReworkScope
   rework_scope_label?: string
   is_escalated: boolean
@@ -68,6 +69,8 @@ export interface JobErrorBrief {
   id: number
   stage: 'qc1' | 'qc2'
   rework_round: number
+  job_issue?: number | null
+  cvat_issue_id?: number | null
   category: string
   severity: string
   verdict?: 'fail' | 'edge'
@@ -106,6 +109,7 @@ export interface JobFilters {
   due_soon?: boolean
   unassigned?: boolean
   locked?: boolean
+  issue?: number
   ordering?: string
 }
 
@@ -144,6 +148,9 @@ export interface AnnotatorRequest {
   job_name: string
   batch_name: string
   review_error: number | null
+  job_issue?: number | null
+  job_issue_cvat_id?: number | null
+  job_issue_status?: string
   error_category: string | null
   error_location: string
   request_type: AnnotatorRequestType

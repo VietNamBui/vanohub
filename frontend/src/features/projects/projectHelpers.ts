@@ -112,6 +112,7 @@ export interface ProjectSettingsDraft {
   escalation_policy: EscalationPolicy
   annotator_wip_limit: number
   sampling_rate: number
+  issue_gate_enabled: boolean
   quality_cl_threshold: string
   defect_rate_threshold: string
   kpi_annotation_target: string
@@ -185,6 +186,7 @@ export function validateProjectSettingsDraft(draft: ProjectSettingsDraft): {
           escalation_policy: draft.escalation_policy,
           annotator_wip_limit: draft.annotator_wip_limit,
           sampling_rate: draft.sampling_rate,
+          issue_gate_enabled: Boolean(draft.issue_gate_enabled),
           quality_cl_threshold: qualityCl,
           defect_rate_threshold: defectRate,
           kpi_annotation_target: kpiAnno,
@@ -295,6 +297,11 @@ export const ACTIVITY_ACTION_LABELS: Record<string, string> = {
   'audit.complete': 'Chốt đợt audit QC2',
   'error_category.create': 'Thêm danh mục lỗi',
   'error_category.update': 'Sửa danh mục lỗi',
+  'issue.address': 'Đánh dấu đã sửa issue CVAT',
+  'issue.dispute': 'Phản hồi issue CVAT',
+  'issue.resolve': 'Xác nhận đã xử lý issue CVAT',
+  'issue.reopen': 'Mở lại issue CVAT',
+  'issue.ruling': 'Phán quyết PM cho issue CVAT',
   'guideline.publish': 'Xuất bản guideline',
   'announcement.send': 'Gửi thông báo',
   'annotator.dispute': 'Phản hồi lỗi QC',
@@ -322,6 +329,7 @@ export const ACTIVITY_ACTION_PREFIX_OPTIONS = [
   { id: 'project.', label: 'Organization & cấu hình' },
   { id: 'annotator.', label: 'Yêu cầu từ Annotator' },
   { id: 'error_category.', label: 'Danh mục lỗi' },
+  { id: 'issue.', label: 'Issue CVAT' },
   { id: 'guideline.', label: 'Guidelines' },
   { id: 'announcement.', label: 'Thông báo' },
   { id: 'cvat.', label: 'Đồng bộ & liên kết CVAT' },

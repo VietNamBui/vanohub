@@ -4,6 +4,7 @@ import { Table } from '@/components/application/table/table'
 import { Tabs } from '@/components/application/tabs/tabs'
 import { Badge } from '@/components/base/badges/badges'
 import { Button } from '@/components/base/buttons/button'
+import { Checkbox } from '@/components/base/checkbox/checkbox'
 import { Input } from '@/components/base/input/input'
 import { getErrorMessage } from '../../../shared/api/errors'
 import EmptyRow from '../../../shared/components/ui/EmptyRow'
@@ -11,7 +12,9 @@ import PageState from '../../../shared/components/ui/PageState'
 import SectionCard from '../../../shared/components/ui/SectionCard'
 import { useAction } from '../../../shared/hooks/useAction'
 import { useRequest } from '../../../shared/hooks/useRequest'
+import { formatDateTime } from '../../../shared/utils/format'
 import { useAuth } from '../../auth/useAuth'
+import { formatDeadlineCountdown } from '../../jobs/constants'
 import { useProject } from '../../projects/projectContext'
 import { listAuditSamples, passSample } from '../api'
 import type { AuditSample } from '../types'
@@ -36,6 +39,8 @@ export default function AuditWorkPage() {
   const [result, setResult] = useState<ResultFilter>('pending')
   const [mine, setMine] = useState(true)
   const [search, setSearch] = useState('')
+  const [overdueOnly, setOverdueOnly] = useState(false)
+  const [dueSoonOnly, setDueSoonOnly] = useState(false)
   const [version, setVersion] = useState(0)
   const [selectedId, setSelectedId] = useState<number | null>(null)
   const { run, pending } = useAction()
@@ -49,8 +54,14 @@ export default function AuditWorkPage() {
   const reload = () => setVersion((v) => v + 1)
 
   const keyword = search.trim().toLowerCase()
-  const samples = (data ?? []).filter((s) =>
-    !keyword || [s.job.name, s.job.batch_name, s.job.annotator?.full_name ?? ''].some((v) => v.toLowerCase().includes(keyword)))
+  const samples = (data ?? []).filter((s) => {
+    if (overdueOnly && !s.job.is_overdue) return false
+    if (dueSoonOnly && s.job.due_state !== 'soon') return false
+    return (
+      !keyword ||
+      [s.job.name, s.job.batch_name, s.job.annotator?.full_name ?? ''].some((v) => v.toLowerCase().includes(keyword))
+    )
+  })
   const selected = samples.find((s) => s.id === selectedId) ?? samples[0]
   const conflict = (s: AuditSample) => !!user && (s.job.annotator?.id === user.id || s.job.qc1_reviewer?.id === user.id)
 
@@ -95,6 +106,28 @@ export default function AuditWorkPage() {
                 </Tabs.List>
               </Tabs>
               <Input className="min-w-48 flex-1" size="sm" icon={SearchLg} aria-label="Tìm kiếm" placeholder="Tìm job, task, annotator…" value={search} onChange={setSearch} />
+              <div className="flex items-center gap-3">
+                <Checkbox
+                  size="sm"
+                  label="Quá hạn"
+                  isSelected={overdueOnly}
+                  onChange={(checked) => {
+                    setOverdueOnly(checked)
+                    if (checked) setDueSoonOnly(false)
+                    setSelectedId(null)
+                  }}
+                />
+                <Checkbox
+                  size="sm"
+                  label="Sắp hạn"
+                  isSelected={dueSoonOnly}
+                  onChange={(checked) => {
+                    setDueSoonOnly(checked)
+                    if (checked) setOverdueOnly(false)
+                    setSelectedId(null)
+                  }}
+                />
+              </div>
             </div>
             <Table
               aria-label="Bảng job audit"
@@ -107,6 +140,7 @@ export default function AuditWorkPage() {
               <Table.Header>
                 <Table.Head id="job" label="Job" isRowHeader />
                 <Table.Head id="annotator" label="Annotator" />
+                <Table.Head id="deadline" label="Deadline" />
                 <Table.Head id="sample" label="Mẫu audit" />
                 <Table.Head id="result" label="Kết quả" />
                 <Table.Head id="actions" label="Thao tác" />
@@ -114,30 +148,41 @@ export default function AuditWorkPage() {
               <Table.Body items={samples} renderEmptyState={() => (
                 <EmptyRow text={isLoading ? 'Đang tải…' : result === 'pending' ? 'Không có mẫu nào chờ bạn audit' : 'Không có mẫu nào'} />
               )}>
-                {(s) => (
-                  <Table.Row id={s.id} className="cursor-pointer">
-                    <Table.Cell>
-                      <div className="font-medium text-primary">{s.job.name}</div>
-                      <div className="text-xs text-tertiary">{s.job.dataset_name} / {s.job.batch_name}</div>
-                    </Table.Cell>
-                    <Table.Cell>{s.job.annotator?.full_name ?? '—'}</Table.Cell>
-                    <Table.Cell>
-                      <div className="text-secondary tabular-nums">{s.frames.length}/{s.job.frame_count} frame</div>
-                      {s.rework_round > 0 && <div className="text-xs text-tertiary">vòng rework {s.rework_round}</div>}
-                    </Table.Cell>
-                    <Table.Cell><ResultBadge result={s.result} /></Table.Cell>
-                    <Table.Cell>
-                      {s.result === 'pending' && s.audit_status === 'in_progress' && !conflict(s) ? (
-                        <div className="flex gap-1.5">
-                          <Button size="xs" color="secondary" isDisabled={pending} onPress={() => quickPass(s)}>Pass</Button>
-                          <Button size="xs" color="secondary-destructive" onPress={() => setSelectedId(s.id)}>Reject</Button>
-                        </div>
-                      ) : conflict(s) && s.result === 'pending' ? (
-                        <Badge type="color" size="sm" color="warning">Bốn mắt</Badge>
-                      ) : <span className="text-quaternary">—</span>}
-                    </Table.Cell>
-                  </Table.Row>
-                )}
+                {(s) => {
+                  const countdown = formatDeadlineCountdown(s.job.hours_remaining)
+                  return (
+                    <Table.Row id={s.id} className="cursor-pointer">
+                      <Table.Cell>
+                        <div className="font-medium text-primary">{s.job.name}</div>
+                        <div className="text-xs text-tertiary">{s.job.dataset_name} / {s.job.batch_name}</div>
+                      </Table.Cell>
+                      <Table.Cell>{s.job.annotator?.full_name ?? '—'}</Table.Cell>
+                      <Table.Cell className="whitespace-nowrap">
+                        <div className="text-xs text-secondary tabular-nums">{formatDateTime(s.job.deadline)}</div>
+                        {countdown && (
+                          <Badge type="pill-color" size="sm" color={countdown.tone} className="mt-1">
+                            {countdown.text}
+                          </Badge>
+                        )}
+                      </Table.Cell>
+                      <Table.Cell>
+                        <div className="text-secondary tabular-nums">{s.frames.length}/{s.job.frame_count} frame</div>
+                        {s.rework_round > 0 && <div className="text-xs text-tertiary">vòng rework {s.rework_round}</div>}
+                      </Table.Cell>
+                      <Table.Cell><ResultBadge result={s.result} /></Table.Cell>
+                      <Table.Cell>
+                        {s.result === 'pending' && s.audit_status === 'in_progress' && !conflict(s) ? (
+                          <div className="flex gap-1.5">
+                            <Button size="xs" color="secondary" isDisabled={pending} onPress={() => quickPass(s)}>Pass</Button>
+                            <Button size="xs" color="secondary-destructive" onPress={() => setSelectedId(s.id)}>Reject</Button>
+                          </div>
+                        ) : conflict(s) && s.result === 'pending' ? (
+                          <Badge type="color" size="sm" color="warning">Bốn mắt</Badge>
+                        ) : <span className="text-quaternary">—</span>}
+                      </Table.Cell>
+                    </Table.Row>
+                  )
+                }}
               </Table.Body>
             </Table>
           </SectionCard>

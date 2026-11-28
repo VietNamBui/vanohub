@@ -60,8 +60,8 @@ export const listBatches = async (id: number, params: { dataset?: number; status
   (await apiClient.get<Batch[]>(p(id, 'batches/'), { params: cleanParams(params) })).data
 export const updateBatch = async (id: number, batchId: number, data: { deadline?: string | null; team?: number | null }) =>
   (await apiClient.patch<Batch>(p(id, `batches/${batchId}/`), data)).data
-export const setBatchLock = async (id: number, batchId: number, lock: boolean) =>
-  (await apiClient.post<Batch>(p(id, `batches/${batchId}/${lock ? 'lock' : 'unlock'}/`))).data
+export const setBatchLock = async (id: number, batchId: number, lock: boolean, note?: string) =>
+  (await apiClient.post<Batch>(p(id, `batches/${batchId}/${lock ? 'lock' : 'unlock'}/`), note ? { note } : {})).data
 export const confirmBatchQc2 = async (projectId: number, batchId: number, note = '') =>
   (await apiClient.post<Batch>(p(projectId, `batches/${batchId}/confirm-qc2/`), { note })).data
 

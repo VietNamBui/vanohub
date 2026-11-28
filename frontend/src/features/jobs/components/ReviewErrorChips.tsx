@@ -3,15 +3,23 @@ import { hasStructuredErrorMeta } from '../jobHelpers'
 import type { JobErrorBrief } from '../types'
 
 interface Props {
-  err: Pick<JobErrorBrief, 'frame_number' | 'cvat_object_id' | 'is_missing_object' | 'verdict' | 'is_voided'>
+  err: Pick<
+    JobErrorBrief,
+    'frame_number' | 'cvat_object_id' | 'is_missing_object' | 'verdict' | 'is_voided' | 'cvat_issue_id'
+  >
   className?: string
 }
 
-/** Nhãn cấu trúc của ReviewError: Frame, CVAT Object ID, Thiếu đối tượng, Kết luận Fail/Edge, Đã huỷ lỗi. */
+/** Nhãn cấu trúc của ReviewError: Frame, CVAT Object ID, Issue CVAT, Thiếu đối tượng, Kết luận Fail/Edge, Đã huỷ lỗi. */
 export default function ReviewErrorChips({ err, className = 'mt-1 flex flex-wrap gap-1' }: Props) {
   if (!hasStructuredErrorMeta(err)) return null
   return (
     <div className={className}>
+      {err.cvat_issue_id != null && (
+        <Badge size="sm" type="pill-color" color="purple">
+          Issue #{err.cvat_issue_id}
+        </Badge>
+      )}
       {err.frame_number != null && (
         <Badge size="sm" type="pill-color" color="gray">
           Frame #{err.frame_number}

@@ -3,14 +3,101 @@ import type { DueState, JobStatus } from '../jobs/types'
 
 export type Severity = 'minor' | 'major' | 'critical'
 export type ErrorVerdict = 'fail' | 'edge'
+export type PrimaryCategory = '' | 'E1' | 'E2' | 'E3' | 'E4' | 'E5' | 'E6'
 
 export interface ErrorCategory {
   id: number
+  code: string
+  primary_category: PrimaryCategory
   name: string
   description: string
   severity: Severity
   applies_to: 'qc1' | 'qc2' | 'both'
   is_active: boolean
+}
+
+export type ErrorCategoryInput = Partial<Omit<ErrorCategory, 'id'>>
+
+export type JobIssueStatus = 'open' | 'addressed' | 'unclear' | 'reopened' | 'resolved' | 'not_an_issue'
+export type JobIssueSource = 'manual' | 'clarification'
+export type JobIssueAuthorStage = '' | 'annotator' | 'qc1' | 'qc2'
+export type JobIssueAuthorityStatus = 'valid' | 'rejected_author'
+export type JobIssueRuleDecision = 'ruling' | 'not_an_issue' | 'resolved'
+
+export interface JobIssue {
+  id: number
+  job: number
+  job_name: string
+  cvat_issue_id: number
+  first_comment_id: number | null
+  defect_code: string
+  primary_category: PrimaryCategory
+  severity: Severity
+  source: JobIssueSource
+  is_clarification: boolean
+  frame_number: number
+  frame_start: number | null
+  frame_end: number | null
+  track_id: number | null
+  shape_id: number | null
+  position: number[]
+  message: string
+  author: UserBrief | null
+  author_cvat_id: number | null
+  author_stage: JobIssueAuthorStage
+  authority_status: JobIssueAuthorityStatus
+  status: JobIssueStatus
+  cvat_resolved: boolean
+  cvat_last_comment_id: number
+  cvat_synced_at: string | null
+  source_missing: boolean
+  tampered: boolean
+  tamper_reason: string
+  cvat_reopen_drift: boolean
+  is_disputed: boolean
+  dispute_reason: string
+  ruling_label: string
+  ruling_attributes: Record<string, unknown>
+  ruling_note: string
+  ruled_by: UserBrief | null
+  ruled_at: string | null
+  created_at: string
+  updated_at: string
+}
+
+export interface JobIssueListParams {
+  job?: number
+  status?: string
+  severity?: string
+  primary_category?: string
+  authority_status?: JobIssueAuthorityStatus
+  is_clarification?: boolean
+  is_disputed?: boolean
+  tampered?: boolean
+  source_missing?: boolean
+  page?: number
+  page_size?: number
+}
+
+export interface JobIssueImportResult {
+  job: number
+  created: number
+  updated: number
+  total: number
+  issues: JobIssue[]
+}
+
+export interface JobIssueDisputeResult {
+  issue: JobIssue
+  request_id: number
+}
+
+export interface JobIssueRulePayload {
+  decision: JobIssueRuleDecision
+  ruling_label?: string
+  ruling_attributes?: Record<string, string | number | boolean | null>
+  ruling_note?: string
+  dispute_outcome?: 'rejected' | null
 }
 
 export interface SampleJob {
@@ -39,6 +126,8 @@ export interface ReviewError {
   id: number
   stage: 'qc1' | 'qc2'
   rework_round: number
+  job_issue?: number | null
+  cvat_issue_id?: number | null
   category: number
   category_name: string
   severity: Severity
@@ -93,6 +182,7 @@ export interface Audit {
 
 export interface ErrorInput {
   category: number
+  job_issue?: number | null
   severity?: Severity
   verdict?: ErrorVerdict
   frame_number?: number | null

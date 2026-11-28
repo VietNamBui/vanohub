@@ -57,6 +57,13 @@ export const bulkAssign = async (projectId: number, ids: number[], data: AssignI
   (await apiClient.post<{ updated: number }>(p(projectId, 'jobs/bulk-assign/'), { ids, ...data })).data
 export const bulkDeadline = async (projectId: number, ids: number[], deadline: string | null, note = '') =>
   (await apiClient.post<{ updated: number }>(p(projectId, 'jobs/bulk-deadline/'), { ids, deadline, note })).data
+export const bulkMoveBatch = async (projectId: number, ids: number[], batch: number, note = '') =>
+  (
+    await apiClient.post<{ updated: number; batch: number; batch_name: string }>(
+      p(projectId, 'jobs/bulk-move-batch/'),
+      { ids, batch, note },
+    )
+  ).data
 
 export const getJobQueue = async (projectId: number, batch?: number) =>
   (
@@ -121,7 +128,13 @@ export const submitAnnotatorJob = async (
   projectId: number,
   jobId: number,
   data: { note?: string; object_count?: number | null } = {},
-) => (await apiClient.post<JobDetail>(p(projectId, `annotator/jobs/${jobId}/submit/`), data)).data
+) =>
+  (
+    await apiClient.post<JobDetail & { issue_sync_warning?: boolean }>(
+      p(projectId, `annotator/jobs/${jobId}/submit/`),
+      data,
+    )
+  ).data
 
 export const getAnnotatorDashboard = async (projectId: number, period = 'week') =>
   (await apiClient.get<AnnotatorDashboard>(p(projectId, 'annotator/dashboard/'), { params: cleanParams({ period }) })).data
@@ -140,6 +153,7 @@ export const createAnnotatorRequest = async (
   payload: {
     job: number
     review_error?: number | null
+    job_issue?: number | null
     request_type: AnnotatorRequestType
     title?: string
     reason: string

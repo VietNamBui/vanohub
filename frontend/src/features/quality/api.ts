@@ -6,7 +6,13 @@ import type {
   AuditSample,
   AuditStrategy,
   ErrorCategory,
+  ErrorCategoryInput,
   ErrorInput,
+  JobIssue,
+  JobIssueDisputeResult,
+  JobIssueImportResult,
+  JobIssueListParams,
+  JobIssueRulePayload,
   Qc1JobTab,
   Qc1Scope,
   Qc1Summary,
@@ -19,6 +25,7 @@ function serializeErrorInput(error: ErrorInput): ErrorInput {
   const isMissingObject = Boolean(error.is_missing_object)
   return {
     category: error.category,
+    ...(error.job_issue != null ? { job_issue: error.job_issue } : {}),
     severity: error.severity,
     verdict: isMissingObject ? 'fail' : (error.verdict ?? 'fail'),
     frame_number: error.frame_number ?? null,
@@ -34,12 +41,12 @@ export const listErrorCategories = async (projectId: number, stage?: 'qc1' | 'qc
   (await apiClient.get<ErrorCategory[]>(p(projectId, 'error-categories/'), { params: cleanParams({ stage }) })).data
 export const createErrorCategory = async (
   projectId: number,
-  data: Partial<ErrorCategory>,
+  data: ErrorCategoryInput,
 ) => (await apiClient.post<ErrorCategory>(p(projectId, 'error-categories/'), data)).data
 export const updateErrorCategory = async (
   projectId: number,
   categoryId: number,
-  data: Partial<ErrorCategory>,
+  data: ErrorCategoryInput,
 ) => (await apiClient.patch<ErrorCategory>(p(projectId, `error-categories/${categoryId}/`), data)).data
 
 // --- Audit (quản lý) ---
@@ -132,6 +139,46 @@ export const rejectQc1Job = async (
       rework_scope,
     })
   ).data
+export const qc1RejectJob = rejectQc1Job
 
 export const getQc1Summary = async (projectId: number, period: string, scope?: 'mine') =>
   (await apiClient.get<Qc1Summary>(p(projectId, 'qc1-summary/'), { params: cleanParams({ period, scope }) })).data
+
+// --- Job Issues (đồng bộ một chiều từ CVAT + vòng đời VanoHub) ---
+export const listJobIssues = async (projectId: number, params: JobIssueListParams = {}) =>
+  (
+    await apiClient.get<Paginated<JobIssue>>(p(projectId, 'issues/'), {
+      params: cleanParams({
+        job: params.job,
+        status: params.status,
+        severity: params.severity,
+        primary_category: params.primary_category,
+        authority_status: params.authority_status,
+        is_clarification:
+          params.is_clarification !== undefined ? (params.is_clarification ? 1 : 0) : undefined,
+        is_disputed: params.is_disputed !== undefined ? (params.is_disputed ? 1 : 0) : undefined,
+        tampered: params.tampered !== undefined ? (params.tampered ? 1 : 0) : undefined,
+        source_missing: params.source_missing !== undefined ? (params.source_missing ? 1 : 0) : undefined,
+        page: params.page,
+        page_size: params.page_size,
+      }),
+    })
+  ).data
+
+export const importJobIssues = async (projectId: number, jobId: number) =>
+  (await apiClient.post<JobIssueImportResult>(p(projectId, 'issues/import/'), { job: jobId })).data
+
+export const addressJobIssue = async (projectId: number, issueId: number, note = '') =>
+  (await apiClient.post<JobIssue>(p(projectId, `issues/${issueId}/address/`), { note })).data
+
+export const disputeJobIssue = async (projectId: number, issueId: number, reason: string) =>
+  (await apiClient.post<JobIssueDisputeResult>(p(projectId, `issues/${issueId}/dispute/`), { reason })).data
+
+export const resolveJobIssue = async (projectId: number, issueId: number, note = '') =>
+  (await apiClient.post<JobIssue>(p(projectId, `issues/${issueId}/resolve/`), { note })).data
+
+export const reopenJobIssue = async (projectId: number, issueId: number, note = '') =>
+  (await apiClient.post<JobIssue>(p(projectId, `issues/${issueId}/reopen/`), { note })).data
+
+export const ruleJobIssue = async (projectId: number, issueId: number, payload: JobIssueRulePayload) =>
+  (await apiClient.post<JobIssue>(p(projectId, `issues/${issueId}/rule/`), payload)).data

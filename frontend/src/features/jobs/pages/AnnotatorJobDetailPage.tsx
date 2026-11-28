@@ -10,11 +10,13 @@ import { getErrorMessage } from '../../../shared/api/errors'
 import FormDialog from '../../../shared/components/ui/FormDialog'
 import PageState from '../../../shared/components/ui/PageState'
 import SectionCard from '../../../shared/components/ui/SectionCard'
+import { useToast } from '../../../shared/hooks/toastContext'
 import { useAction } from '../../../shared/hooks/useAction'
 import { useRequest } from '../../../shared/hooks/useRequest'
 import { formatDateTime, formatNumber, formatShortDateTime } from '../../../shared/utils/format'
 import { listGuidelines } from '../../projects/api'
 import { useProject } from '../../projects/projectContext'
+import JobIssuesPanel from '../../quality/components/JobIssuesPanel'
 import { SEVERITY_LABELS } from '../../quality/constants'
 import type { Severity } from '../../quality/types'
 import { getAnnotatorJob, startAnnotatorJob, submitAnnotatorJob } from '../api'
@@ -51,6 +53,7 @@ export default function AnnotatorJobDetailPage() {
   const jobId = Number(jobIdParam)
   const navigate = useNavigate()
   const { run, pending } = useAction()
+  const toast = useToast()
 
   const [version, setVersion] = useState(0)
   const [disputeErrorId, setDisputeErrorId] = useState<number | null>(null)
@@ -93,11 +96,17 @@ export default function AnnotatorJobDetailPage() {
       parsed = objParsed.value ?? undefined
     }
     setSubmitObjectsError(null)
-    const ok = await run(
+    const submitted = await run(
       () => submitAnnotatorJob(projectId, job.id, { note: submitNote.trim(), ...(parsed !== undefined ? { object_count: parsed } : {}) }),
       `Đã nộp ${job.name} lên QC1`,
     )
-    if (ok) {
+    if (submitted) {
+      if (submitted.issue_sync_warning) {
+        toast.warning(
+          'Không làm mới được danh sách issue từ CVAT khi nộp bài — hệ thống đã kiểm tra theo dữ liệu cache gần nhất.',
+          7,
+        )
+      }
       setSubmitModalOpen(false)
       reload()
     }
@@ -111,7 +120,8 @@ export default function AnnotatorJobDetailPage() {
   const isBlocked = Boolean(job?.is_locked || isEscalatedBlocked)
   const canStart = Boolean(job && !isBlocked && (job.status === 'pending_annotation' || job.status === 'rework'))
   const canSubmit = Boolean(job && !isBlocked && job.status === 'annotating')
-  const canReportDataIssue = Boolean(job && job.status !== 'approved' && job.status !== 'delivered')
+  const canReportDataIssue = Boolean(job && !job.is_locked && job.status !== 'approved' && job.status !== 'delivered')
+  const canDisputeError = canReportDataIssue
 
   const { active: activeErrors, history: historyErrors } = job
     ? splitActiveErrors(job, job.errors)
@@ -264,6 +274,19 @@ export default function AnnotatorJobDetailPage() {
             )}
           </SectionCard>
 
+          <SectionCard>
+            <JobIssuesPanel
+              projectId={projectId}
+              jobId={job.id}
+              jobStatus={job.status}
+              cvatJobId={job.cvat_job_id}
+              isLocked={job.is_locked}
+              isEscalatedBlocked={isEscalatedBlocked}
+              mode="annotator"
+              onChanged={reload}
+            />
+          </SectionCard>
+
           <div className="grid grid-cols-1 gap-5 lg:grid-cols-12">
             <SectionCard
               className="lg:col-span-7"
@@ -312,6 +335,7 @@ export default function AnnotatorJobDetailPage() {
                                 <Button
                                   size="sm"
                                   color="secondary"
+                                  isDisabled={!canDisputeError}
                                   onPress={() => {
                                     setDisputeErrorId(err.id)
                                     setDisputeOpen(true)
