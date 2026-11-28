@@ -1,3 +1,4 @@
+import logging
 from datetime import timedelta
 from typing import Any
 
@@ -21,10 +22,12 @@ from accounts.models import Role, RoleAssignment, User
 from accounts.permissions import Cap, ProjectScopedViewMixin
 from accounts.validation import validated_dict
 from cvat_integration.assignee import schedule_assignee_push
+from cvat_integration.client import CvatError
 from projects.models import ActivityLog, Batch, DataStatus, EscalationPolicy, Project, UserNotification
 from projects.notifications import notify_assigned, notify_review_needed, project_users_with_roles
 from projects.views import StandardPagination
-from quality.models import Audit, AuditSample, ReviewError
+from quality.issues import import_job_issues, resolve_annotator_request_atomic, submit_blocking_issues
+from quality.models import Audit, AuditSample, JobIssue, ReviewError
 from teams.models import TeamMember
 
 from .models import (
@@ -55,6 +58,8 @@ from .serializers import (
     JobWithErrorsSerializer,
     ResolveEscalationSerializer,
 )
+
+logger = logging.getLogger(__name__)
 
 ASSIGN_LOCKED_STATUSES = {JobStatus.QC1_PASSED, JobStatus.PENDING_QC2, JobStatus.APPROVED, JobStatus.DELIVERED}
 
@@ -226,127 +231,188 @@ def start_annotation(job_id, *, project, actor, note=""):
     return job
 
 
-@transaction.atomic
-def submit_annotation(job_id, *, project, actor, note="", object_count=None):
+def _validate_submit_object_count(object_count: Any) -> None:
+    if object_count is not None and (
+        isinstance(object_count, bool)
+        or not isinstance(object_count, int)
+        or object_count < 0
+        or object_count > PG_INT32_MAX
+    ):
+        raise ValidationError({"object_count": f"Số object phải là số nguyên từ 0 đến {PG_INT32_MAX}."})
+
+
+class SubmitBlockedByIssuesError(ValidationError):
+    """Raised when Submit Gate blocks submission; carries typed int blocking_issue_ids for JSON responses."""
+
+    def __init__(self, message_text: str, blocking_issue_ids: list[int]) -> None:
+        self.message_text = message_text
+        self.blocking_issue_ids = blocking_issue_ids
+        super().__init__({"detail": message_text, "blocking_issue_ids": [str(i) for i in blocking_issue_ids]})
+
+
+def submit_annotation(job_id, *, project, actor, note="", object_count=None, client=None):
     """Annotator nộp bài sang hàng chờ QC1: ANNOTATING -> PENDING_QC1.
 
-    Ghi action="job.status" với after.status="pending_qc1" để khớp với chỉ số
-    submitted_in_period trong analytics.ProjectOverviewView.
+    Khi project.issue_gate_enabled=True và job có liên kết CVAT, làm mới CVAT issues
+    bên ngoài transaction (fail-open về cache cục bộ nếu CVAT lỗi) rồi kiểm tra Submit Gate
+    bên trong transaction.atomic().
     """
-    job = lock_job(project, job_id)
-    if job.annotator_id != actor.id:
+    _validate_submit_object_count(object_count)
+    pre_job = (
+        Job.objects.select_related("batch", "dataset", "project")
+        .filter(pk=job_id, project=project)
+        .first()
+    )
+    if pre_job is None:
+        raise NotFound("Không tìm thấy job trong organization.")
+    if pre_job.annotator_id != actor.id:
         raise PermissionDenied("Bạn chỉ có thể nộp job được giao cho mình.")
-    ensure_editable(job)
-    ensure_not_escalated(job)
-
-    if job.status != JobStatus.ANNOTATING:
+    ensure_editable(pre_job)
+    ensure_not_escalated(pre_job)
+    if pre_job.status != JobStatus.ANNOTATING:
         raise ValidationError(
-            f"Chỉ có thể nộp bài khi job ở trạng thái Đang annotate (hiện tại: {job.get_status_display()})."
+            f"Chỉ có thể nộp bài khi job ở trạng thái Đang annotate (hiện tại: {pre_job.get_status_display()})."
         )
 
-    prev_status = job.status
-    prev_objects = job.object_count
-    job.status = JobStatus.PENDING_QC1
-    job.submitted_at = timezone.now()
-    update_fields = ["status", "submitted_at", "last_counted_objects", "round_credited_objects", "updated_at"]
-    manual_object_count_applied = False
-    if object_count is not None:
-        if (
-            isinstance(object_count, bool)
-            or not isinstance(object_count, int)
-            or object_count < 0
-            or object_count > PG_INT32_MAX
-        ):
-            raise ValidationError({"object_count": f"Số object phải là số nguyên từ 0 đến {PG_INT32_MAX}."})
-        # Job liên kết CVAT dùng số đếm đồng bộ từ CVAT làm nguồn chuẩn (tránh ghi đè tay khi nộp).
-        if job.cvat_job_id is None:
+    issue_sync_warning = False
+    if pre_job.project.issue_gate_enabled and pre_job.cvat_job_id is not None:
+        try:
+            import_job_issues(
+                job_id,
+                project=project,
+                client=client,
+                timeout=5.0,
+                max_duration_seconds=10.0,
+                fail_on_lock_busy=False,
+            )
+        except CvatError as exc:
+            issue_sync_warning = True
+            logger.warning(
+                "CVAT issue refresh failed before submit for job %s (cvat_job_id=%s): %s",
+                job_id,
+                pre_job.cvat_job_id,
+                exc,
+            )
+
+    with transaction.atomic():
+        job = lock_job(project, job_id)
+        if job.annotator_id != actor.id:
+            raise PermissionDenied("Bạn chỉ có thể nộp job được giao cho mình.")
+        ensure_editable(job)
+        ensure_not_escalated(job)
+
+        if job.status != JobStatus.ANNOTATING:
+            raise ValidationError(
+                f"Chỉ có thể nộp bài khi job ở trạng thái Đang annotate (hiện tại: {job.get_status_display()})."
+            )
+
+        blockers = submit_blocking_issues(job)
+        if blockers:
+            ids_str = ", ".join(f"#{b.cvat_issue_id}" for b in blockers[:5])
+            raise SubmitBlockedByIssuesError(
+                (
+                    f"Không thể nộp bài vì còn {len(blockers)} issue chưa xử lý ({ids_str}). "
+                    "Hãy đánh dấu đã sửa hoặc gửi phản hồi lỗi trước khi nộp."
+                ),
+                [b.pk for b in blockers],
+            )
+
+        prev_status = job.status
+        prev_objects = job.object_count
+        job.status = JobStatus.PENDING_QC1
+        job.submitted_at = timezone.now()
+        update_fields = ["status", "submitted_at", "last_counted_objects", "round_credited_objects", "updated_at"]
+        manual_object_count_applied = False
+        if object_count is not None and job.cvat_job_id is None:
+            # Job liên kết CVAT dùng số đếm đồng bộ từ CVAT làm nguồn chuẩn (tránh ghi đè tay khi nộp).
             job.object_count = object_count
             update_fields.append("object_count")
             manual_object_count_applied = True
 
-    # Tính sản lượng cuboid ghi bổ sung vào DailyOutputRecord:
-    # - Không cộng đúp phần đã ghi qua đồng bộ CVAT trước QC.
-    # - Vòng partial rework: chỉ tính trên các lỗi chưa bị hủy của ĐÚNG vòng hiện hành
-    #   (max(total_rework_rounds, rework_round) - 1).
-    # - Vòng full rework: tính theo khối lượng làm lại trừ phần đã ghi trong vòng hiện tại.
-    is_rework = job.total_rework_rounds > 0 or job.rework_round > 0
-    count_delta = max(0, job.object_count - job.last_counted_objects)
-    if not is_rework:
-        credited = count_delta
-    elif job.rework_scope == ReworkScope.FULL:
-        credited = max(0, job.object_count - job.round_credited_objects)
-    else:
-        active_round = max(job.total_rework_rounds, job.rework_round) - 1
-        if active_round >= 0:
-            active_errs = job.review_errors.filter(
-                rework_round=active_round,
-                is_voided=False,
-            )
-            existing_targets, missing_targets = _count_unique_error_targets(active_errs)
+        # Tính sản lượng cuboid ghi bổ sung vào DailyOutputRecord:
+        # - Không cộng đúp phần đã ghi qua đồng bộ CVAT trước QC.
+        # - Vòng partial rework: chỉ tính trên các lỗi chưa bị hủy của ĐÚNG vòng hiện hành
+        #   (max(total_rework_rounds, rework_round) - 1).
+        # - Vòng full rework: tính theo khối lượng làm lại trừ phần đã ghi trong vòng hiện tại.
+        is_rework = job.total_rework_rounds > 0 or job.rework_round > 0
+        count_delta = max(0, job.object_count - job.last_counted_objects)
+        if not is_rework:
+            credited = count_delta
+        elif job.rework_scope == ReworkScope.FULL:
+            credited = max(0, job.object_count - job.round_credited_objects)
         else:
-            existing_targets, missing_targets = 0, 0
-        total_added_in_round = job.round_credited_objects + count_delta
-        target_round_work = existing_targets + max(missing_targets, total_added_in_round)
-        credited = max(0, target_round_work - job.round_credited_objects)
+            active_round = max(job.total_rework_rounds, job.rework_round) - 1
+            if active_round >= 0:
+                active_errs = job.review_errors.filter(
+                    rework_round=active_round,
+                    is_voided=False,
+                )
+                existing_targets, missing_targets = _count_unique_error_targets(active_errs)
+            else:
+                existing_targets, missing_targets = 0, 0
+            total_added_in_round = job.round_credited_objects + count_delta
+            target_round_work = existing_targets + max(missing_targets, total_added_in_round)
+            credited = max(0, target_round_work - job.round_credited_objects)
 
-    job.last_counted_objects = max(job.last_counted_objects, job.object_count)
-    job.round_credited_objects += credited
-    job.save(update_fields=update_fields)
+        job.last_counted_objects = max(job.last_counted_objects, job.object_count)
+        job.round_credited_objects += credited
+        job.save(update_fields=update_fields)
 
-    if credited > 0:
-        record_daily_output(
+        if credited > 0:
+            record_daily_output(
+                job=job,
+                user=actor,
+                object_count=credited,
+                is_rework=is_rework,
+                rework_round=max(job.total_rework_rounds, job.rework_round),
+                source=DailyOutputRecord.Source.SUBMIT,
+                at=job.submitted_at,
+            )
+
+        # Gỡ ghim thông báo rework/deadline của job sau khi đã nộp xử lý.
+        UserNotification.objects.filter(
+            recipient=actor,
+            project=project,
             job=job,
-            user=actor,
-            object_count=credited,
-            is_rework=is_rework,
-            rework_round=max(job.total_rework_rounds, job.rework_round),
-            source=DailyOutputRecord.Source.SUBMIT,
-            at=job.submitted_at,
-        )
+            is_pinned_pending=True,
+        ).update(is_pinned_pending=False)
 
-    # Gỡ ghim thông báo rework/deadline của job sau khi đã nộp xử lý.
-    UserNotification.objects.filter(
-        recipient=actor,
-        project=project,
-        job=job,
-        is_pinned_pending=True,
-    ).update(is_pinned_pending=False)
+        before: dict[str, object] = {"status": prev_status}
+        after: dict[str, object] = {
+            "status": JobStatus.PENDING_QC1,
+            "event": "annotator.resubmit" if is_rework else "annotator.submit",
+            "rework_round": job.rework_round,
+            "object_count": job.object_count,
+            "credited_objects": credited,
+            "deadline": _iso(job.deadline),
+        }
+        if manual_object_count_applied and object_count != prev_objects:
+            before["object_count"] = prev_objects
 
-    before: dict[str, object] = {"status": prev_status}
-    after: dict[str, object] = {
-        "status": JobStatus.PENDING_QC1,
-        "event": "annotator.resubmit" if is_rework else "annotator.submit",
-        "rework_round": job.rework_round,
-        "object_count": job.object_count,
-        "credited_objects": credited,
-        "deadline": _iso(job.deadline),
-    }
-    if manual_object_count_applied and object_count != prev_objects:
-        before["object_count"] = prev_objects
-
-    ActivityLog.record(
-        project=project,
-        actor=actor,
-        action="job.status",
-        target=job,
-        job=job,
-        before=before,
-        after=after,
-        note=note,
-    )
-    review_targets = _qc1_review_targets(project, job)
-    if review_targets:
-        notify_review_needed(
-            project,
-            review_targets,
-            title=f"{job.name} chờ kiểm tra QC1",
-            body=f"{actor.get_full_name() or actor.username} vừa nộp bài (vòng {job.rework_round}).",
-            action_url=f"/projects/{project.id}/qc1/work",
-            job=job,
+        ActivityLog.record(
+            project=project,
             actor=actor,
+            action="job.status",
+            target=job,
+            job=job,
+            before=before,
+            after=after,
+            note=note,
         )
-    schedule_assignee_push([job.pk])
-    return job
+        review_targets = _qc1_review_targets(project, job)
+        if review_targets:
+            notify_review_needed(
+                project,
+                review_targets,
+                title=f"{job.name} chờ kiểm tra QC1",
+                body=f"{actor.get_full_name() or actor.username} vừa nộp bài (vòng {job.rework_round}).",
+                action_url=f"/projects/{project.id}/qc1/work",
+                job=job,
+                actor=actor,
+            )
+        schedule_assignee_push([job.pk])
+        job._issue_sync_warning = issue_sync_warning
+        return job
 
 
 def assign_job(job, data, actor, project, *, push_cvat=True):
@@ -860,6 +926,11 @@ class AnnotatorJobViewSet(
                 .exclude(audit_samples__auditor=locked_user)
                 .exclude(audit_samples__reviewed_by=locked_user)
                 .exclude(review_errors__reported_by=locked_user)
+                .exclude(
+                    issues__authority_status=JobIssue.AuthorityStatus.VALID,
+                    issues__author_stage__in=[JobIssue.AuthorStage.QC1, JobIssue.AuthorStage.QC2],
+                    issues__author=locked_user,
+                )
             )
             if team_ids:
                 # Chặn chặt theo team: chỉ nhận job thuộc task của team mình hoặc task chung (chưa gán team).
@@ -914,14 +985,23 @@ class AnnotatorJobViewSet(
         """Nộp bài sang hàng chờ QC1 (ANNOTATING -> PENDING_QC1)."""
         job = self.get_object()
         data = validated_dict(AnnotatorSubmitSerializer(data=request.data))
-        updated = submit_annotation(
-            job.pk,
-            project=self.project,
-            actor=request.user,
-            note=data["note"],
-            object_count=data.get("object_count"),
-        )
-        return self._detail(updated)
+        try:
+            updated = submit_annotation(
+                job.pk,
+                project=self.project,
+                actor=request.user,
+                note=data["note"],
+                object_count=data.get("object_count"),
+            )
+        except SubmitBlockedByIssuesError as exc:
+            return Response(
+                {"detail": exc.message_text, "blocking_issue_ids": exc.blocking_issue_ids},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        fresh = _base_job_queryset(self.project).get(pk=updated.pk)
+        payload = dict(JobDetailSerializer(fresh, context=self.get_serializer_context()).data)
+        payload["issue_sync_warning"] = bool(getattr(updated, "_issue_sync_warning", False))
+        return Response(payload)
 
 
 def _project_pms(project) -> list[User]:
@@ -961,7 +1041,7 @@ class AnnotatorRequestViewSet(
 
     def _base_queryset(self):
         return AnnotatorRequest.objects.filter(project=self.project).select_related(
-            "job__batch", "review_error__category", "created_by", "handler"
+            "job__batch", "review_error__category", "job_issue", "created_by", "handler"
         )
 
     def get_queryset(self) -> Any:
@@ -983,6 +1063,8 @@ class AnnotatorRequestViewSet(
         job_id = data["job_obj"].pk
         review_error_obj = data["review_error_obj"]
         review_error_id = review_error_obj.pk if review_error_obj is not None else None
+        job_issue_obj = data.get("job_issue_obj")
+        job_issue_id = job_issue_obj.pk if job_issue_obj is not None else None
         req_type = data["request_type"]
 
         pms = _project_pms(self.project)
@@ -1002,15 +1084,40 @@ class AnnotatorRequestViewSet(
             if job.status in (JobStatus.APPROVED, JobStatus.DELIVERED):
                 raise ValidationError({"job": "Không thể gửi yêu cầu trên job đã duyệt hoặc đã bàn giao."})
 
+            # Thứ tự khoá chuẩn: Job -> JobIssue -> ReviewError -> AnnotatorRequest
+            job_issue = None
+            if job_issue_id is not None:
+                if req_type != AnnotatorRequest.RequestType.ERROR_DISPUTE:
+                    raise ValidationError({"job_issue": "Chỉ gắn job_issue với yêu cầu phản hồi lỗi (error_dispute)."})
+                if job.is_locked or job.batch.status != DataStatus.ACTIVE or job.dataset.status != DataStatus.ACTIVE:
+                    raise ValidationError({"job": "Job, Task hoặc Project đang bị khoá."})
+                job_issue = (
+                    JobIssue.objects.select_for_update(of=("self",))
+                    .filter(pk=job_issue_id, project=self.project, job=job)
+                    .first()
+                )
+                if job_issue is None:
+                    raise ValidationError({"job_issue": "Issue không thuộc job này."})
+                if (
+                    job_issue.authority_status != JobIssue.AuthorityStatus.VALID
+                    or job_issue.status
+                    not in (JobIssue.Status.OPEN, JobIssue.Status.REOPENED, JobIssue.Status.ADDRESSED)
+                ):
+                    raise ValidationError(
+                        {"job_issue": "Issue này không hợp lệ hoặc không ở trạng thái có thể phản hồi."}
+                    )
+
             review_error = None
             if review_error_id is not None:
                 review_error = (
-                    ReviewError.objects.select_for_update().filter(pk=review_error_id, job=job).first()
+                    ReviewError.objects.select_for_update(of=("self",)).filter(pk=review_error_id, job=job).first()
                 )
                 if review_error is None:
                     raise ValidationError({"review_error": "Lỗi không thuộc job này."})
                 if review_error.is_voided:
                     raise ValidationError({"review_error": "Lỗi này đã được gỡ bỏ, không thể phản hồi lại."})
+                if job_issue is not None and review_error.job_issue_id and review_error.job_issue_id != job_issue.pk:
+                    raise ValidationError({"job_issue": "JobIssue không khớp với ReviewError đã chọn."})
 
             if req_type == AnnotatorRequest.RequestType.ERROR_DISPUTE:
                 dup_qs = AnnotatorRequest.objects.filter(
@@ -1019,10 +1126,14 @@ class AnnotatorRequestViewSet(
                     request_type=req_type,
                     status=AnnotatorRequest.Status.PENDING_PM,
                 )
-                if review_error is not None:
+                if review_error is not None and job_issue is not None:
+                    dup_qs = dup_qs.filter(Q(review_error=review_error) | Q(job_issue=job_issue))
+                elif review_error is not None:
                     dup_qs = dup_qs.filter(review_error=review_error)
+                elif job_issue is not None:
+                    dup_qs = dup_qs.filter(job_issue=job_issue)
                 else:
-                    dup_qs = dup_qs.filter(review_error__isnull=True)
+                    dup_qs = dup_qs.filter(review_error__isnull=True, job_issue__isnull=True)
                 if dup_qs.exists():
                     raise ValidationError("Đã có yêu cầu phản hồi lỗi đang chờ PM xử lý cho mục này.")
             elif (
@@ -1036,19 +1147,31 @@ class AnnotatorRequestViewSet(
             ):
                 raise ValidationError("Đã có báo cáo dữ liệu bị chặn đang chờ PM xử lý cho job này.")
 
+            clean_reason = data["reason"].strip()
+            if job_issue is not None and req_type == AnnotatorRequest.RequestType.ERROR_DISPUTE:
+                job_issue.is_disputed = True
+                job_issue.dispute_reason = clean_reason
+                if job_issue.status in (JobIssue.Status.OPEN, JobIssue.Status.REOPENED, JobIssue.Status.ADDRESSED):
+                    job_issue.status = JobIssue.Status.UNCLEAR
+                job_issue.save(update_fields=["is_disputed", "dispute_reason", "status", "updated_at"])
+
             req = AnnotatorRequest.objects.create(
                 project=self.project,
                 job=job,
                 review_error=review_error,
+                job_issue=job_issue,
                 request_type=req_type,
                 status=initial_status,
                 title=data["title"],
-                reason=data["reason"].strip(),
+                reason=clean_reason,
                 progress_note=default_progress,
                 created_by=request.user,
                 handler=handler,
                 handler_role=handler_role,
             )
+            after_payload: dict[str, Any] = {"request_id": req.id, "type": req_type, "status": initial_status}
+            if job_issue is not None:
+                after_payload["job_issue_id"] = job_issue.pk
             ActivityLog.record(
                 project=self.project,
                 actor=request.user,
@@ -1059,7 +1182,7 @@ class AnnotatorRequestViewSet(
                 ),
                 target=job,
                 job=job,
-                after={"request_id": req.id, "type": req_type, "status": initial_status},
+                after=after_payload,
                 note=req.title,
             )
             if request.user.notify_request_updates:
@@ -1092,83 +1215,17 @@ class AnnotatorRequestViewSet(
 
     @action(detail=True, methods=["post"])
     def resolve(self, request, project_id, pk=None):
-        """PM kết luận yêu cầu (RESOLVED hoặc REJECTED); nếu chấp nhận error_dispute thì gỡ lỗi (is_voided=True)."""
+        """PM kết luận yêu cầu (RESOLVED hoặc REJECTED); nếu chấp nhận error_dispute thì gỡ lỗi / phán quyết issue."""
         data = validated_dict(AnnotatorRequestResolveSerializer(data=request.data))
-        new_status = data["status"]
         req_pk = _parse_pk(pk, "Không tìm thấy yêu cầu trong organization.")
-
-        with transaction.atomic():
-            req = (
-                AnnotatorRequest.objects.select_for_update(of=("self",))
-                .select_related("job", "created_by")
-                .filter(pk=req_pk, project=self.project)
-                .first()
-            )
-            if req is None:
-                raise NotFound("Không tìm thấy yêu cầu trong organization.")
-            if req.status != AnnotatorRequest.Status.PENDING_PM:
-                raise ValidationError("Yêu cầu này đã được xử lý, không thể cập nhật lại.")
-
-            before_status = req.status
-            req.status = new_status
-            if data["progress_note"]:
-                req.progress_note = data["progress_note"]
-            if data["resolution_note"]:
-                req.resolution_note = data["resolution_note"]
-            req.handler = request.user
-            req.handler_role = "PM"
-            req.resolved_at = timezone.now()
-            req.save()
-
-            voided_error_id: int | None = None
-            if (
-                req.request_type == AnnotatorRequest.RequestType.ERROR_DISPUTE
-                and new_status == AnnotatorRequest.Status.RESOLVED
-                and req.review_error_id
-            ):
-                err = ReviewError.objects.select_for_update().filter(pk=req.review_error_id).first()
-                if err is not None:
-                    if not err.is_voided:
-                        err.is_voided = True
-                        err.save(update_fields=["is_voided"])
-                    voided_error_id = err.pk
-
-            pm_ids = list(
-                RoleAssignment.objects.filter(project=self.project, role=Role.PROJECT_MANAGER)
-                .values_list("user_id", flat=True)
-                .distinct()
-            )
-            unpin_recipients = set(pm_ids) | {req.created_by_id}
-            UserNotification.objects.filter(
-                recipient_id__in=unpin_recipients,
-                project=self.project,
-                job=req.job,
-                category=UserNotification.Category.DISPUTE,
-                is_pinned_pending=True,
-            ).update(is_pinned_pending=False)
-
-            if req.created_by.notify_request_updates:
-                UserNotification.objects.create(
-                    recipient=req.created_by,
-                    project=self.project,
-                    job=req.job,
-                    category=UserNotification.Category.DISPUTE,
-                    title=f"{req.get_status_display()} · {req.job.name}",
-                    body=req.resolution_note or req.title,
-                    action_url=f"/projects/{self.project.id}/annotator/requests",
-                )
-
-            ActivityLog.record(
-                project=self.project,
-                actor=request.user,
-                action="annotator.request_resolve",
-                target=req.job,
-                job=req.job,
-                before={"request_id": req.id, "status": before_status},
-                after={"request_id": req.id, "status": new_status, "voided_error_id": voided_error_id},
-                note=req.resolution_note or req.progress_note,
-            )
-
+        req = resolve_annotator_request_atomic(
+            self.project,
+            req_pk,
+            actor=request.user,
+            new_status=data["status"],
+            progress_note=data["progress_note"],
+            resolution_note=data["resolution_note"],
+        )
         fresh = self._base_queryset().get(pk=req.pk)
         return Response(AnnotatorRequestSerializer(fresh).data)
 

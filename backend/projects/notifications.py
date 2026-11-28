@@ -174,6 +174,11 @@ def notify_batch_ready_for_qc2(project: Any, batch: Any, *, actor: Any = None) -
     passed_count = jobs_qs.filter(status=JobStatus.QC1_PASSED).count()
     if passed_count == 0:
         return []
+    if getattr(project, "issue_gate_enabled", False):
+        from quality.issues import acceptance_blocking_issues_for_jobs
+
+        if acceptance_blocking_issues_for_jobs(project, list(jobs_qs)):
+            return []
 
     pms = project_users_with_roles(project, Role.PROJECT_MANAGER)
     return notify_review_needed(

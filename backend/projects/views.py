@@ -22,6 +22,7 @@ from cvat_integration.assignee import schedule_assignee_push
 from cvat_integration.client import CvatError
 from cvat_integration.sync import dataset_labels, sync_organization
 from jobs.models import ACTIVE_ANNOTATOR_STATUSES, OPEN_STATUSES, STAGE_STATUSES, Job, JobStatus
+from quality.issues import acceptance_blocking_issues_for_jobs
 from quality.models import Audit, AuditSample
 from quality.qc2 import ensure_qc2_sample
 from teams.models import Team, TeamMember
@@ -843,6 +844,12 @@ class BatchViewSet(
             ready_jobs = [j for j in jobs if j.status == JobStatus.QC1_PASSED]
             if not ready_jobs:
                 raise ValidationError("Task không có job nào ở trạng thái Đạt QC1 cần chuyển sang QC2.")
+            issue_blockers = acceptance_blocking_issues_for_jobs(self.project, jobs)
+            if issue_blockers:
+                ids_str = ", ".join(f"#{b.cvat_issue_id}" for b in issue_blockers[:5])
+                raise ValidationError(
+                    f"Không thể xác nhận chuyển QC2 vì còn {len(issue_blockers)} issue chưa xử lý ({ids_str})."
+                )
 
             now = timezone.now()
             transitioned_ids = [j.pk for j in ready_jobs]
@@ -922,7 +929,7 @@ class DeliveryViewSet(
         """Các task chưa bàn giao + mức độ sẵn sàng + trạng thái hạn bàn giao (DH07)."""
         now = timezone.now()
         soon_cutoff = now + timedelta(hours=24)
-        batches = (
+        batches = list(
             Batch.objects.filter(project=self.project)
             .exclude(status=DataStatus.DELIVERED)
             .select_related("dataset")
@@ -942,6 +949,15 @@ class DeliveryViewSet(
                 ),
             )
         )
+        blocking_by_batch: dict[int, int] = defaultdict(int)
+        if self.project.issue_gate_enabled and batches:
+            batch_ids = [b.id for b in batches]
+            batch_jobs = list(Job.objects.filter(project=self.project, batch_id__in=batch_ids).only("id", "batch_id"))
+            job_to_batch = {j.pk: j.batch_id for j in batch_jobs}
+            for ji in acceptance_blocking_issues_for_jobs(self.project, batch_jobs):
+                b_id = job_to_batch.get(ji.job_id)
+                if b_id is not None:
+                    blocking_by_batch[b_id] += 1
         rows: list[dict[str, Any]] = []
         for b in batches:
             if not b.deadline:
@@ -952,6 +968,7 @@ class DeliveryViewSet(
                 due_state = "soon"
             else:
                 due_state = "normal"
+            blocking_issues = blocking_by_batch.get(b.id, 0)
             rows.append({
                 "batch": b.id,
                 "batch_name": b.name,
@@ -968,6 +985,7 @@ class DeliveryViewSet(
                 "in_progress_audits": getattr(b, "in_progress_audits", 0),
                 # Giữ khoá open_audits theo số mẫu QC2 chờ kiểm để tương thích UI DeliveryPage.tsx hiện tại.
                 "open_audits": b.pending_qc2_samples,
+                "blocking_issues": blocking_issues,
                 "ready": (
                     b.status == DataStatus.ACTIVE
                     and b.dataset.status == DataStatus.ACTIVE
@@ -975,6 +993,7 @@ class DeliveryViewSet(
                     and b.approved_count == b.job_count
                     and b.pending_qc2_samples == 0
                     and b.locked_jobs == 0
+                    and blocking_issues == 0
                 ),
             })
         return Response(rows)
@@ -1016,6 +1035,12 @@ class DeliveryViewSet(
                     raise ValidationError("Task còn job đang bị khoá — mở khoá trước khi bàn giao.")
                 if AuditSample.objects.filter(audit__batch=batch, result=AuditSample.Result.PENDING).exists():
                     raise ValidationError("Task còn lượt QC2 chưa kiểm.")
+                issue_blockers = acceptance_blocking_issues_for_jobs(self.project, jobs)
+                if issue_blockers:
+                    ids_str = ", ".join(f"#{b.cvat_issue_id}" for b in issue_blockers[:5])
+                    raise ValidationError(
+                        f"Không thể bàn giao vì còn {len(issue_blockers)} issue chưa xử lý ({ids_str})."
+                    )
                 delivery = cast(
                     Delivery,
                     serializer.save(project=self.project, batch=batch, delivered_by=self.request.user),

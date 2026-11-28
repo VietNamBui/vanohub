@@ -1,7 +1,7 @@
 # Port Plan (v2 — Hardened): Issue Logging & Management + Custom Vector Events
 
 Prepared: 2026-11-28. Branch: `feature/annotator-qclv1`.  
-Status: **Revised after 5-agent audit (`3/3 REVISE`) and 16-scenario defect-lifecycle dry-run (`16/16 PASS`). Slices 1–2 ready to implement; Slice 3 decoupled behind Gate 0 (`D06`, CVAT Compose durability; stock CVAT API only — `PV04` intact).**
+Status: **Revised after 5-agent audit (`3/3 REVISE`) and 16-scenario defect-lifecycle dry-run (`16/16 PASS`). Slice 1 backend implemented (`JobIssue` API & two-gate enforcement verified in source); Slice 2 frontend ready; optional external Option A UI-only `CLIENT_PLUGINS` plugin track documented (`PV04` intact); Slice 3 decoupled behind Gate 0 (`D06`, CVAT Compose durability; stock CVAT API only).**
 
 Narrows [fold-issue-logging-management-plan.md](./fold-issue-logging-management-plan.md): only issue logging/management (Slices 1–2) and stock CVAT event-export telemetry (Slice 3) are in scope. Scorecards, funnel, ETA, Pareto, 3D diff, `S0` baseline, and `RulingPrecedent` remain out of scope.
 
@@ -115,8 +115,16 @@ Executed via standalone state-machine simulation (`scratch/dry_run_defect_lifecy
 
 ## 4. Implementation Slices
 
-### Slice 1 — Backend Issue Import, Hardened Lifecycle, Gates & PM Ruling (Ready Now)
-- **Pre-code doc alignment:** Update `docs/platform-spec.md` (`DL05`, `L6`–`L7`, `L11`, RBAC & notification matrices), `docs/api/contracts.md`, and `.agents/rules/domain-invariants.md`.
+### Slice 1 — Backend Issue Import, Hardened Lifecycle, Gates & PM Ruling (Implemented)
+- **Doc alignment:** `docs/platform-spec.md` (`DL05`, `L6`–`L7`, `L11`, `L13`, RBAC & notification matrices), `docs/api/contracts.md`, and `.agents/rules/domain-invariants.md`.
+- **Verified `JobIssue` API endpoints (`backend/quality/urls.py` + `backend/quality/views.py` `JobIssueViewSet`):**
+  - `GET /api/projects/{id}/issues/` & `GET /api/projects/{id}/issues/{issue_id}/` (`StandardPagination`, `PQ01` role-scoped `get_queryset()`; capabilities: `[VIEW_JOBS, PERFORM_QC1, PERFORM_AUDIT, ANNOTATE_JOBS]`)
+  - `POST /api/projects/{id}/issues/import/` (body `{"job": int}`; capabilities: `[VIEW_JOBS, PERFORM_QC1, PERFORM_AUDIT, ANNOTATE_JOBS]`; blocks `DELIVERED`/locked/non-CVAT jobs; returns `{job, created, updated, total, issues}`; maps `CvatError` → `502`)
+  - `POST /api/projects/{id}/issues/{issue_id}/address/` (`Cap.ANNOTATE_JOBS`; `job.annotator_id == user.id`, active editable annotator job, blocks unruled `CLS-UNK`/`CLS-UNCL`)
+  - `POST /api/projects/{id}/issues/{issue_id}/dispute/` (`Cap.ANNOTATE_JOBS`; returns `{issue, request_id}`)
+  - `POST /api/projects/{id}/issues/{issue_id}/resolve/` (`[Cap.PERFORM_QC1, Cap.PERFORM_AUDIT, Cap.MANAGE_JOBS]`; stage & four-eyes checked)
+  - `POST /api/projects/{id}/issues/{issue_id}/reopen/` (`[Cap.PERFORM_QC1, Cap.PERFORM_AUDIT, Cap.MANAGE_JOBS]`; stage & four-eyes checked, advances `reopened_after_comment_id`)
+  - `POST /api/projects/{id}/issues/{issue_id}/rule/` (`Cap.MANAGE_JOBS`; `decision in {"ruling", "not_an_issue", "resolved"}`; blocks `DELIVERED`, blocks dual PM+Annotator self-void)
 - **`backend/quality/issue_envelope.py`:** Pure VanoHub comment-envelope parser defining VanoHub's optional structured CVAT comment grammar (`NEW_ISSUE_PREFIX_RE`, lifecycle markers, `[FRAMES]`, `[PARAMS]`, `decode_3d_position` finite + `1..PG_INT32_MAX` + mutually exclusive slots; degrades cleanly to plain vanilla CVAT issues when unstructured) + unit tests.
 - **`backend/cvat_integration/schemas.py` & `client.py`:** Strict Pydantic v2 `CvatIssuePayload` / `CvatCommentPayload` (nullable `owner`/`assignee`/`created_date`/`updated_date`, finite `list[float]`, IDs `1..PG_INT32_MAX`, `issue.job == cvat_job_id`); `list_job_issues(job_id)` and `list_job_comments(job_id)` passing `sort="id"`, deduping by `id`, honoring interactive timeout overrides.
 - **`backend/projects/models.py` & `serializers.py`:** Add `Project.issue_gate_enabled = BooleanField(default=False)` to `Project`, `ProjectDetailSerializer`, and `ProjectSettingsSerializer`.
@@ -127,19 +135,15 @@ Executed via standalone state-machine simulation (`scratch/dry_run_defect_lifecy
   - Add `AnnotatorRequest.job_issue = ForeignKey(JobIssue, null=True, blank=True, on_delete=SET_NULL, related_name="disputes")` with `clean()` checking `job_issue.job_id == job_id`.
 - **`backend/quality/issues.py`:** Import service, per-comment author authority, tamper detection, `submit_blocking_issues`, `acceptance_blocking_issues`, and shared atomic adjudication/dispute service enforcing §2.4 canonical lock order.
 - **`backend/quality/views.py`, `serializers.py`, `urls.py`, `qc2.py`:**
-  - `JobIssueViewSet` (`ProjectScopedViewMixin`, `StandardPagination`, `PQ01` role-scoped `get_queryset()`):
-    - `list` / `retrieve` / `import`: `[Cap.VIEW_JOBS, Cap.PERFORM_QC1, Cap.PERFORM_AUDIT, Cap.ANNOTATE_JOBS]` (`import` blocks `DELIVERED`/locked/non-CVAT jobs).
-    - `address` / `dispute`: `Cap.ANNOTATE_JOBS` (`job.annotator_id == user.id`, active editable job).
-    - `resolve` / `reopen`: `[Cap.PERFORM_QC1, Cap.PERFORM_AUDIT, Cap.MANAGE_JOBS]` (stage & four-eyes checked).
-    - `rule`: `Cap.MANAGE_JOBS` (non-`DELIVERED`, self-void blocked).
+  - `JobIssueViewSet` (`ProjectScopedViewMixin`, `StandardPagination`, `PQ01` role-scoped `get_queryset()`), exposing the verified endpoints listed above.
   - Extend `_BaseErrorInputSerializer` with optional `job_issue` ID (explicit validated `category`, enforcing `review_error_missing_object_valid` for `EXI-MISS`, stage-matching & `sample.frames` check on QC2, forcing selected `JobIssue`s to `reopened` + comment floor).
-  - Include valid QC `JobIssue` authors in `get_stage_history`, `_exclude_four_eyes_conflicts`, and `AnnotatorJobViewSet.claim`.
+  - Include valid QC `JobIssue` authors in `get_stage_history`, `_exclude_qc1_four_eyes_conflicts`, and `AnnotatorJobViewSet.claim`.
   - Enforce Acceptance Gate in `qc1_pass`, `AuditSampleViewSet.pass_`, `BatchViewSet.confirm_qc2`, and `DeliveryViewSet.perform_create`.
 - **`backend/jobs/views.py`, `backend/cvat_integration/sync.py`, `backend/analytics/views.py`:**
-  - Wire `submit_annotation` (non-decorated atomic block, pre-lock refresh + `VH04` fail-open warning) and all `sync.py` `→ PENDING_QC1` / `POST_QC1_CVAT_STATES` paths (`sync_organization`, `sync_batch`, `import_task_jobs`, `_new_job`) with `_check_deadline()` guards.
+  - Wire `submit_annotation` (non-decorated atomic block, pre-lock refresh + `VH04` fail-open `issue_sync_warning`) and all `sync.py` `→ PENDING_QC1` / `POST_QC1_CVAT_STATES` paths (`sync_organization`, `sync_batch`, `import_task_jobs`, `_new_job`) with `_check_deadline()` guards.
   - Refactor `AnnotatorRequestViewSet.resolve` to lock `Job` first and invoke the shared bidirectional dispute/ruling service.
   - Add `pending_issue_rulings` to `ProjectOverviewView.pending_decisions` (`TD13`) and emit pinned `UserNotification` events per §2.2.
-- **Tests:** All 16 dry-run scenarios as PostgreSQL 17 integration tests + RBAC (`404` vs `403` + `PQ01`), canonical lock-order/concurrency tests, and DB `IntegrityError` tests in `backend/projects/test_integrity.py`.
+- **Tests:** PostgreSQL 17 integration tests in `backend/quality/test_issue_envelope.py`, `backend/quality/test_issues.py`, and DB `IntegrityError` tests in `backend/projects/test_integrity.py`.
 
 ### Slice 2 — Frontend (Untitled UI / React Aria)
 - `frontend/src/features/quality/qc1/Qc1ReviewPanel.tsx` & `frontend/src/features/quality/qc2/ReviewPanel.tsx`: Job issues panel, on-demand import button, QC `Xác nhận đã sửa` (`resolve`), tamper/drift badges, and one-click Reject prefill (`job_issue` + category).
@@ -147,6 +151,13 @@ Executed via standalone state-machine simulation (`scratch/dry_run_defect_lifecy
 - `frontend/src/features/jobs/pages/JobsPage.tsx` & `AnnotatorRequestsPage.tsx`: PM ruling modal (`Phán quyết` / `Không phải lỗi` / `Đã xử lý`, guarded by `manage_jobs`).
 - `frontend/src/features/quality/pages/ErrorCategoriesPage.tsx` (`code`, `primary_category` `E1`–`E6`) and `frontend/src/features/projects/pages/ProjectSettingsPage.tsx` (`issue_gate_enabled` toggle wired into keyed `formKey`).
 - Vietnamese labels consistent with `docs/platform-spec.md`; `RequireCap` guards matching backend `Cap`.
+
+### Optional External Track — Option A UI-Only `CLIENT_PLUGINS` Helper (External Repo, `PV04` Intact)
+- **Repository & boundary:** Maintained strictly in an external repository (e.g., `cvat-issue-logger-plugin`) and injected at CVAT frontend build time via stock `CLIENT_PLUGINS` with **zero `cvat-base` source modifications**, **zero `overridableComponents`**, **zero `core.plugins.register` hooks**, and **zero VanoHub API/token coupling** (preserves `PV04` and `D04` intact).
+- **CVAT UI surfaces (strictly additive stock slots):**
+  - `annotationPage.menuActions.items` — structured issue-authoring dialog that emits VanoHub's optional structured opening comment envelope (`[CODE][severity]?`, `[FRAMES:a-b]`, `[PARAMS:...]`) through stock CVAT issue creation.
+  - `annotationPage.player.slider` — lightweight visual frame markers on the timeline slider for existing job issues.
+- **Create-only in CVAT; lifecycle in VanoHub:** The helper assists issue creation only inside CVAT. It performs no lifecycle transitions, receives no VanoHub credentials/role tokens, and is treated as strictly untrusted input by VanoHub; all workflow transitions (`address`, `dispute`, `resolve`, `reopen`, `rule`), four-eyes checks, tamper defenses, and Two-Gate enforcement live exclusively in VanoHub (`JobIssueViewSet` + `backend/quality/issues.py`). When the helper is absent, VanoHub degrades cleanly to vanilla CVAT issues.
 
 ### Slice 3 — Stock CVAT Event Export Ingestion & `NS04` (DECOUPLED — Blocked on Pre-Slice-3 Gates)
 

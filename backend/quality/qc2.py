@@ -18,7 +18,7 @@ from accounts.models import Role, RoleAssignment, User
 from jobs.models import DailyOutputRecord, Job, JobStatus
 from projects.models import ActivityLog, Batch, SamplingMethod
 
-from .models import Audit, AuditSample, ReviewError, ReviewStage
+from .models import Audit, AuditSample, JobIssue, ReviewError, ReviewStage
 
 ANNOTATOR_EVENTS = (
     "annotator.claim",
@@ -93,6 +93,19 @@ def get_stage_history(job: Job) -> tuple[set[int], set[int], set[int]]:
             qc2_ids.add(auditor_id)
         if reviewed_by_id:
             qc2_ids.add(reviewed_by_id)
+
+    for author_stage, author_id in JobIssue.objects.filter(
+        job=job,
+        authority_status=JobIssue.AuthorityStatus.VALID,
+        author_id__isnull=False,
+        author_stage__in=[JobIssue.AuthorStage.QC1, JobIssue.AuthorStage.QC2],
+    ).values_list("author_stage", "author_id"):
+        if author_id is None:
+            continue
+        if author_stage == JobIssue.AuthorStage.QC1:
+            qc1_ids.add(author_id)
+        elif author_stage == JobIssue.AuthorStage.QC2:
+            qc2_ids.add(author_id)
 
     return annotator_ids, qc1_ids, qc2_ids
 

@@ -56,7 +56,7 @@ from jobs.serializers import AnnotatorRequestSerializer, JobSerializer, ReviewEr
 from jobs.views import order_by_db06_priority
 from projects.models import ActivityLog, Batch, DataStatus, Delivery, EscalationPolicy
 from projects.notifications import user_team_ids
-from quality.models import Audit, AuditSample, ErrorVerdict, ReviewError, ReviewStage, Severity
+from quality.models import Audit, AuditSample, ErrorVerdict, JobIssue, ReviewError, ReviewStage, Severity
 from quality.qc2 import ANNOTATOR_EVENTS
 from teams.models import Team, TeamMember
 
@@ -428,15 +428,28 @@ class ProjectOverviewView(ProjectScopedViewMixin, APIView):
         pending_requests = AnnotatorRequest.objects.filter(
             project=project, status=AnnotatorRequest.Status.PENDING_PM
         ).count()
+        pending_issue_rulings = JobIssue.objects.filter(
+            project=project,
+            authority_status=JobIssue.AuthorityStatus.VALID,
+            source_missing=False,
+            status=JobIssue.Status.UNCLEAR,
+        ).count()
         escalated_jobs = totals["escalated"] or 0
         pending_decisions = {
             "batches_ready_for_qc2_confirm": batches_ready_for_qc2_confirm,
             "batches_ready_for_qc2": batches_ready_for_qc2_confirm,
             "pending_qc2_samples": pending_qc2_samples,
             "pending_requests": pending_requests,
+            "pending_issue_rulings": pending_issue_rulings,
             "escalated_jobs": escalated_jobs,
             "escalated": escalated_jobs,
-            "total": batches_ready_for_qc2_confirm + pending_qc2_samples + pending_requests + escalated_jobs,
+            "total": (
+                batches_ready_for_qc2_confirm
+                + pending_qc2_samples
+                + pending_requests
+                + pending_issue_rulings
+                + escalated_jobs
+            ),
         }
 
         fpy = _fpy_stats(jobs)
@@ -1179,7 +1192,7 @@ class AnnotatorDashboardView(ProjectScopedViewMixin, APIView):
         kpi_prog = _kpi_progress(actual_objects, project.kpi_annotation_target)
 
         req_qs = AnnotatorRequest.objects.filter(project=project, created_by=user).select_related(
-            "job__batch", "review_error__category", "created_by", "handler"
+            "job__batch", "review_error__category", "job_issue", "created_by", "handler"
         )
         pending_req_count = req_qs.filter(status=AnnotatorRequest.Status.PENDING_PM).count()
         recent_req_items = AnnotatorRequestSerializer(req_qs[:5], many=True).data
@@ -1601,6 +1614,12 @@ class Qc1SummaryView(ProjectScopedViewMixin, APIView):
             hist_qc2_err_job_ids = ReviewError.objects.filter(
                 job__project=project, stage=ReviewStage.QC2, reported_by=user
             ).values("job_id")
+            hist_qc2_issue_job_ids = JobIssue.objects.filter(
+                project=project,
+                authority_status=JobIssue.AuthorityStatus.VALID,
+                author_stage=JobIssue.AuthorStage.QC2,
+                author=user,
+            ).values("job_id")
             t_ids = user_team_ids(project, user)
             team_pool_q = (Q(batch__team_id__in=t_ids) | Q(batch__team__isnull=True)) if t_ids else Q(
                 batch__team__isnull=True
@@ -1613,6 +1632,7 @@ class Qc1SummaryView(ProjectScopedViewMixin, APIView):
                     | Q(pk__in=hist_ann_job_ids)
                     | Q(pk__in=hist_qc2_sample_job_ids)
                     | Q(pk__in=hist_qc2_err_job_ids)
+                    | Q(pk__in=hist_qc2_issue_job_ids)
                 )
                 .count()
             )

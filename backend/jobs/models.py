@@ -68,9 +68,11 @@ class Job(models.Model):
         qc1_reviewer_id: int | None
         events: Any
         review_errors: Any
+        issues: Any
         audit_samples: Any
         annotator_requests: Any
         daily_outputs: Any
+        _issue_sync_warning: bool
 
         def get_status_display(self) -> str: ...
         def get_rework_scope_display(self) -> str: ...
@@ -250,6 +252,9 @@ class AnnotatorRequest(models.Model):
     review_error = models.ForeignKey(
         "quality.ReviewError", on_delete=models.SET_NULL, null=True, blank=True, related_name="disputes"
     )
+    job_issue = models.ForeignKey(
+        "quality.JobIssue", on_delete=models.SET_NULL, null=True, blank=True, related_name="disputes"
+    )
     request_type = models.CharField(max_length=20, choices=RequestType.choices)
     status = models.CharField(max_length=20, choices=Status.choices, default=Status.PENDING_PM)
     title = models.CharField(max_length=255)
@@ -276,11 +281,21 @@ class AnnotatorRequest(models.Model):
         project_id: int
         job_id: int
         review_error_id: int | None
+        job_issue_id: int | None
         created_by_id: int
         handler_id: int | None
 
         def get_request_type_display(self) -> str: ...
         def get_status_display(self) -> str: ...
+
+    def clean(self) -> None:
+        super().clean()
+        if self.job_id and self.project_id and self.job.project_id != self.project_id:
+            raise ValidationError({"job": "Job không thuộc cùng organization với yêu cầu."})
+        if self.job_issue_id and self.job_id and self.job_issue is not None and self.job_issue.job_id != self.job_id:
+            raise ValidationError({"job_issue": "JobIssue không thuộc cùng Job với yêu cầu."})
+        if self.review_error_id and self.job_id and self.review_error is not None and self.review_error.job_id != self.job_id:
+            raise ValidationError({"review_error": "ReviewError không thuộc cùng Job với yêu cầu."})
 
     def __str__(self):
         return f"{self.get_request_type_display()} · {self.job.name}"

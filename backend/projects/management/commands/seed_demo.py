@@ -92,13 +92,19 @@ class Command(BaseCommand):
         for name in ("ann3_demo", "ann4_demo"):
             TeamMember.objects.create(team=team_b, user=users[name], capacity=4)
 
-        for name, severity in [
-            ("Sai nhãn", Severity.MAJOR),
-            ("Thiếu object", Severity.CRITICAL),
-            ("Sai kích thước cuboid", Severity.MINOR),
-            ("Sai tracking ID", Severity.MAJOR),
+        for code, primary_cat, name, severity in [
+            ("E2", "E2", "Sai nhãn", Severity.MAJOR),
+            ("E1", "E1", "Thiếu object", Severity.CRITICAL),
+            ("E3", "E3", "Sai kích thước cuboid", Severity.MINOR),
+            ("E6", "E6", "Sai tracking ID", Severity.MAJOR),
         ]:
-            ErrorCategory.objects.create(project=project, name=name, severity=severity)
+            ErrorCategory.objects.create(
+                project=project,
+                code=code,
+                primary_category=primary_cat,
+                name=name,
+                severity=severity,
+            )
 
         Guideline.objects.create(
             project=project,

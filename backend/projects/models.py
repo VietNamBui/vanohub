@@ -40,6 +40,7 @@ class Project(models.Model):
         jobs: Any
         teams: Any
         error_categories: Any
+        job_issues: Any
         role_assignments: Any
 
     name = models.CharField(max_length=200)
@@ -81,6 +82,10 @@ class Project(models.Model):
         help_text="% số frame của mỗi job được QC2 kiểm.",
     )
     stratify_by = models.CharField(max_length=20, choices=StratifyBy.choices, default=StratifyBy.ANNOTATOR)
+    issue_gate_enabled = models.BooleanField(
+        default=False,
+        help_text="Bật cổng chặn Submit/QC1/QC2/Delivery theo JobIssue mở từ CVAT.",
+    )
 
     # --- Ngưỡng chất lượng ---
     quality_cl_threshold = models.DecimalField(max_digits=5, decimal_places=2, null=True, blank=True)

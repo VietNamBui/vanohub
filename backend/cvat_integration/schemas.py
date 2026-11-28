@@ -7,6 +7,8 @@ import re
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from accounts.datetime_utils import PG_INT32_MAX
+
 _FRAME_STEP_RE = re.compile(r"step\s*=\s*([1-9]\d*)")
 
 
@@ -265,6 +267,46 @@ class CvatAnnotationsPayload(BaseModel):
     @property
     def object_count(self) -> int:
         return self.count_object_frames()
+
+
+class CvatIssuePayload(BaseModel):
+    model_config = ConfigDict(strict=True, extra="ignore")
+
+    id: int = Field(ge=1, le=PG_INT32_MAX)
+    job: int = Field(ge=1)
+    frame: int = Field(ge=0, le=PG_INT32_MAX)
+    position: list[float] = Field(min_length=1)
+    resolved: bool = False
+    owner: CvatAssigneePayload | None = None
+    assignee: CvatAssigneePayload | None = None
+    created_date: str | None = None
+    updated_date: str | None = None
+
+    @field_validator("position", mode="before")
+    @classmethod
+    def validate_position(cls, value: object) -> list[float]:
+        if not isinstance(value, list) or not value:
+            raise ValueError("position must be a non-empty list of finite numbers")
+        out: list[float] = []
+        for item in value:
+            if isinstance(item, bool) or not isinstance(item, (int, float)):
+                raise ValueError("position elements must be numeric")
+            num = float(item)
+            if not math.isfinite(num):
+                raise ValueError("position elements must be finite")
+            out.append(num)
+        return out
+
+
+class CvatCommentPayload(BaseModel):
+    model_config = ConfigDict(strict=True, extra="ignore")
+
+    id: int = Field(ge=1, le=PG_INT32_MAX)
+    issue: int = Field(ge=1)
+    message: str
+    owner: CvatAssigneePayload | None = None
+    created_date: str | None = None
+    updated_date: str | None = None
 
 
 class CvatImportResult(BaseModel):

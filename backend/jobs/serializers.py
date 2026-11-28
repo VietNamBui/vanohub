@@ -3,8 +3,9 @@ from rest_framework import serializers
 from accounts.datetime_utils import PG_INT32_MAX, RFC3339DateTimeField
 from accounts.models import Role, User
 from accounts.serializers import ModelMetaBase, UserBriefSerializer
+from projects.models import DataStatus
 from projects.serializers import ActivityLogSerializer
-from quality.models import ReviewError
+from quality.models import JobIssue, ReviewError
 
 from .models import AnnotatorRequest, Job, JobStatus
 
@@ -27,6 +28,7 @@ class JobSerializer(serializers.ModelSerializer):
     is_on_time = serializers.BooleanField(read_only=True)
     max_rework_rounds = serializers.IntegerField(source="project.max_rework_rounds", read_only=True)
     escalation_policy = serializers.CharField(source="project.escalation_policy", read_only=True)
+    issue_gate_enabled = serializers.BooleanField(source="project.issue_gate_enabled", read_only=True)
     rework_scope_label = serializers.CharField(source="get_rework_scope_display", read_only=True)
     progress_percent = serializers.IntegerField(read_only=True)
     open_error_count = serializers.SerializerMethodField()
@@ -59,6 +61,7 @@ class JobSerializer(serializers.ModelSerializer):
             "first_qc1_result",
             "max_rework_rounds",
             "escalation_policy",
+            "issue_gate_enabled",
             "rework_scope",
             "rework_scope_label",
             "is_escalated",
@@ -127,6 +130,8 @@ class ReviewErrorBriefSerializer(serializers.Serializer):
     id = serializers.IntegerField()
     stage = serializers.CharField()
     rework_round = serializers.IntegerField()
+    job_issue = serializers.IntegerField(source="job_issue_id", allow_null=True, read_only=True)
+    cvat_issue_id = serializers.IntegerField(allow_null=True, read_only=True)
     category = serializers.CharField(source="category.name")
     severity = serializers.CharField()
     verdict = serializers.CharField()
@@ -264,6 +269,10 @@ class AnnotatorRequestSerializer(serializers.ModelSerializer):
     status_label = serializers.CharField(source="get_status_display", read_only=True)
     error_category = serializers.CharField(source="review_error.category.name", read_only=True, default=None)
     error_location = serializers.CharField(source="review_error.location", read_only=True, default="")
+    job_issue_cvat_id = serializers.IntegerField(
+        source="job_issue.cvat_issue_id", read_only=True, default=None, allow_null=True
+    )
+    job_issue_status = serializers.CharField(source="job_issue.status", read_only=True, default="")
     created_by = UserBriefSerializer(read_only=True)
     handler = UserBriefSerializer(read_only=True)
     created_at = RFC3339DateTimeField(read_only=True)
@@ -278,6 +287,9 @@ class AnnotatorRequestSerializer(serializers.ModelSerializer):
             "job_name",
             "batch_name",
             "review_error",
+            "job_issue",
+            "job_issue_cvat_id",
+            "job_issue_status",
             "error_category",
             "error_location",
             "request_type",
@@ -301,6 +313,7 @@ class AnnotatorRequestSerializer(serializers.ModelSerializer):
 class AnnotatorRequestCreateSerializer(serializers.Serializer):
     job = serializers.IntegerField(min_value=1, max_value=PG_INT32_MAX)
     review_error = serializers.IntegerField(min_value=1, max_value=PG_INT32_MAX, required=False, allow_null=True)
+    job_issue = serializers.IntegerField(min_value=1, max_value=PG_INT32_MAX, required=False, allow_null=True)
     request_type = serializers.ChoiceField(choices=AnnotatorRequest.RequestType.choices)
     title = serializers.CharField(max_length=255, required=False, allow_blank=True, default="")
     reason = serializers.CharField(min_length=3, max_length=2000)
@@ -308,7 +321,7 @@ class AnnotatorRequestCreateSerializer(serializers.Serializer):
     def validate(self, attrs):
         project = self.context["project"]
         user = self.context["request"].user
-        job = Job.objects.select_related("batch").filter(pk=attrs["job"], project=project).first()
+        job = Job.objects.select_related("batch", "dataset").filter(pk=attrs["job"], project=project).first()
         if not job:
             raise serializers.ValidationError({"job": "Không tìm thấy job trong organization."})
         if job.annotator_id != user.id:
@@ -320,7 +333,7 @@ class AnnotatorRequestCreateSerializer(serializers.Serializer):
         error_id = attrs.get("review_error")
         review_error = None
         if error_id is not None:
-            review_error = ReviewError.objects.select_related("category").filter(pk=error_id, job=job).first()
+            review_error = ReviewError.objects.select_related("category", "job_issue").filter(pk=error_id, job=job).first()
             if not review_error:
                 raise serializers.ValidationError({"review_error": "Lỗi không thuộc job này."})
             if review_error.is_voided:
@@ -328,6 +341,27 @@ class AnnotatorRequestCreateSerializer(serializers.Serializer):
         attrs["review_error_obj"] = review_error
 
         req_type = attrs["request_type"]
+        issue_id = attrs.get("job_issue")
+        job_issue = None
+        if issue_id is not None:
+            if req_type != AnnotatorRequest.RequestType.ERROR_DISPUTE:
+                raise serializers.ValidationError({"job_issue": "Chỉ gắn job_issue với yêu cầu phản hồi lỗi (error_dispute)."})
+            job_issue = JobIssue.objects.filter(pk=issue_id, job=job, project=project).first()
+            if not job_issue:
+                raise serializers.ValidationError({"job_issue": "Issue không thuộc job này."})
+            if (
+                job_issue.authority_status != JobIssue.AuthorityStatus.VALID
+                or job_issue.status not in (JobIssue.Status.OPEN, JobIssue.Status.REOPENED, JobIssue.Status.ADDRESSED)
+            ):
+                raise serializers.ValidationError({"job_issue": "Issue này không hợp lệ hoặc không ở trạng thái có thể phản hồi."})
+            if job.is_locked or job.batch.status != DataStatus.ACTIVE or job.dataset.status != DataStatus.ACTIVE:
+                raise serializers.ValidationError({"job": "Job, Task hoặc Project đang bị khoá."})
+            if review_error is not None and review_error.job_issue_id and review_error.job_issue_id != job_issue.pk:
+                raise serializers.ValidationError({"job_issue": "JobIssue không khớp với ReviewError đã chọn."})
+        elif req_type == AnnotatorRequest.RequestType.ERROR_DISPUTE and review_error is not None and review_error.job_issue_id is not None:
+            job_issue = review_error.job_issue
+        attrs["job_issue_obj"] = job_issue
+
         if req_type == AnnotatorRequest.RequestType.ERROR_DISPUTE:
             dup_qs = AnnotatorRequest.objects.filter(
                 project=project,
@@ -335,10 +369,16 @@ class AnnotatorRequestCreateSerializer(serializers.Serializer):
                 request_type=req_type,
                 status=AnnotatorRequest.Status.PENDING_PM,
             )
-            if review_error is not None:
+            if review_error is not None and job_issue is not None:
+                from django.db.models import Q
+
+                dup_qs = dup_qs.filter(Q(review_error=review_error) | Q(job_issue=job_issue))
+            elif review_error is not None:
                 dup_qs = dup_qs.filter(review_error=review_error)
+            elif job_issue is not None:
+                dup_qs = dup_qs.filter(job_issue=job_issue)
             else:
-                dup_qs = dup_qs.filter(review_error__isnull=True)
+                dup_qs = dup_qs.filter(review_error__isnull=True, job_issue__isnull=True)
             if dup_qs.exists():
                 raise serializers.ValidationError("Đã có yêu cầu phản hồi lỗi đang chờ PM xử lý cho mục này.")
         elif (
@@ -356,6 +396,8 @@ class AnnotatorRequestCreateSerializer(serializers.Serializer):
             if review_error:
                 loc = f" {review_error.location}" if review_error.location else ""
                 attrs["title"] = f"Không đồng ý lỗi '{review_error.category.name}'{loc}"[:255]
+            elif job_issue:
+                attrs["title"] = f"Phản hồi issue #{job_issue.cvat_issue_id} · {job.name}"[:255]
             elif req_type == AnnotatorRequest.RequestType.ERROR_DISPUTE:
                 attrs["title"] = f"Phản hồi lỗi QC1 · {job.name}"
             else:

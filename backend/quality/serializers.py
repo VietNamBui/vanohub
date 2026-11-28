@@ -6,13 +6,23 @@ from accounts.datetime_utils import PG_INT32_MAX, RFC3339DateTimeField
 from accounts.serializers import ModelMetaBase, UserBriefSerializer
 from jobs.models import Job, ReworkScope
 
-from .models import Audit, AuditSample, ErrorCategory, ErrorVerdict, ReviewError, Severity
+from .models import Audit, AuditSample, ErrorCategory, ErrorVerdict, JobIssue, ReviewError, Severity
 
 
 class ErrorCategorySerializer(serializers.ModelSerializer):
     class Meta(ModelMetaBase):
         model = ErrorCategory
-        fields = ["id", "name", "description", "severity", "applies_to", "is_active"]
+        fields = ["id", "code", "primary_category", "name", "description", "severity", "applies_to", "is_active"]
+
+    def validate_code(self, code: str) -> str:
+        cleaned = code.strip()
+        if cleaned:
+            qs = ErrorCategory.objects.filter(project=self.context["project"], code=cleaned)
+            if self.instance:
+                qs = qs.exclude(pk=self.instance.pk)
+            if qs.exists():
+                raise serializers.ValidationError("Danh mục đã có loại lỗi trùng mã.")
+        return cleaned
 
     def validate_name(self, name: str) -> str:
         qs = ErrorCategory.objects.filter(project=self.context["project"], name=name)
@@ -34,6 +44,8 @@ class ReviewErrorSerializer(serializers.ModelSerializer):
             "id",
             "stage",
             "rework_round",
+            "job_issue",
+            "cvat_issue_id",
             "category",
             "category_name",
             "severity",
@@ -47,7 +59,96 @@ class ReviewErrorSerializer(serializers.ModelSerializer):
             "reported_by",
             "created_at",
         ]
-        read_only_fields = ["is_voided", "reported_by", "created_at"]
+        read_only_fields = ["job_issue", "cvat_issue_id", "is_voided", "reported_by", "created_at"]
+
+
+class JobIssueSerializer(serializers.ModelSerializer):
+    job_name = serializers.CharField(source="job.name", read_only=True)
+    author = UserBriefSerializer(read_only=True)
+    ruled_by = UserBriefSerializer(read_only=True)
+    cvat_synced_at = RFC3339DateTimeField(read_only=True)
+    ruled_at = RFC3339DateTimeField(read_only=True)
+    created_at = RFC3339DateTimeField(read_only=True)
+    updated_at = RFC3339DateTimeField(read_only=True)
+
+    class Meta(ModelMetaBase):
+        model = JobIssue
+        fields = [
+            "id",
+            "job",
+            "job_name",
+            "cvat_issue_id",
+            "first_comment_id",
+            "defect_code",
+            "primary_category",
+            "severity",
+            "source",
+            "is_clarification",
+            "frame_number",
+            "frame_start",
+            "frame_end",
+            "track_id",
+            "shape_id",
+            "position",
+            "message",
+            "author",
+            "author_cvat_id",
+            "author_stage",
+            "authority_status",
+            "status",
+            "cvat_resolved",
+            "cvat_last_comment_id",
+            "cvat_synced_at",
+            "source_missing",
+            "tampered",
+            "tamper_reason",
+            "cvat_reopen_drift",
+            "is_disputed",
+            "dispute_reason",
+            "ruling_label",
+            "ruling_attributes",
+            "ruling_note",
+            "ruled_by",
+            "ruled_at",
+            "created_at",
+            "updated_at",
+        ]
+        read_only_fields = fields
+
+
+class JobIssueImportSerializer(serializers.Serializer):
+    job = serializers.IntegerField(min_value=1, max_value=PG_INT32_MAX)
+
+
+class JobIssueNoteSerializer(serializers.Serializer):
+    note = serializers.CharField(required=False, allow_blank=True, default="", max_length=2000)
+
+
+class JobIssueDisputeSerializer(serializers.Serializer):
+    reason = serializers.CharField(min_length=3, max_length=2000)
+
+
+class JobIssueRuleSerializer(serializers.Serializer):
+    decision = serializers.ChoiceField(choices=["ruling", "not_an_issue", "resolved"])
+    ruling_label = serializers.CharField(max_length=120, required=False, allow_blank=True, default="")
+    ruling_attributes = serializers.DictField(required=False, default=dict)
+    ruling_note = serializers.CharField(required=False, allow_blank=True, default="", max_length=2000)
+    note = serializers.CharField(required=False, allow_blank=True, default="", max_length=2000)
+    dispute_outcome = serializers.ChoiceField(choices=["rejected"], required=False, allow_null=True, default=None)
+
+    def validate_ruling_attributes(self, value: dict[str, Any]) -> dict[str, Any]:
+        if len(value) > 32:
+            raise serializers.ValidationError("ruling_attributes tối đa 32 thuộc tính.")
+        clean: dict[str, str | int | float | bool | None] = {}
+        for key, item in value.items():
+            if not isinstance(key, str) or not key.strip() or len(key) > 64:
+                raise serializers.ValidationError("Tên thuộc tính không hợp lệ.")
+            if item is not None and not isinstance(item, (str, int, float, bool)):
+                raise serializers.ValidationError("Giá trị thuộc tính phải là kiểu nguyên thủy (chuỗi, số, boolean).")
+            if isinstance(item, str) and len(item) > 255:
+                raise serializers.ValidationError("Giá trị thuộc tính quá dài.")
+            clean[key.strip()] = item
+        return clean
 
 
 class SampleJobSerializer(serializers.ModelSerializer):
@@ -176,6 +277,9 @@ class _ProjectErrorCategoryField(serializers.PrimaryKeyRelatedField):
 
 class _BaseErrorInputSerializer(serializers.Serializer):
     category = _ProjectErrorCategoryField(queryset=ErrorCategory.objects.none())
+    job_issue = serializers.IntegerField(
+        min_value=1, max_value=PG_INT32_MAX, required=False, allow_null=True, default=None
+    )
     severity = serializers.ChoiceField(choices=Severity.choices, required=False)
     verdict = serializers.ChoiceField(choices=ErrorVerdict.choices, required=False, default=ErrorVerdict.FAIL)
     frame_number = serializers.IntegerField(
@@ -189,7 +293,7 @@ class _BaseErrorInputSerializer(serializers.Serializer):
     description = serializers.CharField(required=False, allow_blank=True, default="")
 
     def validate(self, attrs: dict[str, Any]) -> dict[str, Any]:
-        if attrs.get("is_missing_object"):
+        if attrs.get("is_missing_object") and attrs.get("job_issue") is None:
             if attrs.get("cvat_object_id") is not None:
                 raise serializers.ValidationError(
                     {"cvat_object_id": "Lỗi thiếu đối tượng không được gắn cvat_object_id."}

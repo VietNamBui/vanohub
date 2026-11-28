@@ -107,6 +107,7 @@ class ProjectDetailSerializer(ProjectListSerializer):
             "max_rework_rounds",
             "escalation_policy",
             "annotator_wip_limit",
+            "issue_gate_enabled",
         ]
 
     def _roles_by_user(self, project):
@@ -205,6 +206,7 @@ class ProjectSettingsSerializer(serializers.ModelSerializer):
             "sampling_method",
             "sampling_rate",
             "stratify_by",
+            "issue_gate_enabled",
             "quality_cl_threshold",
             "defect_rate_threshold",
             "kpi_annotation_target",

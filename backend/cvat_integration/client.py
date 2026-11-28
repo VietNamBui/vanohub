@@ -24,7 +24,15 @@ from django.conf import settings
 from pydantic import BaseModel
 from pydantic import ValidationError as PydanticValidationError
 
-from .schemas import CvatAboutPayload, CvatAnnotationsPayload, CvatJobMetaPayload, CvatJobPayload, CvatTaskPayload
+from .schemas import (
+    CvatAboutPayload,
+    CvatAnnotationsPayload,
+    CvatCommentPayload,
+    CvatIssuePayload,
+    CvatJobMetaPayload,
+    CvatJobPayload,
+    CvatTaskPayload,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -273,18 +281,20 @@ class CvatClient:
         path: str,
         params: dict[str, Any] | None = None,
         *,
+        timeout: float | None = None,
         max_duration_seconds: float | None = None,
     ) -> list[Any]:
         """CVAT phân trang (results + next). Gom hết các trang an toàn, giới hạn MAX_PAGES và tổng thời gian."""
         query: dict[str, Any] = {**(params or {}), "page_size": 100, "page": 1}
         items: list[Any] = []
         started = time.monotonic()
-        budget = self.max_duration_seconds if max_duration_seconds is None else max_duration_seconds
+        base_timeout = self.timeout if timeout is None else float(timeout)
+        budget = self.max_duration_seconds if max_duration_seconds is None else float(max_duration_seconds)
         for _ in range(MAX_PAGES):
             elapsed = time.monotonic() - started
             if budget > 0 and elapsed >= budget:
                 raise CvatError(f"Quá thời gian phản hồi khi phân trang CVAT cho {path}.")
-            page_timeout = min(self.timeout, max(0.1, budget - elapsed)) if budget > 0 else self.timeout
+            page_timeout = min(base_timeout, max(0.1, budget - elapsed)) if budget > 0 else base_timeout
             data = self._get(path, query, timeout=page_timeout)
             if not isinstance(data, dict) or not isinstance(data.get("results", []), list):
                 raise CvatError(f"CVAT trả cấu trúc phân trang không hợp lệ cho {path}")
@@ -312,6 +322,8 @@ class CvatClient:
         return self._get_all("organizations")
 
     def list_memberships(self, org_id: int) -> list[dict[str, Any]]:
+        if self.session.headers.get("X-Organization"):
+            return self._get_all("memberships")
         return self._get_all("memberships", {"org_id": org_id})
 
     def get_user(self, user_id: int) -> dict[str, Any]:
@@ -328,7 +340,9 @@ class CvatClient:
         return self._request("POST", "invitations", params={"org": org_slug}, json={"role": role, "email": email})
 
     def list_org_projects(self, org_id: int) -> list[dict[str, Any]]:
-        """CVAT project thuộc một organization (tài khoản hệ thống là admin nên thấy được mọi org)."""
+        """CVAT project thuộc một organization (tránh gửi đồng thời X-Organization và ?org_id= gây 400 trên CVAT)."""
+        if self.session.headers.get("X-Organization"):
+            return self._get_all("projects")
         return self._get_all("projects", {"org_id": org_id})
 
     def list_projects(self) -> list[dict[str, Any]]:
@@ -405,6 +419,50 @@ class CvatClient:
             deleted_frames=meta.deleted_frames,
             included_frames=meta.included_frames,
         )
+
+    def list_job_issues(
+        self,
+        cvat_job_id: int,
+        *,
+        timeout: float | None = None,
+        max_duration_seconds: float | None = None,
+    ) -> list[dict[str, Any]]:
+        """Lấy toàn bộ issue CVAT của một job theo sort=id, khử trùng theo id và kiểm tra khớp job."""
+        raw_items = self._get_all(
+            "issues",
+            {"job_id": cvat_job_id, "sort": "id"},
+            timeout=timeout,
+            max_duration_seconds=max_duration_seconds,
+        )
+        deduped: dict[int, dict[str, Any]] = {}
+        for item in raw_items:
+            parsed = _validate_model(CvatIssuePayload, item, f"issues(job={cvat_job_id})")
+            if parsed.job != cvat_job_id:
+                raise CvatError(
+                    f"CVAT trả issue #{parsed.id} thuộc job {parsed.job}, không khớp job {cvat_job_id}."
+                )
+            deduped[parsed.id] = parsed.model_dump()
+        return [deduped[k] for k in sorted(deduped)]
+
+    def list_job_comments(
+        self,
+        cvat_job_id: int,
+        *,
+        timeout: float | None = None,
+        max_duration_seconds: float | None = None,
+    ) -> list[dict[str, Any]]:
+        """Lấy toàn bộ comment CVAT thuộc các issue của một job theo sort=id, khử trùng theo id."""
+        raw_items = self._get_all(
+            "comments",
+            {"job_id": cvat_job_id, "sort": "id"},
+            timeout=timeout,
+            max_duration_seconds=max_duration_seconds,
+        )
+        deduped: dict[int, dict[str, Any]] = {}
+        for item in raw_items:
+            parsed = _validate_model(CvatCommentPayload, item, f"comments(job={cvat_job_id})")
+            deduped[parsed.id] = parsed.model_dump()
+        return [deduped[k] for k in sorted(deduped)]
 
     def set_job_assignee(self, job_id: int, cvat_user_id: int | None) -> Any:
         """Đặt người được giao (assignee) của một CVAT job. None = bỏ giao."""

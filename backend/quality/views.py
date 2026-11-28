@@ -5,7 +5,7 @@ from django.db import IntegrityError, transaction
 from django.db.models import Count, F, Prefetch, Q
 from django.db.models.functions import Greatest
 from django.utils import timezone
-from rest_framework import mixins, viewsets
+from rest_framework import mixins, status, viewsets
 from rest_framework.decorators import action
 from rest_framework.exceptions import NotFound, PermissionDenied, ValidationError
 from rest_framework.response import Response
@@ -17,6 +17,7 @@ from accounts.permissions import Cap, ProjectScopedViewMixin
 from accounts.serializers import UserBriefSerializer
 from accounts.validation import validated_dict
 from cvat_integration.assignee import schedule_assignee_push
+from cvat_integration.client import CvatError
 from jobs.models import OPEN_STATUSES, FirstQc1Result, Job, JobStatus, ReworkScope
 from jobs.serializers import JobDetailSerializer, JobSerializer
 from jobs.views import ensure_editable, ensure_not_escalated, lock_job, lock_job_with_batch, order_by_db06_priority
@@ -30,18 +31,39 @@ from projects.notifications import (
 )
 from projects.views import StandardPagination
 
-from .models import Audit, AuditSample, ErrorCategory, ErrorVerdict, ReviewError, ReviewStage
+from .issues import (
+    acceptance_blocking_issues,
+    address_job_issue,
+    dispute_job_issue,
+    import_job_issues,
+    materialize_reject_errors,
+    pm_rule_job_issue,
+    reopen_job_issue,
+    resolve_job_issue,
+)
+from .models import Audit, AuditSample, ErrorCategory, JobIssue, ReviewError, ReviewStage
 from .qc2 import ANNOTATOR_EVENTS, ensure_qc2_sample, four_eyes_conflicts, get_stage_history
 from .serializers import (
     AssignAuditorSerializer,
     AuditSampleSerializer,
     AuditSerializer,
     ErrorCategorySerializer,
+    JobIssueDisputeSerializer,
+    JobIssueImportSerializer,
+    JobIssueNoteSerializer,
+    JobIssueRuleSerializer,
+    JobIssueSerializer,
     PassSerializer,
     Qc1RejectSerializer,
     Qc1StartSerializer,
     RejectSerializer,
 )
+
+
+def _raise_category_integrity_error(exc: IntegrityError) -> None:
+    if "unique_error_category_code" in str(exc):
+        raise ValidationError({"code": "Danh mục đã có loại lỗi trùng mã."}) from exc
+    raise ValidationError({"name": "Danh mục đã có loại lỗi trùng tên."}) from exc
 
 
 class ErrorCategoryViewSet(
@@ -74,7 +96,7 @@ class ErrorCategoryViewSet(
                     target=category,
                 )
         except IntegrityError as exc:
-            raise ValidationError({"name": "Danh mục đã có loại lỗi trùng tên."}) from exc
+            _raise_category_integrity_error(exc)
 
     def perform_update(self, serializer: Any) -> None:
         instance = serializer.instance
@@ -92,7 +114,7 @@ class ErrorCategoryViewSet(
                     target=category,
                 )
         except IntegrityError as exc:
-            raise ValidationError({"name": "Danh mục đã có loại lỗi trùng tên."}) from exc
+            _raise_category_integrity_error(exc)
 
 
 class AuditViewSet(
@@ -249,6 +271,12 @@ class AuditSampleViewSet(
         with transaction.atomic():
             sample, job = self._lock_sample_and_job(pk)
             self._check_can_review(sample)
+            blockers = acceptance_blocking_issues(job)
+            if blockers:
+                ids_str = ", ".join(f"#{b.cvat_issue_id}" for b in blockers[:5])
+                raise ValidationError(
+                    f"Không thể duyệt đạt QC2 vì còn {len(blockers)} issue/yêu cầu làm rõ chưa xử lý ({ids_str})."
+                )
             data = validated_dict(PassSerializer(data=request.data))
             self._finish(sample, AuditSample.Result.PASS, data["comment"])
             job.status = JobStatus.APPROVED
@@ -279,25 +307,14 @@ class AuditSampleViewSet(
             comment = data["comment"]
             self._finish(sample, AuditSample.Result.REJECT, comment)
 
-            round_at_review = max(job.total_rework_rounds, job.rework_round)
-            ReviewError.objects.bulk_create([
-                ReviewError(
-                    job=job,
-                    stage=ReviewStage.QC2,
-                    rework_round=round_at_review,
-                    audit_sample=sample,
-                    category=e["category"],
-                    severity=e.get("severity") or e["category"].severity,
-                    verdict=e.get("verdict") or ErrorVerdict.FAIL,
-                    frame_number=e.get("frame_number"),
-                    cvat_object_id=e.get("cvat_object_id"),
-                    is_missing_object=bool(e.get("is_missing_object", False)),
-                    location=e["location"],
-                    description=e["description"],
-                    reported_by=request.user,
-                )
-                for e in errors
-            ])
+            err_count = materialize_reject_errors(
+                job,
+                project=self.project,
+                stage=ReviewStage.QC2,
+                actor=request.user,
+                errors=errors,
+                sample=sample,
+            )
 
             job.status = JobStatus.REWORK
             job.rework_round += 1
@@ -334,7 +351,7 @@ class AuditSampleViewSet(
                     "status": JobStatus.REWORK,
                     "rework_round": job.rework_round,
                     "rework_scope": rework_scope,
-                    "errors": len(errors),
+                    "errors": err_count,
                     "escalated": job.is_escalated,
                 },
                 note=comment,
@@ -343,7 +360,7 @@ class AuditSampleViewSet(
                 notify_rework(
                     self.project,
                     job,
-                    error_count=len(errors),
+                    error_count=err_count,
                     stage_label="QC2",
                     reason=comment,
                     actor=request.user,
@@ -443,6 +460,58 @@ def _qc1_team_pool_q(project: Any, user: Any) -> Q:
     return Q(batch__team__isnull=True)
 
 
+def _qc1_pool_filter(project: Any, user: Any) -> Q:
+    pool_filter = Q(
+        qc1_reviewer__isnull=True,
+        status=JobStatus.PENDING_QC1,
+        is_locked=False,
+        batch__status=DataStatus.ACTIVE,
+        dataset__status=DataStatus.ACTIVE,
+    ) & _qc1_team_pool_q(project, user)
+    if project.escalation_policy == EscalationPolicy.BLOCK:
+        pool_filter &= Q(is_escalated=False)
+    return pool_filter
+
+
+def _exclude_qc1_four_eyes_conflicts(project: Any, queryset: Any, user: Any) -> Any:
+    hist_ann_job_ids = (
+        ActivityLog.objects.filter(project=project, actor=user, job_id__isnull=False)
+        .filter(
+            Q(action__in=ANNOTATOR_EVENTS)
+            | Q(action__in=("job.status", "job.assign"), after__event__in=ANNOTATOR_EVENTS)
+            | Q(action="job.status", after__status__in=[JobStatus.ANNOTATING, JobStatus.PENDING_QC1])
+        )
+        .values("job_id")
+    )
+    hist_qc2_sample_job_ids = (
+        AuditSample.objects.filter(audit__project=project)
+        .filter(Q(auditor=user) | Q(reviewed_by=user))
+        .values("job_id")
+    )
+    hist_qc2_err_job_ids = ReviewError.objects.filter(
+        job__project=project, stage=ReviewStage.QC2, reported_by=user
+    ).values("job_id")
+    hist_qc2_issue_job_ids = JobIssue.objects.filter(
+        project=project,
+        authority_status=JobIssue.AuthorityStatus.VALID,
+        author_stage=JobIssue.AuthorStage.QC2,
+        author=user,
+    ).values("job_id")
+    return queryset.exclude(
+        Q(annotator=user)
+        | Q(pk__in=hist_ann_job_ids)
+        | Q(pk__in=hist_qc2_sample_job_ids)
+        | Q(pk__in=hist_qc2_err_job_ids)
+        | Q(pk__in=hist_qc2_issue_job_ids)
+    )
+
+
+def _qc1_visible_jobs(project: Any, user: Any) -> Any:
+    return _exclude_qc1_four_eyes_conflicts(project, Job.objects.filter(project=project), user).filter(
+        Q(qc1_reviewer=user) | _qc1_pool_filter(project, user)
+    )
+
+
 def _check_qc1_access(job: Job, actor: Any) -> None:
     """Luật bốn mắt đa giai đoạn (kể cả lịch sử) + kiểm tra quyền sở hữu QC1, phạm vi team, khoá và escalation."""
     annotator_ids, _, qc2_ids = get_stage_history(job)
@@ -501,6 +570,12 @@ def qc1_pass(job_id: int, *, project: Any, actor: Any, comment: str = "") -> Job
     if job.status not in QC1_REVIEWABLE_STATUSES:
         raise ValidationError(
             f"Chỉ có thể duyệt QC1 khi job đang Chờ QC1 hoặc Đang QC1 (hiện tại: {job.get_status_display()})."
+        )
+    blockers = acceptance_blocking_issues(job)
+    if blockers:
+        ids_str = ", ".join(f"#{b.cvat_issue_id}" for b in blockers[:5])
+        raise ValidationError(
+            f"Không thể duyệt đạt QC1 vì còn {len(blockers)} issue/yêu cầu làm rõ chưa xử lý ({ids_str})."
         )
 
     prev_status = job.status
@@ -583,27 +658,15 @@ def qc1_reject(
         )
 
     prev_status = job.status
-    round_at_review = max(job.total_rework_rounds, job.rework_round)
     was_first_qc1 = not job.first_qc1_result and job.total_rework_rounds == 0 and job.rework_round == 0
 
-    ReviewError.objects.bulk_create([
-        ReviewError(
-            job=job,
-            stage=ReviewStage.QC1,
-            rework_round=round_at_review,
-            audit_sample=None,
-            category=e["category"],
-            severity=e.get("severity") or e["category"].severity,
-            verdict=e.get("verdict") or ErrorVerdict.FAIL,
-            frame_number=e.get("frame_number"),
-            cvat_object_id=e.get("cvat_object_id"),
-            is_missing_object=bool(e.get("is_missing_object", False)),
-            location=e["location"],
-            description=e["description"],
-            reported_by=actor,
-        )
-        for e in errors
-    ])
+    err_count = materialize_reject_errors(
+        job,
+        project=project,
+        stage=ReviewStage.QC1,
+        actor=actor,
+        errors=errors,
+    )
 
     job.status = JobStatus.REWORK
     job.rework_round += 1
@@ -652,14 +715,14 @@ def qc1_reject(
             "status": JobStatus.REWORK,
             "rework_round": job.rework_round,
             "rework_scope": rework_scope,
-            "errors": len(errors),
+            "errors": err_count,
             "escalated": job.is_escalated,
             "deadline": format_rfc3339_utc(job.deadline),
         },
         note=comment,
     )
     with timezone.override(app_timezone()):
-        notify_rework(project, job, error_count=len(errors), stage_label="QC1", reason=comment, actor=actor)
+        notify_rework(project, job, error_count=err_count, stage_label="QC1", reason=comment, actor=actor)
     if newly_escalated:
         notify_escalated(project, job, actor=actor)
     return job
@@ -713,42 +776,12 @@ class Qc1JobViewSet(
         )
 
     def _exclude_four_eyes_conflicts(self, queryset: Any, user: Any) -> Any:
-        hist_ann_job_ids = (
-            ActivityLog.objects.filter(project=self.project, actor=user, job_id__isnull=False)
-            .filter(
-                Q(action__in=ANNOTATOR_EVENTS)
-                | Q(action__in=("job.status", "job.assign"), after__event__in=ANNOTATOR_EVENTS)
-                | Q(action="job.status", after__status__in=[JobStatus.ANNOTATING, JobStatus.PENDING_QC1])
-            )
-            .values("job_id")
-        )
-        hist_qc2_sample_job_ids = (
-            AuditSample.objects.filter(audit__project=self.project)
-            .filter(Q(auditor=user) | Q(reviewed_by=user))
-            .values("job_id")
-        )
-        hist_qc2_err_job_ids = ReviewError.objects.filter(
-            job__project=self.project, stage=ReviewStage.QC2, reported_by=user
-        ).values("job_id")
-        return queryset.exclude(
-            Q(annotator=user)
-            | Q(pk__in=hist_ann_job_ids)
-            | Q(pk__in=hist_qc2_sample_job_ids)
-            | Q(pk__in=hist_qc2_err_job_ids)
-        )
+        return _exclude_qc1_four_eyes_conflicts(self.project, queryset, user)
 
     def get_queryset(self) -> Any:
         user = self.request.user
         queryset = self._exclude_four_eyes_conflicts(self._base_queryset(), user)
-        pool_filter = Q(
-            qc1_reviewer__isnull=True,
-            status=JobStatus.PENDING_QC1,
-            is_locked=False,
-            batch__status=DataStatus.ACTIVE,
-            dataset__status=DataStatus.ACTIVE,
-        ) & _qc1_team_pool_q(self.project, user)
-        if self.project.escalation_policy == EscalationPolicy.BLOCK:
-            pool_filter &= Q(is_escalated=False)
+        pool_filter = _qc1_pool_filter(self.project, user)
 
         if self.action == "retrieve":
             return queryset.filter(Q(qc1_reviewer=user) | pool_filter)
@@ -843,3 +876,199 @@ class Qc1JobViewSet(
             rework_scope=data["rework_scope"],
         )
         return self._detail(updated)
+
+
+def _parse_bool_param(raw: str | None) -> bool | None:
+    if raw is None or raw == "":
+        return None
+    low = raw.strip().lower()
+    if low in ("1", "true"):
+        return True
+    if low in ("0", "false"):
+        return False
+    return None
+
+
+class JobIssueViewSet(
+    ProjectScopedViewMixin,
+    mixins.ListModelMixin,
+    mixins.RetrieveModelMixin,
+    viewsets.GenericViewSet,
+):
+    """Quản lý và đồng bộ CVAT JobIssue theo 4 vai trò (PQ01 + luật bốn mắt)."""
+
+    serializer_class = JobIssueSerializer
+    pagination_class = StandardPagination
+    lookup_value_regex = r"\d+"
+    required_capabilities = {
+        "list": [Cap.VIEW_JOBS, Cap.PERFORM_QC1, Cap.PERFORM_AUDIT, Cap.ANNOTATE_JOBS],
+        "retrieve": [Cap.VIEW_JOBS, Cap.PERFORM_QC1, Cap.PERFORM_AUDIT, Cap.ANNOTATE_JOBS],
+        "import_": [Cap.VIEW_JOBS, Cap.PERFORM_QC1, Cap.PERFORM_AUDIT, Cap.ANNOTATE_JOBS],
+        "address": Cap.ANNOTATE_JOBS,
+        "dispute": Cap.ANNOTATE_JOBS,
+        "resolve": [Cap.PERFORM_QC1, Cap.PERFORM_AUDIT, Cap.MANAGE_JOBS],
+        "reopen": [Cap.PERFORM_QC1, Cap.PERFORM_AUDIT, Cap.MANAGE_JOBS],
+        "rule": Cap.MANAGE_JOBS,
+        "*": Cap.VIEW_JOBS,
+    }
+
+    def _base_queryset(self) -> Any:
+        return JobIssue.objects.filter(project=self.project).select_related(
+            "job", "job__batch", "job__dataset", "author", "ruled_by"
+        )
+
+    def _user_can_access_job(self, job: Job) -> bool:
+        user = self.request.user
+        if self.has_cap(Cap.VIEW_JOBS):
+            return True
+        if self.has_cap(Cap.ANNOTATE_JOBS) and job.annotator_id == user.id:
+            return True
+        if self.has_cap(Cap.PERFORM_AUDIT) and AuditSample.objects.filter(job=job, auditor=user).exists():
+            return True
+        return bool(self.has_cap(Cap.PERFORM_QC1) and _qc1_visible_jobs(self.project, user).filter(pk=job.pk).exists())
+
+    def get_queryset(self) -> Any:
+        queryset = self._base_queryset()
+        user = self.request.user
+        if not self.has_cap(Cap.VIEW_JOBS):
+            scope_q = Q(pk__isnull=True)
+            if self.has_cap(Cap.ANNOTATE_JOBS):
+                scope_q |= Q(job__annotator=user)
+            if self.has_cap(Cap.PERFORM_AUDIT):
+                scope_q |= Q(job__audit_samples__auditor=user) | Q(author=user)
+            if self.has_cap(Cap.PERFORM_QC1):
+                scope_q |= Q(job_id__in=_qc1_visible_jobs(self.project, user).values("pk"))
+            queryset = queryset.filter(scope_q).distinct()
+
+        p = self.request.query_params
+        if p.get("job"):
+            queryset = queryset.filter(job_id=parse_int_param(p["job"], "job"))
+        if p.get("status"):
+            statuses = [s.strip() for s in p["status"].split(",") if s.strip()]
+            if statuses:
+                queryset = queryset.filter(status__in=statuses)
+        if p.get("severity"):
+            severities = [s.strip() for s in p["severity"].split(",") if s.strip()]
+            if severities:
+                queryset = queryset.filter(severity__in=severities)
+        if p.get("primary_category"):
+            primaries = [c.strip() for c in p["primary_category"].split(",") if c.strip()]
+            if primaries:
+                queryset = queryset.filter(primary_category__in=primaries)
+        if p.get("authority_status"):
+            queryset = queryset.filter(authority_status=p["authority_status"])
+        for field in ("is_clarification", "is_disputed", "tampered", "source_missing"):
+            parsed = _parse_bool_param(p.get(field))
+            if parsed is not None:
+                queryset = queryset.filter(**{field: parsed})
+        return queryset.order_by("-created_at", "-id")
+
+    def get_object(self) -> Any:
+        lookup_url_kwarg = self.lookup_url_kwarg or self.lookup_field
+        try:
+            parse_int_param(self.kwargs.get(lookup_url_kwarg), "pk")
+        except ValidationError as exc:
+            raise NotFound("Không tìm thấy issue trong organization.") from exc
+        return super().get_object()
+
+    def _parse_issue_pk(self, pk: Any) -> int:
+        try:
+            return parse_int_param(pk, "pk")
+        except ValidationError as exc:
+            raise NotFound("Không tìm thấy issue trong organization.") from exc
+
+    def _serialized_issue(self, issue_pk: int) -> dict[str, Any]:
+        fresh = self._base_queryset().get(pk=issue_pk)
+        return dict(JobIssueSerializer(fresh, context=self.get_serializer_context()).data)
+
+    @action(detail=False, methods=["post"], url_path="import")
+    def import_(self, request: Any, project_id: Any) -> Response:
+        data = validated_dict(JobIssueImportSerializer(data=request.data))
+        job = (
+            Job.objects.select_related("batch", "dataset", "project")
+            .filter(pk=data["job"], project=self.project)
+            .first()
+        )
+        if job is None:
+            raise NotFound("Không tìm thấy job trong organization.")
+        if not self._user_can_access_job(job):
+            raise PermissionDenied("Bạn không có quyền nhập issue cho job này.")
+        ensure_editable(job)
+        if job.cvat_job_id is None:
+            raise ValidationError("Job này chưa liên kết với CVAT.")
+        try:
+            result = import_job_issues(
+                job.pk,
+                project=self.project,
+                timeout=10.0,
+                max_duration_seconds=30.0,
+            )
+        except CvatError as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_502_BAD_GATEWAY)
+        return Response(
+            {
+                "job": result["job"],
+                "created": result["created"],
+                "updated": result["updated"],
+                "total": result["total"],
+                "issues": JobIssueSerializer(result["issues"], many=True, context=self.get_serializer_context()).data,
+            }
+        )
+
+    @action(detail=True, methods=["post"])
+    def address(self, request: Any, project_id: Any, pk: Any = None) -> Response:
+        issue_pk = self._parse_issue_pk(pk)
+        data = validated_dict(JobIssueNoteSerializer(data=request.data))
+        issue = address_job_issue(self.project, issue_pk, actor=request.user, note=data["note"])
+        return Response(self._serialized_issue(issue.pk))
+
+    @action(detail=True, methods=["post"])
+    def dispute(self, request: Any, project_id: Any, pk: Any = None) -> Response:
+        issue_pk = self._parse_issue_pk(pk)
+        data = validated_dict(JobIssueDisputeSerializer(data=request.data))
+        issue, req = dispute_job_issue(self.project, issue_pk, actor=request.user, reason=data["reason"])
+        return Response({"issue": self._serialized_issue(issue.pk), "request_id": req.pk})
+
+    @action(detail=True, methods=["post"])
+    def resolve(self, request: Any, project_id: Any, pk: Any = None) -> Response:
+        issue_pk = self._parse_issue_pk(pk)
+        data = validated_dict(JobIssueNoteSerializer(data=request.data))
+        issue = resolve_job_issue(
+            self.project,
+            issue_pk,
+            actor=request.user,
+            note=data["note"],
+            can_manage_jobs=self.has_cap(Cap.MANAGE_JOBS),
+            can_audit=self.has_cap(Cap.PERFORM_AUDIT),
+        )
+        return Response(self._serialized_issue(issue.pk))
+
+    @action(detail=True, methods=["post"])
+    def reopen(self, request: Any, project_id: Any, pk: Any = None) -> Response:
+        issue_pk = self._parse_issue_pk(pk)
+        data = validated_dict(JobIssueNoteSerializer(data=request.data))
+        issue = reopen_job_issue(
+            self.project,
+            issue_pk,
+            actor=request.user,
+            note=data["note"],
+            can_manage_jobs=self.has_cap(Cap.MANAGE_JOBS),
+            can_audit=self.has_cap(Cap.PERFORM_AUDIT),
+        )
+        return Response(self._serialized_issue(issue.pk))
+
+    @action(detail=True, methods=["post"])
+    def rule(self, request: Any, project_id: Any, pk: Any = None) -> Response:
+        issue_pk = self._parse_issue_pk(pk)
+        data = validated_dict(JobIssueRuleSerializer(data=request.data))
+        issue = pm_rule_job_issue(
+            self.project,
+            issue_pk,
+            actor=request.user,
+            decision=data["decision"],
+            ruling_label=data["ruling_label"],
+            ruling_attributes=data["ruling_attributes"],
+            ruling_note=data["ruling_note"] or data["note"],
+            dispute_outcome=data["dispute_outcome"],
+        )
+        return Response(self._serialized_issue(issue.pk))

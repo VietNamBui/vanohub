@@ -366,6 +366,26 @@ class CvatClientSecurityAndApiTests(TestCase):
             self.assertEqual(client.count_job_objects(88, start_frame=4, stop_frame=6, allow_missing_meta=True), 1)
         client.close()
 
+    def test_org_scoped_client_omits_org_id_param_to_avoid_cvat_400(self):
+        empty_page = MagicMock(status_code=200, ok=True, content=b'{"results": [], "next": null}')
+        empty_page.json.return_value = {"results": [], "next": None}
+
+        org_client = CvatClient(base_url="http://cvat.local", token="secret", organization="acme")
+        with patch.object(org_client.session, "request", return_value=empty_page) as mock_req:
+            org_client.list_org_projects(7)
+            self.assertNotIn("org_id", mock_req.call_args.kwargs["params"])
+            org_client.list_memberships(7)
+            self.assertNotIn("org_id", mock_req.call_args.kwargs["params"])
+        org_client.close()
+
+        global_client = CvatClient(base_url="http://cvat.local", token="secret")
+        with patch.object(global_client.session, "request", return_value=empty_page) as mock_req:
+            global_client.list_org_projects(7)
+            self.assertEqual(mock_req.call_args.kwargs["params"]["org_id"], 7)
+            global_client.list_memberships(7)
+            self.assertEqual(mock_req.call_args.kwargs["params"]["org_id"], 7)
+        global_client.close()
+
 
 class CvatSyncValidationTests(TestCase):
     def setUp(self):

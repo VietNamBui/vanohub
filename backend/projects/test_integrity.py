@@ -7,9 +7,19 @@ from django.utils import timezone
 
 from accounts.models import Role
 from accounts.testing import ProjectFixture, make_user
-from jobs.models import DailyOutputRecord, Job, JobStatus
+from jobs.models import AnnotatorRequest, DailyOutputRecord, Job, JobStatus
 from projects.models import Batch, Delivery, Project, SamplingMethod
-from quality.models import Audit, AuditSample, ErrorVerdict, ReviewError, ReviewStage
+from quality.models import (
+    Audit,
+    AuditSample,
+    ErrorCategory,
+    ErrorVerdict,
+    JobIssue,
+    PrimaryCategory,
+    ReviewError,
+    ReviewStage,
+    Severity,
+)
 from teams.models import Team, TeamMember
 
 
@@ -187,6 +197,117 @@ class DatabaseIntegrityAndBoundaryTests(TestCase):
                 work_date=timezone.localdate(),
                 object_count=0,
             )
+
+    def test_db_enforces_error_category_job_issue_review_error_and_request_constraints(self):
+        # Partial unique code allows multiple blank codes per project, rejects duplicate non-empty codes.
+        c_blank_a = ErrorCategory.objects.create(project=self.f.project, name="Blank A", code="")
+        c_blank_b = ErrorCategory.objects.create(project=self.f.project, name="Blank B", code="")
+        self.assertNotEqual(c_blank_a.pk, c_blank_b.pk)
+        ErrorCategory.objects.create(
+            project=self.f.project,
+            name="Missing",
+            code="E1",
+            primary_category=PrimaryCategory.E1,
+        )
+        with self.assertRaises(IntegrityError), transaction.atomic():
+            ErrorCategory.objects.create(
+                project=self.f.project,
+                name="Duplicate E1",
+                code="E1",
+                primary_category=PrimaryCategory.E1,
+            )
+        with self.assertRaises(IntegrityError), transaction.atomic():
+            ErrorCategory.objects.create(
+                project=self.f.project,
+                name="Bad Primary",
+                primary_category="E9",
+            )
+
+        # Other project can still use code E1.
+        other_project = Project.objects.create(name="Other P")
+        other_cat = ErrorCategory.objects.create(
+            project=other_project,
+            name="Other E1",
+            code="E1",
+            primary_category=PrimaryCategory.E1,
+        )
+        self.assertEqual(other_cat.code, "E1")
+
+        job1 = self.f.job(status=JobStatus.ANNOTATING)
+        job2 = self.f.job(status=JobStatus.ANNOTATING)
+        ji = JobIssue.objects.create(
+            project=self.f.project,
+            job=job1,
+            cvat_issue_id=501,
+            severity=Severity.MAJOR,
+            primary_category=PrimaryCategory.E1,
+            frame_number=10,
+            frame_start=10,
+            frame_end=15,
+            message="Missing box",
+        )
+        with self.assertRaises(IntegrityError), transaction.atomic():
+            JobIssue.objects.create(project=self.f.project, job=job1, cvat_issue_id=501)
+        with self.assertRaises(IntegrityError), transaction.atomic():
+            JobIssue.objects.create(project=self.f.project, job=job2, cvat_issue_id=0)
+        with self.assertRaises(IntegrityError), transaction.atomic():
+            JobIssue.objects.create(
+                project=self.f.project,
+                job=job2,
+                cvat_issue_id=502,
+                frame_start=20,
+                frame_end=10,
+            )
+        with self.assertRaises(IntegrityError), transaction.atomic():
+            JobIssue.objects.create(project=self.f.project, job=job2, cvat_issue_id=503, status="bogus")
+
+        # JobIssue.clean() rejects cross-project job
+        with self.assertRaises(DjangoValidationError):
+            JobIssue(project=other_project, job=job1, cvat_issue_id=504).full_clean()
+
+        # ReviewError unique per (job, stage, rework_round, cvat_issue_id) when not null
+        ReviewError.objects.create(
+            job=job1,
+            stage=ReviewStage.QC1,
+            rework_round=0,
+            job_issue=ji,
+            cvat_issue_id=ji.cvat_issue_id,
+            category=self.f.category,
+            severity=Severity.MAJOR,
+            verdict=ErrorVerdict.FAIL,
+        )
+        with self.assertRaises(IntegrityError), transaction.atomic():
+            ReviewError.objects.create(
+                job=job1,
+                stage=ReviewStage.QC1,
+                rework_round=0,
+                category=self.f.category,
+                severity=Severity.MAJOR,
+                verdict=ErrorVerdict.FAIL,
+                cvat_issue_id=ji.cvat_issue_id,
+            )
+        with self.assertRaises(DjangoValidationError):
+            ReviewError(
+                job=job2,
+                stage=ReviewStage.QC1,
+                rework_round=0,
+                job_issue=ji,
+                cvat_issue_id=ji.cvat_issue_id,
+                category=self.f.category,
+                severity=Severity.MAJOR,
+                verdict=ErrorVerdict.FAIL,
+            ).full_clean()
+
+        with self.assertRaises(DjangoValidationError):
+            AnnotatorRequest(
+                project=self.f.project,
+                job=job2,
+                job_issue=ji,
+                request_type=AnnotatorRequest.RequestType.ERROR_DISPUTE,
+                title="Cross-job dispute",
+                reason="Invalid cross-job link",
+                created_by=self.f.ann1,
+            ).full_clean()
 
 
 class ExternalCvatExtensionDecouplingTests(SimpleTestCase):

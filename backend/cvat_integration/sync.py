@@ -47,6 +47,13 @@ from jobs.models import (
 )
 from projects.models import ActivityLog, Batch, Dataset, DataStatus, EscalationPolicy, Project
 from projects.notifications import notify_escalated
+from quality.issues import (
+    CvatIssueSnapshot,
+    acceptance_blocking_issues,
+    fetch_cvat_issue_snapshot,
+    submit_blocking_issues,
+    upsert_job_issues,
+)
 from quality.models import seed_default_error_categories
 from quality.qc2 import ensure_qc2_sample
 
@@ -77,12 +84,19 @@ SYNCABLE_STATUSES: set[str] = {
     JobStatus.QC1_REVIEWING,
 }
 
+PRE_QC1_CVAT_STATES: set[tuple[str, str]] = {
+    ("annotation", "completed"),
+    ("validation", "new"),
+}
+
 POST_QC1_CVAT_STATES: set[tuple[str, str]] = {
     ("validation", "completed"),
     ("acceptance", "new"),
     ("acceptance", "in progress"),
     ("acceptance", "completed"),
 }
+
+GATED_CVAT_STATES: set[tuple[str, str]] = PRE_QC1_CVAT_STATES | POST_QC1_CVAT_STATES
 
 # (stage, state) của CVAT → trạng thái mặc định VanoHub (post-QC1 được Hybrid A2 xét theo batch.qc2_confirmed_at).
 CVAT_STATUS_MAP: dict[tuple[str, str], str] = {
@@ -107,6 +121,8 @@ class _RemoteJobEntry:
     payload: CvatJobPayload
     object_count: int | None = None
     missing: bool = False
+    issue_snapshot: CvatIssueSnapshot | None = None
+    issue_fetch_error: str | None = None
 
 
 @dataclass
@@ -265,6 +281,51 @@ def _apply_object_count(job: Job, new_count: int | None) -> bool:
     return changed
 
 
+def _should_prefetch_issues(cvat_job: CvatJobPayload, existing_job: Job | None) -> bool:
+    """True when syncing cvat_job may advance a job into PENDING_QC1 or post-QC1 under issue gating."""
+    if (cvat_job.stage, cvat_job.state) not in GATED_CVAT_STATES:
+        return False
+    if existing_job is None:
+        return True
+    if _is_workflow_frozen(existing_job) or existing_job.status not in SYNCABLE_STATUSES:
+        return False
+    next_status = _next_cvat_status(
+        existing_job,
+        cvat_job.stage,
+        cvat_job.state,
+        existing_job.cvat_stage,
+        existing_job.cvat_state,
+    )
+    return next_status in {JobStatus.PENDING_QC1, JobStatus.QC1_PASSED, JobStatus.PENDING_QC2}
+
+
+def _prefetch_job_issues(
+    cvat_job: CvatJobPayload,
+    client: Any,
+    *,
+    started: float | None = None,
+    sync_deadline: float = 0.0,
+) -> tuple[CvatIssueSnapshot | None, str | None]:
+    """Prefetch CVAT issues outside DB transactions; per-job CvatError fails closed on that job only."""
+    max_duration = 15.0
+    if sync_deadline > 0 and started is not None:
+        remaining = sync_deadline - (time.monotonic() - started)
+        if remaining <= 0:
+            raise CvatError("Quá thời gian đồng bộ dữ liệu từ CVAT — thử lại sau hoặc tắt đếm object.")
+        max_duration = min(max_duration, remaining)
+    try:
+        snapshot = fetch_cvat_issue_snapshot(
+            cvat_job.id,
+            client,
+            timeout=5.0,
+            max_duration_seconds=max_duration,
+        )
+        return snapshot, None
+    except CvatError as exc:
+        logger.warning("CVAT issue fetch failed during sync for cvat_job_id=%s: %s", cvat_job.id, exc)
+        return None, str(exc)
+
+
 def _apply_cvat_state(
     job: Job,
     cvat_job: CvatJobPayload,
@@ -272,6 +333,8 @@ def _apply_cvat_state(
     *,
     object_count: int | None = None,
     linked: dict[int, User] | None = None,
+    issue_snapshot: CvatIssueSnapshot | None = None,
+    issue_fetch_error: str | None = None,
 ) -> bool:
     """Cập nhật một Job từ dữ liệu CVAT (tự save, ghi ActivityLog an toàn 4-eyes và notify escalation)."""
     if (
@@ -281,6 +344,9 @@ def _apply_cvat_state(
         or job.dataset.status != DataStatus.ACTIVE
     ):
         return False
+
+    if job.project.issue_gate_enabled and issue_snapshot is not None:
+        upsert_job_issues(job.pk, job.project, issue_snapshot, locked_job=job)
 
     stage, state = cvat_job.stage, cvat_job.state
     assignee_id = cvat_job.assignee.id if cvat_job.assignee else None
@@ -312,6 +378,25 @@ def _apply_cvat_state(
         update_fields.extend(["object_count", "last_counted_objects", "round_credited_objects"])
 
     new_status = _next_cvat_status(job, stage, state, prev_stage, prev_state)
+    hold_post_qc1 = False
+    if job.project.issue_gate_enabled and new_status is not None:
+        if (
+            new_status == JobStatus.PENDING_QC1
+            and (issue_fetch_error is not None or issue_snapshot is None or submit_blocking_issues(job))
+        ):
+            new_status = None
+        elif (
+            new_status in (JobStatus.QC1_PASSED, JobStatus.PENDING_QC2)
+            and (issue_fetch_error is not None or issue_snapshot is None or acceptance_blocking_issues(job))
+        ):
+            new_status = None
+            hold_post_qc1 = True
+
+    if hold_post_qc1:
+        job.cvat_stage = prev_stage
+        job.cvat_state = prev_state
+        update_fields = [f for f in update_fields if f not in ("cvat_stage", "cvat_state")]
+
     if new_status is None:
         if update_fields:
             update_fields.append("updated_at")
@@ -399,7 +484,18 @@ def _new_job(
     assignee_id = cvat_job.assignee.id if cvat_job.assignee else None
     candidate = linked.get(assignee_id) if assignee_id is not None else None
     annotator = candidate if candidate and candidate.pk in annotator_ids else None
-    initial_status = _map_cvat_status(cvat_job.stage, cvat_job.state, batch=batch) or JobStatus.PENDING_ANNOTATION
+    target_status = _map_cvat_status(cvat_job.stage, cvat_job.state, batch=batch) or JobStatus.PENDING_ANNOTATION
+    initial_status = target_status
+    initial_stage = cvat_job.stage
+    initial_state = cvat_job.state
+    if project.issue_gate_enabled and (cvat_job.stage, cvat_job.state) in GATED_CVAT_STATES:
+        if target_status == JobStatus.PENDING_QC1:
+            initial_status = JobStatus.ANNOTATING
+        elif target_status in (JobStatus.QC1_PASSED, JobStatus.PENDING_QC2):
+            initial_status = JobStatus.QC1_REVIEWING
+            initial_stage = "validation"
+            initial_state = "in progress"
+
     initial_rework = 1 if initial_status == JobStatus.REWORK else 0
     if initial_status in (JobStatus.QC1_PASSED, JobStatus.PENDING_QC2):
         initial_first_qc1 = FirstQc1Result.PASS
@@ -417,8 +513,8 @@ def _new_job(
         cvat_start_frame=cvat_job.start_frame or 0,
         annotator=annotator,
         deadline=batch.deadline,
-        cvat_stage=cvat_job.stage,
-        cvat_state=cvat_job.state,
+        cvat_stage=initial_stage,
+        cvat_state=initial_state,
         cvat_assignee_id=assignee_id,
         frame_count=cvat_job.resolved_frame_count,
         object_count=0,
@@ -426,6 +522,55 @@ def _new_job(
         rework_round=initial_rework,
         total_rework_rounds=initial_rework,
         first_qc1_result=initial_first_qc1,
+    )
+
+
+def _finalize_new_synced_job(
+    job: Job,
+    *,
+    project: Project,
+    batch: Batch,
+    cvat_job: CvatJobPayload,
+    actor: Any,
+    note: str,
+    object_count: int | None = None,
+    issue_snapshot: CvatIssueSnapshot | None = None,
+    issue_fetch_error: str | None = None,
+) -> None:
+    """Ingest prefetched CVAT issues on a newly created Job, promote if gate clears, count objects & log."""
+    if project.issue_gate_enabled and (cvat_job.stage, cvat_job.state) in GATED_CVAT_STATES:
+        if issue_snapshot is not None:
+            upsert_job_issues(job.pk, project, issue_snapshot, locked_job=job)
+        target_status = _map_cvat_status(cvat_job.stage, cvat_job.state, batch=batch)
+        if issue_fetch_error is None and issue_snapshot is not None and target_status is not None:
+            if target_status == JobStatus.PENDING_QC1 and not submit_blocking_issues(job):
+                job.status = JobStatus.PENDING_QC1
+                job.submitted_at = timezone.now()
+                job.save(update_fields=["status", "submitted_at", "updated_at"])
+            elif target_status in (JobStatus.QC1_PASSED, JobStatus.PENDING_QC2) and not acceptance_blocking_issues(job):
+                job.status = target_status
+                job.first_qc1_result = FirstQc1Result.PASS
+                job.cvat_stage = cvat_job.stage
+                job.cvat_state = cvat_job.state
+                job.save(update_fields=["status", "first_qc1_result", "cvat_stage", "cvat_state", "updated_at"])
+
+    if _apply_object_count(job, object_count):
+        job.save(
+            update_fields=[
+                "object_count",
+                "last_counted_objects",
+                "round_credited_objects",
+                "updated_at",
+            ]
+        )
+    ActivityLog.record(
+        project=project,
+        actor=actor,
+        action="job.import",
+        target=job,
+        job=job,
+        after={"status": job.status, "annotator": job.annotator_id},
+        note=note,
     )
 
 
@@ -619,6 +764,16 @@ def _fetch_remote_org_tree(
 
     _check_deadline()
     cvat_projects = client.list_org_projects(project.cvat_org_id)
+    issue_gate = bool(project.issue_gate_enabled)
+    existing_jobs_by_cvat = (
+        {
+            j.cvat_job_id: j
+            for j in project.jobs.select_related("project", "batch", "dataset").filter(cvat_job_id__isnull=False)
+            if j.cvat_job_id is not None
+        }
+        if issue_gate
+        else {}
+    )
     foreign_project_ids = set(
         Dataset.objects.filter(cvat_project_id__in=[p["id"] for p in cvat_projects])
         .exclude(project=project)
@@ -656,16 +811,32 @@ def _fetch_remote_org_tree(
                 cvat_job = _parse_job(raw_job)
                 if not _is_annotation_job(cvat_job):
                     continue  # bỏ Ground Truth / consensus job
-                if not count_objects:
-                    remote_jobs.append(_RemoteJobEntry(payload=cvat_job))
-                    continue
-                _check_deadline()
-                try:
-                    obj_count = _count_job_objects_safe(client, cvat_job)
-                except CvatNotFoundError:
-                    remote_jobs.append(_RemoteJobEntry(payload=cvat_job, missing=True))
-                    continue
-                remote_jobs.append(_RemoteJobEntry(payload=cvat_job, object_count=obj_count))
+                obj_count: int | None = None
+                if count_objects:
+                    _check_deadline()
+                    try:
+                        obj_count = _count_job_objects_safe(client, cvat_job)
+                    except CvatNotFoundError:
+                        remote_jobs.append(_RemoteJobEntry(payload=cvat_job, missing=True))
+                        continue
+                issue_snap: CvatIssueSnapshot | None = None
+                issue_err: str | None = None
+                if issue_gate and _should_prefetch_issues(cvat_job, existing_jobs_by_cvat.get(cvat_job.id)):
+                    _check_deadline()
+                    issue_snap, issue_err = _prefetch_job_issues(
+                        cvat_job,
+                        client,
+                        started=started,
+                        sync_deadline=sync_deadline,
+                    )
+                remote_jobs.append(
+                    _RemoteJobEntry(
+                        payload=cvat_job,
+                        object_count=obj_count,
+                        issue_snapshot=issue_snap,
+                        issue_fetch_error=issue_err,
+                    )
+                )
             remote_tasks.append(_RemoteTaskEntry(raw=cvat_task, jobs=remote_jobs))
         remote_projects.append(_RemoteProjectEntry(raw=cvat_project, tasks=remote_tasks))
     return remote_projects
@@ -886,31 +1057,36 @@ def sync_organization(
                             if job is None:
                                 continue
                             if created_here:
-                                if _apply_object_count(job, remote_job.object_count):
-                                    job.save(
-                                        update_fields=[
-                                            "object_count",
-                                            "last_counted_objects",
-                                            "round_credited_objects",
-                                            "updated_at",
-                                        ]
-                                    )
-                                ActivityLog.record(
+                                _finalize_new_synced_job(
+                                    job,
                                     project=project,
+                                    batch=task,
+                                    cvat_job=cvat_job,
                                     actor=None,
-                                    action="job.import",
-                                    target=job,
-                                    job=job,
-                                    after={"status": job.status, "annotator": job.annotator_id},
                                     note="Nhập từ CVAT (đồng bộ organization)",
+                                    object_count=remote_job.object_count,
+                                    issue_snapshot=remote_job.issue_snapshot,
+                                    issue_fetch_error=remote_job.issue_fetch_error,
                                 )
                                 summary["jobs_created"] += 1
                             elif job.batch_id == task.id and _apply_cvat_state(
-                                job, cvat_job, actor, object_count=remote_job.object_count, linked=linked
+                                job,
+                                cvat_job,
+                                actor,
+                                object_count=remote_job.object_count,
+                                linked=linked,
+                                issue_snapshot=remote_job.issue_snapshot,
+                                issue_fetch_error=remote_job.issue_fetch_error,
                             ):
                                 summary["jobs_updated"] += 1
                         elif job.batch_id == task.id and _apply_cvat_state(
-                            job, cvat_job, actor, object_count=remote_job.object_count, linked=linked
+                            job,
+                            cvat_job,
+                            actor,
+                            object_count=remote_job.object_count,
+                            linked=linked,
+                            issue_snapshot=remote_job.issue_snapshot,
+                            issue_fetch_error=remote_job.issue_fetch_error,
                         ):
                             summary["jobs_updated"] += 1
 
@@ -1008,6 +1184,25 @@ def import_task_jobs(batch: Batch, task_id: int, actor: Any, client: Any = None)
         annotator_ids = set(
             RoleAssignment.objects.filter(project=project, role=Role.ANNOTATOR).values_list("user_id", flat=True)
         )
+        prefetched_issues: dict[int, tuple[CvatIssueSnapshot | None, str | None]] = {}
+        if project.issue_gate_enabled and cvat_jobs:
+            sync_deadline = float(getattr(settings, "CVAT_SYNC_TIMEOUT_SECONDS", _DEFAULT_SYNC_TIMEOUT_SECONDS))
+            started = time.monotonic()
+            existing_by_cvat = {
+                j.cvat_job_id: j
+                for j in Job.objects.select_related("project", "batch", "dataset").filter(
+                    cvat_job_id__in=[cj.id for cj in cvat_jobs]
+                )
+                if j.cvat_job_id is not None
+            }
+            for cvat_job in cvat_jobs:
+                if _should_prefetch_issues(cvat_job, existing_by_cvat.get(cvat_job.id)):
+                    prefetched_issues[cvat_job.id] = _prefetch_job_issues(
+                        cvat_job,
+                        client,
+                        started=started,
+                        sync_deadline=sync_deadline,
+                    )
         created = updated = 0
 
         with transaction.atomic():
@@ -1048,6 +1243,7 @@ def import_task_jobs(batch: Batch, task_id: int, actor: Any, client: Any = None)
                 .order_by("id")
             }
             for cvat_job in cvat_jobs:
+                issue_snap, issue_err = prefetched_issues.get(cvat_job.id, (None, None))
                 job = locked_jobs.get(cvat_job.id)
                 if job is None:
                     job = _new_job(project, locked_batch.dataset, locked_batch, cvat_job, linked, annotator_ids)
@@ -1067,23 +1263,38 @@ def import_task_jobs(batch: Batch, task_id: int, actor: Any, client: Any = None)
                     if job is None:
                         continue
                     if created_here:
-                        ActivityLog.record(
+                        _finalize_new_synced_job(
+                            job,
                             project=project,
+                            batch=locked_batch,
+                            cvat_job=cvat_job,
                             actor=actor,
-                            action="job.import",
-                            target=job,
-                            job=job,
-                            after={"status": job.status, "annotator": job.annotator_id},
                             note=f"Nhập từ CVAT task {task_id}",
+                            issue_snapshot=issue_snap,
+                            issue_fetch_error=issue_err,
                         )
                         created += 1
                     elif job.batch_id != locked_batch.id:
                         continue
-                    elif _apply_cvat_state(job, cvat_job, actor, linked=linked):
+                    elif _apply_cvat_state(
+                        job,
+                        cvat_job,
+                        actor,
+                        linked=linked,
+                        issue_snapshot=issue_snap,
+                        issue_fetch_error=issue_err,
+                    ):
                         updated += 1
                 elif job.batch_id != locked_batch.id:
                     continue  # job thuộc batch khác → không động vào
-                elif _apply_cvat_state(job, cvat_job, actor, linked=linked):
+                elif _apply_cvat_state(
+                    job,
+                    cvat_job,
+                    actor,
+                    linked=linked,
+                    issue_snapshot=issue_snap,
+                    issue_fetch_error=issue_err,
+                ):
                     updated += 1
 
                 if not _is_workflow_frozen(job) and job.status == JobStatus.PENDING_QC2:
@@ -1158,6 +1369,27 @@ def sync_batch(
                 except CvatNotFoundError:
                     missing_job_ids.add(cjid)
 
+        prefetched_issues: dict[int, tuple[CvatIssueSnapshot | None, str | None]] = {}
+        if project.issue_gate_enabled:
+            sync_deadline = float(getattr(settings, "CVAT_SYNC_TIMEOUT_SECONDS", _DEFAULT_SYNC_TIMEOUT_SECONDS))
+            started = time.monotonic()
+            existing_by_cvat = {
+                j.cvat_job_id: j
+                for j in batch.jobs.select_related("project", "batch", "dataset").filter(cvat_job_id__isnull=False)
+                if j.cvat_job_id is not None
+            }
+            for cjid, existing_job in existing_by_cvat.items():
+                if cjid not in by_id or cjid in missing_job_ids:
+                    continue
+                cvat_job = by_id[cjid]
+                if _should_prefetch_issues(cvat_job, existing_job):
+                    prefetched_issues[cjid] = _prefetch_job_issues(
+                        cvat_job,
+                        client,
+                        started=started,
+                        sync_deadline=sync_deadline,
+                    )
+
         updated = 0
         with transaction.atomic():
             locked_batch = (
@@ -1185,7 +1417,16 @@ def sync_batch(
                     continue
 
                 obj_count = fetched_counts.get(job.cvat_job_id) if count_objects else None
-                if _apply_cvat_state(job, cvat_job, actor, object_count=obj_count, linked=linked):
+                issue_snap, issue_err = prefetched_issues.get(job.cvat_job_id, (None, None))
+                if _apply_cvat_state(
+                    job,
+                    cvat_job,
+                    actor,
+                    object_count=obj_count,
+                    linked=linked,
+                    issue_snapshot=issue_snap,
+                    issue_fetch_error=issue_err,
+                ):
                     updated += 1
 
                 if not _is_workflow_frozen(job) and job.status == JobStatus.PENDING_QC2:
