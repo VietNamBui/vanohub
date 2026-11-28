@@ -1,0 +1,17 @@
+.au-levels { white-space: nowrap; }
+.au-level-on { font-weight: 700; color: #1677ff; }
+.au-ids { max-width: 280px; font-size: 12px; line-height: 1.5; word-break: break-word; }
+.au-ladder { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.au-step { padding: 10px 22px; border-radius: 999px; background: #fff; font-size: 20px; font-weight: 600; color: #8a8a8a; }
+.au-step.on { background: #1677ff; color: #fff; }
+.au-arrow { color: #8a8a8a; }
+.au-banner { border-radius: 16px; padding: 16px 20px; font-weight: 500; }
+.au-banner.ok { background: #e3f6e8; color: #1c7a35; }
+.au-banner.bad { background: #fde7ef; color: #b3204f; }
+.au-banner.info { background: #e8f0fe; color: #1a4fa3; }
+.au-sample-cell { min-width: 150px; }
+.au-meta { display: flex; gap: 14px; align-items: center; flex-wrap: wrap; }
+.au-denied { text-align: center; padding: 32px 0; }
+.au-level-on-wrap.on { font-weight: 700; color: #1677ff; }
+.au-name { display: flex; flex-direction: column; gap: 2px; min-width: 0; b { font-size: 15px; font-weight: 600; } span { font-size: 12px; } }
+.au-pct-on { background: #1677ff; color: #fff; }

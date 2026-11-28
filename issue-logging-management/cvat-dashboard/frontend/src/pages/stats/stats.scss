@@ -1,0 +1,8 @@
+@use '../../design/tokens' as *;
+
+.st-main { display: flex; flex-direction: column; gap: 20px; min-width: 0; }
+.st-pill-select .ant-select { min-width: 160px; }
+// Thanh lọc: [dự án · batch] [khoảng thời gian] ........ [xuất]
+.st-filters { display: flex; flex-wrap: wrap; align-items: center; gap: 12px 20px; margin: -8px 4px 24px; }
+.st-filter-group { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; min-width: 0; }
+.st-filter-end { margin-left: auto; }

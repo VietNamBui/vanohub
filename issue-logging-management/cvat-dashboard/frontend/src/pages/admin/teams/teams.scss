@@ -1,0 +1,27 @@
+@use '../../../design/tokens' as *;
+
+.tm-layout { display: grid; grid-template-columns: 300px minmax(0, 1fr); gap: 24px; align-items: start; }
+.tm-list { display: flex; flex-direction: column; gap: 6px; }
+.tm-item {
+  display: flex; align-items: center; gap: 10px; width: 100%; padding: 12px 14px; border: 0; border-radius: 14px;
+  background: transparent; cursor: pointer; text-align: left; font: inherit; color: $dash-ink;
+}
+.tm-item:hover { background: rgba(0, 0, 0, 0.04); }
+.tm-item.on { background: #e6f6e6; box-shadow: inset 0 0 0 2px $dash-green; font-weight: 500; }
+.tm-item small { margin-left: auto; color: $dash-muted; }
+.tm-new { margin-top: 12px; }
+.tm-panel { min-width: 0; display: flex; flex-direction: column; gap: 18px; }
+.tm-head { display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap; }
+.tm-head h2 { margin: 0; font-size: 26px; font-weight: 500; letter-spacing: -0.5px; color: $dash-ink; }
+.tm-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+.tm-tags { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+.tm-pm { display: inline-flex; align-items: center; gap: 6px; color: $dash-muted; font-size: 13px; }
+.tm-form { display: flex; flex-direction: column; gap: 16px; max-width: 460px; }
+.tm-form label.tm-label { display: block; margin-bottom: 6px; color: $dash-muted; font-size: 13px; }
+.tm-checks { display: flex; flex-direction: column; gap: 8px; }
+.tm-search { display: flex; flex-direction: column; gap: 12px; padding: 16px; border-radius: 16px; background: #fff; }
+.tm-search .ant-input-affix-wrapper { border-radius: 12px; }
+
+@media (max-width: 900px) {
+  .tm-layout { grid-template-columns: 1fr; }
+}

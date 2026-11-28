@@ -1,0 +1,327 @@
+<!doctype html>
+<html lang="vi">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CVAT Workflow · Bản mẫu tích hợp</title>
+<style>
+  :root {
+    color-scheme: light;
+    --ink: #182720; --muted: #506158; --line: #dce4de; --page: #f3f6f3;
+    --surface: #fff; --green: #155940; --pale: #e6f2e9; --amber: #765017; --warn: #fff3d8;
+    font: 15px/1.5 system-ui, -apple-system, sans-serif;
+  }
+  *, *::before, *::after { box-sizing: border-box; }
+  body { margin: 0; color: var(--ink); background: var(--page); }
+  button, select, textarea { font: inherit; color: inherit; }
+  button, select { cursor: pointer; }
+  button:focus-visible, select:focus-visible, textarea:focus-visible { outline: 3px solid #368564; outline-offset: 3px; }
+  h1, h2, h3, p, dl, dd { margin: 0; }
+  h1 { font-size: clamp(30px, 4vw, 46px); letter-spacing: -.05em; line-height: 1.13; }
+  h2 { font-size: 19px; letter-spacing: -.025em; }
+  h3 { font-size: 16px; }
+  .muted, small { color: var(--muted); }
+  .shell { width: min(1180px, calc(100% - 64px)); margin-inline: auto; }
+  .top { background: #172b23; color: #f4faf5; }
+  .top .shell { display: flex; align-items: center; justify-content: space-between; min-height: 68px; gap: 12px; padding-block: 10px; }
+  .brand, .controls, .actions, .meta { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+  .brand strong { font-size: 17px; letter-spacing: -.02em; }
+  .mark { display: grid; place-items: center; width: 32px; height: 32px; border-radius: 8px; color: #143424; background: #bfe9cb; font-weight: 850; }
+  .controls label { color: #c0d6c9; font-size: 13px; }
+  select { background: var(--surface); border: 1px solid var(--line); border-radius: 8px; padding: 8px 12px; }
+  .top select { color: #f4faf5; background: #253e32; border-color: #587163; }
+  main { padding-block: 30px 48px; }
+  .lead { display: grid; gap: 8px; margin-bottom: 23px; }
+  .project { color: var(--green); font-size: 13px; font-weight: 720; }
+  .notice { display: flex; align-items: center; gap: 8px; background: #e8eee9; color: #385047; padding: 10px 14px; border-radius: 8px; margin-block: 0 22px; font-size: 13px; }
+  .notice[data-active] { background: var(--pale); color: var(--green); }
+  .layout { display: grid; grid-template-columns: minmax(0, 1.85fr) minmax(0, 1fr); gap: 20px; align-items: start; }
+  .panel { background: var(--surface); border: 1px solid var(--line); border-radius: 13px; min-width: 0; }
+  .panel-head { padding: 17px 20px 13px; display: flex; justify-content: space-between; gap: 8px; align-items: center; flex-wrap: wrap; }
+  .filters { display: flex; gap: 4px; padding: 0 14px 12px; flex-wrap: wrap; }
+  .filters button { border: 0; background: transparent; border-radius: 7px; padding: 8px 10px; color: var(--muted); font-size: 13px; font-weight: 650; }
+  .filters button[aria-pressed="true"] { background: var(--pale); color: var(--green); }
+  .row { border-top: 1px solid var(--line); padding: 17px 20px; display: grid; gap: 10px; }
+  .row[data-selected] { box-shadow: inset 3px 0 #498364; }
+  .row:first-of-type { border-radius: 0; }
+  .row:last-child { border-radius: 0 0 12px 12px; }
+  .row-main { display: flex; align-items: flex-start; justify-content: space-between; gap: 9px; flex-wrap: wrap; }
+  .job-title { display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; }
+  .id { color: var(--muted); font: 600 12px/1.4 ui-monospace, monospace; }
+  .meta, .reason { font-size: 13px; }
+  .badge { display: inline-block; padding: 3px 8px; border-radius: 5px; background: #eef1f0; color: #394f46; font-size: 12px; font-weight: 700; white-space: nowrap; }
+  .badge.returned, .reason { background: var(--warn); color: var(--amber); }
+  .badge.passed { background: var(--pale); color: var(--green); }
+  .badge.pending { background: #e9effb; color: #294e84; }
+  .reason { padding: 8px 11px; border-radius: 6px; overflow-wrap: anywhere; white-space: pre-wrap; }
+  .button { border: 1px solid var(--line); border-radius: 8px; background: var(--surface); font-weight: 680; padding: 8px 13px; min-height: 40px; }
+  .button:hover { background: #f2f5f2; }
+  .button.primary { background: var(--green); border-color: var(--green); color: white; }
+  .button.primary:hover { background: #104633; }
+  .button.danger { color: #973c28; }
+  .button:disabled { opacity: .65; cursor: wait; }
+  .side { padding: 19px 20px; display: grid; gap: 15px; }
+  .facts { display: grid; gap: 9px; padding-bottom: 13px; border-bottom: 1px solid var(--line); }
+  .facts div { display: flex; justify-content: space-between; align-items: baseline; gap: 10px; }
+  .facts dt { color: var(--muted); font-size: 13px; }
+  .facts dd { font-size: 13px; font-weight: 650; text-align: right; overflow-wrap: anywhere; }
+  .history { list-style: none; padding: 0; margin: 0; display: grid; gap: 10px; }
+  .history li { padding-left: 11px; border-left: 2px solid #b7d5c3; font-size: 13px; }
+  .history small { display: block; }
+  .empty { padding: 24px 20px; border-top: 1px solid var(--line); color: var(--muted); }
+  .editor-head { display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap; margin-block: 16px; }
+  .editor-head h1 { font-size: clamp(25px, 4vw, 37px); }
+  .viewer { margin: 0; border: 1px solid #30463d; overflow: hidden; border-radius: 12px; background: #162821; color: #d2eadf; }
+  canvas { display: block; width: 100%; aspect-ratio: 2 / 1; }
+  figcaption { padding: 10px 15px; border-top: 1px solid #395449; font-size: 13px; }
+  .editor-note { margin-top: 14px; color: var(--muted); }
+  dialog { width: min(440px, calc(100vw - 24px)); border: 1px solid var(--line); border-radius: 13px; padding: 20px; color: var(--ink); }
+  dialog::backdrop { background: #172b2390; }
+  dialog form { display: grid; gap: 12px; }
+  dialog label { display: grid; gap: 5px; font-weight: 650; }
+  textarea { width: 100%; border: 1px solid #a3b5a9; padding: 8px; border-radius: 7px; resize: vertical; }
+  @media (max-width: 760px) {
+    .shell { width: min(100% - 28px, 1180px); }
+    main { padding-top: 22px; }
+    .layout { grid-template-columns: 1fr; }
+    .panel-head, .row, .side { padding-inline: 14px; }
+    .button { min-height: 44px; }
+    .brand strong { font-size: 14px; }
+    .controls { gap: 4px; }
+    .controls select { max-width: 133px; }
+  }
+</style>
+</head>
+<body>
+<header class="top">
+  <div class="shell">
+    <div class="brand"><span class="mark" aria-hidden="true">C</span><strong>CVAT Workflow</strong></div>
+    <div class="controls"><label for="role">Vai trò thử</label>
+      <select id="role"><option value="anno">Annotator</option><option value="qc">Team lead · QC1</option></select>
+    </div>
+  </div>
+</header>
+<main class="shell" id="app"></main>
+<dialog id="return-dialog" aria-labelledby="return-title">
+  <form id="return-form">
+    <h2 id="return-title">Trả job về Annotator</h2>
+    <label>Loại lỗi<select name="category" required><option value="">Chọn loại lỗi</option><option>Vị trí cuboid</option><option>Thiếu đối tượng</option><option>Sai nhãn</option></select></label>
+    <label>Lý do<textarea name="reason" rows="3" required maxlength="500" placeholder="Ghi đối tượng hoặc frame cần sửa"></textarea></label>
+    <div class="actions"><button class="button primary">Xác nhận trả job</button><button class="button" type="button" data-action="cancel">Hủy</button></div>
+  </form>
+</dialog>
+<script>
+  const jobs = [
+    { id: 8204, title: 'Đoạn đường Nguyễn Huệ', batch: 'Quận 1 · Đợt 1', due: 'Hôm nay · 16:00', frame: 48, state: 'returned', category: 'Vị trí cuboid', reason: 'Frame 48–53: chỉnh lại cuboid của xe tải ở làn trái.', history: [['QC1 trả job', '09:42'], ['Annotator hoàn tất trên CVAT', '09:25']] },
+    { id: 8207, title: 'Giao lộ Đồng Khởi', batch: 'Quận 1 · Đợt 1', due: 'Ngày mai · 11:00', frame: 21, state: 'working', history: [['Team lead giao job', '09:15']] },
+    { id: 8212, title: 'Đoạn đường Lê Lợi', batch: 'Quận 1 · Đợt 2', due: 'Ngày mai · 15:00', frame: 67, state: 'pending', history: [['Annotator hoàn tất trên CVAT', '10:05']] },
+  ];
+  const labels = { returned: 'Cần sửa', working: 'Đang làm', pending: 'Chờ QC1', passed: 'Đã đạt QC1' };
+  const views = {
+    anno: { title: 'Công việc của tôi', description: 'Mở job để làm tiếp hoặc xem phản hồi từ QC1.', filters: [['all', 'Tất cả'], ['returned', 'Cần sửa'], ['working', 'Đang làm'], ['pending', 'Chờ QC1'], ['passed', 'Đã đạt QC1']] },
+    qc: { title: 'Hàng chờ QC1', description: 'Mở đúng job để kiểm tra, sau đó duyệt hoặc ghi lý do trả về.', filters: [['pending', 'Chờ kiểm tra'], ['returned', 'Đã trả về'], ['passed', 'Đã duyệt']] },
+  };
+  const app = document.querySelector('#app');
+  const rolePicker = document.querySelector('#role');
+  const dialog = document.querySelector('#return-dialog');
+  const returnForm = document.querySelector('#return-form');
+  let role = 'anno';
+  let filter = 'all';
+  let selected = jobs[0];
+  let editorJob = null;
+  let reviewed = new Set();
+  let message = '';
+  let saving = false;
+
+  const escapeText = (value) => String(value).replace(/[&<>"']/g, (char) => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+  })[char]);
+  const button = (label, action, kind = '', id = '') =>
+    `<button type="button" class="button ${kind}" data-action="${action}" data-id="${id}">${label}</button>`;
+  const matches = (job, key) => key === 'all' || job.state === key;
+  const stateLabel = (job) => `<span class="badge ${job.state}">${labels[job.state]}</span>`;
+  function announce(text) { message = text; }
+  function record(job, title, state) {
+    job.state = state;
+    job.history.unshift([title, 'Vừa xong']);
+  }
+  function renderRow(job) {
+    const actions = [];
+    if (role === 'anno' && ['working', 'returned'].includes(job.state)) {
+      actions.push(button('Mở job trên CVAT ↗', 'open', 'primary', job.id));
+    }
+    if (role === 'qc' && job.state === 'pending') {
+      if (reviewed.has(job.id)) {
+        actions.push(button('Đạt QC1', 'pass', 'primary', job.id), button('Trả annotator', 'return', 'danger', job.id));
+      } else {
+        actions.push(button('Mở để kiểm tra trên CVAT ↗', 'open', 'primary', job.id));
+      }
+    }
+    if (job !== selected || actions.length === 0) actions.push(button('Chi tiết', 'details', '', job.id));
+    return `<article class="row" ${job === selected ? 'data-selected' : ''}>
+      <div class="row-main"><div class="job-title"><h3>${job.title}</h3><span class="id">#${job.id}</span></div>${stateLabel(job)}</div>
+      <p class="meta muted">${job.batch} · Hạn ${job.due}</p>
+      ${job.state === 'returned' ? `<p class="reason"><strong>${escapeText(job.category)}</strong> · ${escapeText(job.reason)}</p>` : ''}
+      <div class="actions">${actions.join('')}</div>
+    </article>`;
+  }
+  function renderDetails() {
+    if (!selected) return '';
+    return `<aside class="panel side" aria-labelledby="detail-title" tabindex="-1">
+      <div><h2 id="detail-title">Job #${selected.id}</h2><p class="muted">${selected.title}</p></div>
+      <dl class="facts"><div><dt>Trạng thái</dt><dd>${stateLabel(selected)}</dd></div><div><dt>Batch</dt><dd>${selected.batch}</dd></div><div><dt>Hạn xử lý</dt><dd>${selected.due}</dd></div></dl>
+      <h3>Lịch sử xử lý</h3>
+      <ol class="history">${selected.history.map(([title, time]) => `<li>${escapeText(title)}<small>${escapeText(time)}</small></li>`).join('')}</ol>
+    </aside>`;
+  }
+  function renderDashboard() {
+    const view = views[role];
+    const shown = jobs.filter((job) => matches(job, filter))
+      .sort((a, b) => Number(b.state === 'returned') - Number(a.state === 'returned'));
+    selected = shown.includes(selected) ? selected : shown[0];
+    app.innerHTML = `
+      <div class="lead"><p class="project">Dự án LiDAR đô thị</p><h1 tabindex="-1">${view.title}</h1><p class="muted">${view.description}</p></div>
+      <p class="notice" role="status" ${message ? 'data-active' : ''}>${message || 'Bản mẫu tương tác · Dữ liệu và kết nối CVAT mô phỏng'}</p>
+      <div class="layout"><section class="panel" aria-labelledby="queue-title">
+        <div class="panel-head"><h2 id="queue-title">Danh sách job</h2><small>${shown.length} job</small></div>
+        <div class="filters" role="group" aria-label="Lọc theo trạng thái">${view.filters.map(([key, label]) =>
+          `<button type="button" data-action="filter" data-id="${key}" aria-pressed="${filter === key}">${label} · ${jobs.filter((job) => matches(job, key)).length}</button>`
+        ).join('')}</div>
+        ${shown.length ? shown.map(renderRow).join('') : '<p class="empty">Không có job ở trạng thái này.</p>'}
+      </section>${renderDetails()}</div>`;
+  }
+  function drawFrame(job) {
+    const canvas = document.querySelector('canvas');
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+    ctx.fillStyle = '#162821';
+    ctx.fillRect(0, 0, 960, 480);
+    let seed = job.id;
+    const random = () => { seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0; return seed / 4294967296; };
+    for (let i = 0; i < 5200; i++) {
+      const z = random();
+      const spread = 45 + z * 545;
+      const side = (random() - .5) * 2;
+      const x = 480 + side * spread;
+      const y = 142 + z * 359 + (random() - .5) * 24;
+      ctx.fillStyle = Math.abs(side) > .56 ? '#76bca2' : '#81988d';
+      ctx.globalAlpha = .12 + random() * .58;
+      ctx.fillRect(x, y, 1.5, 1.5);
+    }
+    ctx.globalAlpha = 1;
+    const points = [[339,245],[424,233],[468,253],[381,268],[339,299],[424,289],[468,309],[381,323]];
+    ctx.strokeStyle = '#eecb7a';
+    ctx.lineWidth = 2;
+    for (const [first, second] of [[0,1],[1,2],[2,3],[3,0],[4,5],[5,6],[6,7],[7,4],[0,4],[1,5],[2,6],[3,7]]) {
+      ctx.beginPath();
+      ctx.moveTo(...points[first]);
+      ctx.lineTo(...points[second]);
+      ctx.stroke();
+    }
+  }
+  function renderEditor() {
+    const job = editorJob;
+    app.innerHTML = `
+      ${button('← Về Dashboard', 'back')}
+      <div class="editor-head"><div><p class="project">CVAT · Editor mô phỏng</p><h1 tabindex="-1">Job #${job.id}</h1><p class="muted">${job.title} · Frame ${job.frame}</p></div>
+      ${role === 'anno' ? button('Hoàn tất job trong CVAT', 'finish', 'primary', job.id) : button('Đã xem frame · Về QC1', 'reviewed', 'primary', job.id)}</div>
+      <figure class="viewer"><canvas width="960" height="480" aria-label="Đám mây điểm LiDAR và khung cuboid mẫu" role="img"></canvas><figcaption>Frame ${job.frame} · Dữ liệu LiDAR mẫu</figcaption></figure>
+      ${job.state === 'returned' ? `<p class="editor-note reason">${escapeText(job.reason)}</p>` : ''}
+      <p class="editor-note" id="editor-status" role="status"></p>`;
+    drawFrame(job);
+  }
+  function dashboard() {
+    editorJob = null;
+    renderDashboard();
+    app.querySelector('h1').focus();
+  }
+  rolePicker.addEventListener('change', () => {
+    role = rolePicker.value;
+    filter = role === 'qc' ? 'pending' : 'all';
+    announce('');
+    dashboard();
+  });
+  document.addEventListener('click', ({ target }) => {
+    const control = target.closest('button[data-action]');
+    if (!control || saving) return;
+    const { action, id } = control.dataset;
+    const job = jobs.find((item) => item.id === Number(id));
+    switch (action) {
+      case 'filter':
+        filter = id;
+        renderDashboard();
+        app.querySelector('[aria-pressed="true"]').focus();
+        break;
+      case 'details':
+        selected = job;
+        renderDashboard();
+        app.querySelector('aside').focus();
+        break;
+      case 'open':
+        selected = job;
+        editorJob = job;
+        announce('');
+        renderEditor();
+        app.querySelector('h1').focus();
+        break;
+      case 'back':
+        dashboard();
+        break;
+      case 'finish':
+        saving = true;
+        control.disabled = true;
+        rolePicker.disabled = true;
+        document.querySelector('#editor-status').textContent = 'Đang cập nhật từ CVAT mô phỏng…';
+        window.setTimeout(() => {
+          record(job, 'Annotator hoàn tất trên CVAT', 'pending');
+          reviewed.delete(job.id);
+          filter = 'pending';
+          announce(`Job #${job.id} đã nộp và đang chờ QC1.`);
+          saving = false;
+          rolePicker.disabled = false;
+          dashboard();
+        }, 550);
+        break;
+      case 'reviewed':
+        reviewed.add(job.id);
+        announce(`Đã xem job #${job.id}. Bạn có thể duyệt hoặc trả job.`);
+        dashboard();
+        break;
+      case 'return':
+        selected = job;
+        returnForm.reset();
+        dialog.showModal();
+        break;
+      case 'cancel':
+        dialog.close();
+        break;
+      case 'pass':
+        record(job, 'QC1 duyệt job', 'passed');
+        filter = 'passed';
+        selected = job;
+        announce(`Job #${job.id} đã đạt QC1.`);
+        dashboard();
+        break;
+    }
+  });
+  returnForm.addEventListener('submit', (event) => {
+    event.preventDefault();
+    const reason = returnForm.elements.reason.value.trim();
+    if (!reason) {
+      returnForm.elements.reason.setCustomValidity('Nhập lý do trả job.');
+      returnForm.elements.reason.reportValidity();
+      return;
+    }
+    selected.reason = reason;
+    selected.category = returnForm.elements.category.value;
+    record(selected, 'QC1 trả job về Annotator', 'returned');
+    filter = 'returned';
+    announce(`Đã trả job #${selected.id}. Annotator sẽ thấy lý do trong danh sách công việc.`);
+    dialog.close();
+    dashboard();
+  });
+  returnForm.elements.reason.addEventListener('input', () => returnForm.elements.reason.setCustomValidity(''));
+  renderDashboard();
+</script>
+</body>
+</html>

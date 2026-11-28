@@ -1,0 +1,25 @@
+// Design tokens — ported from CVAT dashboard-page/styles.scss + base.scss.
+$grid-unit-size: 8px;
+$header-height: $grid-unit-size * 6;
+$header-color: #d8d8d8;
+$text-color: #303030;
+
+$dash-canvas: #efefef;
+$dash-card: #f8f8f8;
+$dash-ink: #111;
+// #6c6c6c: tương phản 4.94:1 trên thẻ #f8f8f8 và 4.57:1 trên canvas #efefef (WCAG AA ≥ 4.5:1 cho chữ < 14px; #8c8c8c cũ chỉ đạt 3.17:1 / 2.92:1).
+$dash-muted: #6c6c6c;
+$dash-line: #e6e6e6;
+$dash-blue: #1d6ff2;
+$dash-blue-dark: #1d4ed8;
+$dash-green: #2fae32;
+$dash-pink: #f0438a;
+$dash-orange: #e8780f;
+$dash-purple: #7c3aed;
+$dash-radius: $grid-unit-size * 3;
+$dash-radius-pill: 14px;
+$dash-font: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+
+@mixin stripes($dark, $light, $w: 3px, $gap: 7px) {
+    background: repeating-linear-gradient(135deg, $dark 0 $w, $light $w $gap);
+}

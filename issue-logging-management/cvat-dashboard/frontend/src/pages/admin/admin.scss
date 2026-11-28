@@ -1,0 +1,19 @@
+@use '../../design/tokens' as *;
+
+.ad-filters { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 16px; }
+.ad-filters .ant-input-affix-wrapper { width: 260px; max-width: 100%; border-radius: 12px; }
+.ad-filters .ant-select { width: 170px; max-width: 100%; }
+.ad-filters .ant-select .ant-select-selector { border-radius: 12px !important; }
+
+.ad-tags { display: flex; flex-wrap: wrap; gap: 4px; }
+
+
+.ad-kv { display: grid; grid-template-columns: 110px 1fr; gap: 10px 12px; font-size: 14px; align-items: center; }
+.ad-kv dt { color: $dash-muted; font-size: 13px; }
+.ad-kv dd { margin: 0; min-width: 0; }
+
+.cvd-modal .ant-input,
+.cvd-modal .ant-input-number,
+.cvd-modal .ant-input-affix-wrapper { border-radius: 12px; }
+.cvd-modal .ant-select .ant-select-selector { border-radius: 12px !important; }
+.cvd-modal .ant-btn { border-radius: 12px; }

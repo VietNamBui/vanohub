@@ -1,0 +1,49 @@
+@use '../../design/tokens' as *;
+
+.lg-canvas {
+    min-height: 100vh;
+    background: $dash-canvas;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 24px 16px;
+    font-family: $dash-font;
+    color: $text-color;
+}
+
+.lg-wrap { width: 100%; max-width: 440px; }
+
+.lg-wordmark {
+    text-align: center;
+    font-size: 56px;
+    font-weight: 600;
+    letter-spacing: -3px;
+    color: $dash-ink;
+    line-height: 1;
+    margin-bottom: 6px;
+
+    i { font-style: normal; color: $dash-blue; }
+}
+
+.lg-sub { text-align: center; color: $dash-muted; font-size: 14px; margin-bottom: 24px; }
+
+.lg-card.cvd-card { padding: 32px; border-radius: 24px; }
+
+.lg-card h2 { margin: 0 0 4px; font-size: 24px; font-weight: 500; letter-spacing: -0.5px; color: $dash-ink; }
+
+.lg-server { display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap; margin: 4px 0 20px; font-size: 13px; color: $dash-muted; }
+
+.lg-card .ant-form-item-label > label { color: $dash-muted; font-size: 13px; }
+.lg-card .ant-input-affix-wrapper,
+.lg-card .ant-input { border-radius: 12px; background: white; }
+.lg-card .ant-btn-primary { height: 46px; border-radius: 14px; font-size: 16px; font-weight: 500; box-shadow: none; }
+
+.lg-demo { margin-top: 24px; padding-top: 20px; border-top: 1px solid $dash-line; }
+.lg-demo p { margin: 0 0 12px; font-size: 13px; color: $dash-muted; }
+.lg-chips { display: flex; flex-wrap: wrap; gap: 8px; }
+.lg-chip {
+    border: none; background: transparent; padding: 0; cursor: pointer; border-radius: 14px;
+    transition: transform 0.12s;
+    &:hover { transform: translateY(-1px); }
+    .cvd-tag { padding: 6px 14px; font-size: 13px; }
+}

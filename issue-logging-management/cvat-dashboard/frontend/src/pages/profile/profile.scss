@@ -1,0 +1,12 @@
+@import '../../design/tokens';
+
+.cvp-hero { display: flex; flex-wrap: wrap; align-items: center; gap: 24px; }
+.cvp-avatar {
+  width: 96px; height: 96px; border-radius: 50%; color: #fff; font-size: 36px; font-weight: 600;
+  display: flex; align-items: center; justify-content: center; flex: none;
+}
+.cvp-info { flex: 1 1 280px; min-width: 0; h2 { margin: 0 0 4px; font-size: 28px; color: $dash-ink; } }
+.cvp-meta { display: grid; grid-template-columns: 160px 1fr; gap: 8px 16px; margin-top: 12px; font-size: 14px; }
+.cvp-tags { display: flex; flex-wrap: wrap; gap: 6px; }
+.cvp-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 16px; }
+@media (max-width: 560px) { .cvp-meta { grid-template-columns: 1fr; gap: 2px 0; } }
