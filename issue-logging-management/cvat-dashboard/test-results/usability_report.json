@@ -1,0 +1,288 @@
+{
+  "target_url": "http://127.0.0.1:5173/pm/users/u29",
+  "viewport": "1440x900 (Desktop) + 1920x1080 check",
+  "loops_executed": 2,
+  "console_errors": [],
+  "page_errors": [],
+  "console_warnings": [
+    "⚠️ React Router Future Flag Warning: React Router will begin wrapping state updates in `React.startTransition` in v7. You can use the `v7_startTransition` future flag to opt-in early. For more information, see https://reactrouter.com/v6/upgrading/future#v7_starttransition.",
+    "⚠️ React Router Future Flag Warning: Relative route resolution within Splat routes is changing in v7. You can use the `v7_relativeSplatPath` future flag to opt-in early. For more information, see https://reactrouter.com/v6/upgrading/future#v7_relativesplatpath.",
+    "⚠️ React Router Future Flag Warning: React Router will begin wrapping state updates in `React.startTransition` in v7. You can use the `v7_startTransition` future flag to opt-in early. For more information, see https://reactrouter.com/v6/upgrading/future#v7_starttransition.",
+    "⚠️ React Router Future Flag Warning: Relative route resolution within Splat routes is changing in v7. You can use the `v7_relativeSplatPath` future flag to opt-in early. For more information, see https://reactrouter.com/v6/upgrading/future#v7_relativesplatpath.",
+    "⚠️ React Router Future Flag Warning: React Router will begin wrapping state updates in `React.startTransition` in v7. You can use the `v7_startTransition` future flag to opt-in early. For more information, see https://reactrouter.com/v6/upgrading/future#v7_starttransition.",
+    "⚠️ React Router Future Flag Warning: Relative route resolution within Splat routes is changing in v7. You can use the `v7_relativeSplatPath` future flag to opt-in early. For more information, see https://reactrouter.com/v6/upgrading/future#v7_relativesplatpath.",
+    "⚠️ React Router Future Flag Warning: React Router will begin wrapping state updates in `React.startTransition` in v7. You can use the `v7_startTransition` future flag to opt-in early. For more information, see https://reactrouter.com/v6/upgrading/future#v7_starttransition.",
+    "⚠️ React Router Future Flag Warning: Relative route resolution within Splat routes is changing in v7. You can use the `v7_relativeSplatPath` future flag to opt-in early. For more information, see https://reactrouter.com/v6/upgrading/future#v7_relativesplatpath.",
+    "⚠️ React Router Future Flag Warning: React Router will begin wrapping state updates in `React.startTransition` in v7. You can use the `v7_startTransition` future flag to opt-in early. For more information, see https://reactrouter.com/v6/upgrading/future#v7_starttransition.",
+    "⚠️ React Router Future Flag Warning: Relative route resolution within Splat routes is changing in v7. You can use the `v7_relativeSplatPath` future flag to opt-in early. For more information, see https://reactrouter.com/v6/upgrading/future#v7_relativesplatpath.",
+    "⚠️ React Router Future Flag Warning: React Router will begin wrapping state updates in `React.startTransition` in v7. You can use the `v7_startTransition` future flag to opt-in early. For more information, see https://reactrouter.com/v6/upgrading/future#v7_starttransition.",
+    "⚠️ React Router Future Flag Warning: Relative route resolution within Splat routes is changing in v7. You can use the `v7_relativeSplatPath` future flag to opt-in early. For more information, see https://reactrouter.com/v6/upgrading/future#v7_relativesplatpath.",
+    "⚠️ React Router Future Flag Warning: React Router will begin wrapping state updates in `React.startTransition` in v7. You can use the `v7_startTransition` future flag to opt-in early. For more information, see https://reactrouter.com/v6/upgrading/future#v7_starttransition.",
+    "⚠️ React Router Future Flag Warning: Relative route resolution within Splat routes is changing in v7. You can use the `v7_relativeSplatPath` future flag to opt-in early. For more information, see https://reactrouter.com/v6/upgrading/future#v7_relativesplatpath.",
+    "⚠️ React Router Future Flag Warning: React Router will begin wrapping state updates in `React.startTransition` in v7. You can use the `v7_startTransition` future flag to opt-in early. For more information, see https://reactrouter.com/v6/upgrading/future#v7_starttransition.",
+    "⚠️ React Router Future Flag Warning: Relative route resolution within Splat routes is changing in v7. You can use the `v7_relativeSplatPath` future flag to opt-in early. For more information, see https://reactrouter.com/v6/upgrading/future#v7_relativesplatpath.",
+    "⚠️ React Router Future Flag Warning: React Router will begin wrapping state updates in `React.startTransition` in v7. You can use the `v7_startTransition` future flag to opt-in early. For more information, see https://reactrouter.com/v6/upgrading/future#v7_starttransition.",
+    "⚠️ React Router Future Flag Warning: Relative route resolution within Splat routes is changing in v7. You can use the `v7_relativeSplatPath` future flag to opt-in early. For more information, see https://reactrouter.com/v6/upgrading/future#v7_relativesplatpath.",
+    "⚠️ React Router Future Flag Warning: React Router will begin wrapping state updates in `React.startTransition` in v7. You can use the `v7_startTransition` future flag to opt-in early. For more information, see https://reactrouter.com/v6/upgrading/future#v7_starttransition.",
+    "⚠️ React Router Future Flag Warning: Relative route resolution within Splat routes is changing in v7. You can use the `v7_relativeSplatPath` future flag to opt-in early. For more information, see https://reactrouter.com/v6/upgrading/future#v7_relativesplatpath.",
+    "⚠️ React Router Future Flag Warning: React Router will begin wrapping state updates in `React.startTransition` in v7. You can use the `v7_startTransition` future flag to opt-in early. For more information, see https://reactrouter.com/v6/upgrading/future#v7_starttransition.",
+    "⚠️ React Router Future Flag Warning: Relative route resolution within Splat routes is changing in v7. You can use the `v7_relativeSplatPath` future flag to opt-in early. For more information, see https://reactrouter.com/v6/upgrading/future#v7_relativesplatpath.",
+    "⚠️ React Router Future Flag Warning: React Router will begin wrapping state updates in `React.startTransition` in v7. You can use the `v7_startTransition` future flag to opt-in early. For more information, see https://reactrouter.com/v6/upgrading/future#v7_starttransition.",
+    "⚠️ React Router Future Flag Warning: Relative route resolution within Splat routes is changing in v7. You can use the `v7_relativeSplatPath` future flag to opt-in early. For more information, see https://reactrouter.com/v6/upgrading/future#v7_relativesplatpath.",
+    "⚠️ React Router Future Flag Warning: React Router will begin wrapping state updates in `React.startTransition` in v7. You can use the `v7_startTransition` future flag to opt-in early. For more information, see https://reactrouter.com/v6/upgrading/future#v7_starttransition.",
+    "⚠️ React Router Future Flag Warning: Relative route resolution within Splat routes is changing in v7. You can use the `v7_relativeSplatPath` future flag to opt-in early. For more information, see https://reactrouter.com/v6/upgrading/future#v7_relativesplatpath.",
+    "⚠️ React Router Future Flag Warning: React Router will begin wrapping state updates in `React.startTransition` in v7. You can use the `v7_startTransition` future flag to opt-in early. For more information, see https://reactrouter.com/v6/upgrading/future#v7_starttransition.",
+    "⚠️ React Router Future Flag Warning: Relative route resolution within Splat routes is changing in v7. You can use the `v7_relativeSplatPath` future flag to opt-in early. For more information, see https://reactrouter.com/v6/upgrading/future#v7_relativesplatpath."
+  ],
+  "failed_requests": [],
+  "iterations": [
+    {
+      "iteration": 1,
+      "branches": {
+        "direct_entry_back_button": {
+          "status": 200,
+          "load_s": 2.26,
+          "url_before": "http://127.0.0.1:5173/pm/users/u29",
+          "url_after_click": "about:blank",
+          "stuck_on_same_url": false
+        },
+        "u29_main": {
+          "status": 200,
+          "load_s": 1.18,
+          "horizontal_overflow_px": 0,
+          "kpi_label_overlaps_today_tooltip": true,
+          "goal_box": {
+            "x": 843.1875,
+            "y": 492.359375,
+            "width": 104.734375,
+            "height": 22.84375
+          },
+          "tooltip_box": {
+            "x": 716.078125,
+            "y": 473.359375,
+            "width": 168.0625,
+            "height": 38.421875
+          },
+          "bar_slots": 14,
+          "bar_tooltips_sampled": [
+            {
+              "bar_index": 0,
+              "tooltip": [
+                "Ngày 5 · 736 cuboid | còn thiếu: 464"
+              ]
+            },
+            {
+              "bar_index": 7,
+              "tooltip": [
+                "Ngày 12 · 441 cuboid | còn thiếu: 759"
+              ]
+            },
+            {
+              "bar_index": 13,
+              "tooltip": [
+                "Hôm nay · 1.306 cuboid"
+              ]
+            }
+          ],
+          "tab_labels": [
+            "Job (0)",
+            "Lý do rework (2)",
+            "Tỉ lệ bị trả lại",
+            "Thống kê QC"
+          ],
+          "tabs_walked": [
+            {
+              "label": "Job (0)",
+              "aria_selected": "true",
+              "content_preview": "Chi tiết | Job (0) | Lý do rework (2) | Tỉ lệ bị trả lại | Thống kê QC | Job\tBatch\tTrạng thái\t | Đã sửa | \t | Làm lại |  |  |   | \t |   | \t |   | \t |   | \t |   |  |  | Trống",
+              "sortable_columns": 2
+            },
+            {
+              "label": "Lý do rework (2)",
+              "aria_selected": "true",
+              "content_preview": "Chi tiết | Job (0) | Lý do rework (2) | Tỉ lệ bị trả lại | Thống kê QC | #5072 Sai thuộc tính | 05/11 05:00 | Thiếu thuộc tính occluded · bởi Trần Minh PM | #5081 Sai thuộc tính | 04/11 16:00 | Box lệch so với điểm mây ·",
+              "rework_job_links_count": 2
+            },
+            {
+              "label": "Tỉ lệ bị trả lại",
+              "aria_selected": "true",
+              "content_preview": "Chi tiết | Job (0) | Lý do rework (2) | Tỉ lệ bị trả lại | Thống kê QC | 0% | 21/10 | 28/10 | 04/11 | 11/11 | 18/11 | Theo tuần · tổng 0% (2 lần)"
+            },
+            {
+              "label": "Thống kê QC",
+              "aria_selected": "true",
+              "content_preview": "Chi tiết | Job (0) | Lý do rework (2) | Tỉ lệ bị trả lại | Thống kê QC | QC1 đã cho qua | 16 | Bị QC2 trả lại | 2 | Tỷ lệ lọt lỗi: 12.5%"
+            }
+          ],
+          "rework_job_link_nav": {
+            "clicked_href": "/jobs/j072",
+            "landed_url": "http://127.0.0.1:5173/jobs/j072",
+            "job_page_title": "Job #5072\nSẵn sàng giao\n▼\nLàm lại x1"
+          }
+        },
+        "global_shell": {
+          "quick_search_opened_via_slash": true,
+          "quick_search_results_for_a": 10,
+          "notification_before": "Thông báo, 8 chưa đọc",
+          "notification_items": 8,
+          "notification_after": "Thông báo, 0 chưa đọc",
+          "nav_transitions": {}
+        },
+        "history_back_from_pm": {
+          "landed_url": "http://127.0.0.1:5173/pm",
+          "returned_to_pm": true
+        },
+        "non_qc_user_u10": {
+          "status": 200,
+          "load_s": 0.88,
+          "name": "Phạm Thị Sơn",
+          "stat_cards": [
+            "Job đã nộp / được giao | 2/3 | 33.3% đã qua QC2",
+            "Tỷ lệ đúng hạn | 100 | % | 0 job trễ hạn đang giữ · 2/2 lượt đúng hạn",
+            "Tỷ lệ rework | 100 | % | 2 lần trả về",
+            "Cuboid 14 ngày | 13.238 | Hôm nay 1.006 / KPI 1.200"
+          ],
+          "tabs": [
+            "Job (3)",
+            "Lý do rework (2)",
+            "Tỉ lệ bị trả lại"
+          ],
+          "has_qc_tab": false,
+          "job_rows_count": 3
+        },
+        "invalid_user": {
+          "status": 200,
+          "load_s": 0.67,
+          "heading": "Không tìm thấy người dùng",
+          "after_click_ve_tong_quan": "http://127.0.0.1:5173/pm"
+        }
+      }
+    },
+    {
+      "iteration": 2,
+      "branches": {
+        "direct_entry_back_button": {
+          "status": 200,
+          "load_s": 1.15,
+          "url_before": "http://127.0.0.1:5173/pm/users/u29",
+          "url_after_click": "about:blank",
+          "stuck_on_same_url": false
+        },
+        "u29_main": {
+          "status": 200,
+          "load_s": 1.07,
+          "horizontal_overflow_px": 0,
+          "kpi_label_overlaps_today_tooltip": true,
+          "goal_box": {
+            "x": 843.1875,
+            "y": 492.359375,
+            "width": 104.734375,
+            "height": 22.84375
+          },
+          "tooltip_box": {
+            "x": 716.078125,
+            "y": 473.359375,
+            "width": 168.0625,
+            "height": 38.421875
+          },
+          "bar_slots": 14,
+          "bar_tooltips_sampled": [
+            {
+              "bar_index": 0,
+              "tooltip": [
+                "Ngày 5 · 736 cuboid | còn thiếu: 464"
+              ]
+            },
+            {
+              "bar_index": 7,
+              "tooltip": [
+                "Ngày 12 · 441 cuboid | còn thiếu: 759"
+              ]
+            },
+            {
+              "bar_index": 13,
+              "tooltip": [
+                "Hôm nay · 1.306 cuboid"
+              ]
+            }
+          ],
+          "tab_labels": [
+            "Job (0)",
+            "Lý do rework (2)",
+            "Tỉ lệ bị trả lại",
+            "Thống kê QC"
+          ],
+          "tabs_walked": [
+            {
+              "label": "Job (0)",
+              "aria_selected": "true",
+              "content_preview": "Chi tiết | Job (0) | Lý do rework (2) | Tỉ lệ bị trả lại | Thống kê QC | Job\tBatch\tTrạng thái\t | Đã sửa | \t | Làm lại |  |  |   | \t |   | \t |   | \t |   | \t |   |  |  | Trống",
+              "sortable_columns": 2
+            },
+            {
+              "label": "Lý do rework (2)",
+              "aria_selected": "true",
+              "content_preview": "Chi tiết | Job (0) | Lý do rework (2) | Tỉ lệ bị trả lại | Thống kê QC | #5072 Sai thuộc tính | 05/11 05:00 | Thiếu thuộc tính occluded · bởi Trần Minh PM | #5081 Sai thuộc tính | 04/11 16:00 | Box lệch so với điểm mây ·",
+              "rework_job_links_count": 2
+            },
+            {
+              "label": "Tỉ lệ bị trả lại",
+              "aria_selected": "true",
+              "content_preview": "Chi tiết | Job (0) | Lý do rework (2) | Tỉ lệ bị trả lại | Thống kê QC | 0% | 21/10 | 28/10 | 04/11 | 11/11 | 18/11 | Theo tuần · tổng 0% (2 lần)"
+            },
+            {
+              "label": "Thống kê QC",
+              "aria_selected": "true",
+              "content_preview": "Chi tiết | Job (0) | Lý do rework (2) | Tỉ lệ bị trả lại | Thống kê QC | QC1 đã cho qua | 16 | Bị QC2 trả lại | 2 | Tỷ lệ lọt lỗi: 12.5%"
+            }
+          ],
+          "rework_job_link_nav": {
+            "clicked_href": "/jobs/j072",
+            "landed_url": "http://127.0.0.1:5173/jobs/j072",
+            "job_page_title": "Job #5072\nSẵn sàng giao\n▼\nLàm lại x1"
+          }
+        },
+        "global_shell": {
+          "quick_search_opened_via_slash": true,
+          "quick_search_results_for_a": 10,
+          "notification_before": "Thông báo, 0 chưa đọc",
+          "notification_items": 8,
+          "notification_after": "Thông báo, 0 chưa đọc",
+          "nav_transitions": {}
+        },
+        "history_back_from_pm": {
+          "landed_url": "http://127.0.0.1:5173/pm",
+          "returned_to_pm": true
+        },
+        "non_qc_user_u10": {
+          "status": 200,
+          "load_s": 0.91,
+          "name": "Phạm Thị Sơn",
+          "stat_cards": [
+            "Job đã nộp / được giao | 2/3 | 33.3% đã qua QC2",
+            "Tỷ lệ đúng hạn | 100 | % | 0 job trễ hạn đang giữ · 2/2 lượt đúng hạn",
+            "Tỷ lệ rework | 100 | % | 2 lần trả về",
+            "Cuboid 14 ngày | 13.238 | Hôm nay 1.006 / KPI 1.200"
+          ],
+          "tabs": [
+            "Job (3)",
+            "Lý do rework (2)",
+            "Tỉ lệ bị trả lại"
+          ],
+          "has_qc_tab": false,
+          "job_rows_count": 3
+        },
+        "invalid_user": {
+          "status": 200,
+          "load_s": 0.67,
+          "heading": "Không tìm thấy người dùng",
+          "after_click_ve_tong_quan": "http://127.0.0.1:5173/pm"
+        }
+      }
+    }
+  ],
+  "desktop_1920_check": {
+    "horizontal_overflow_px": 0,
+    "kpi_label_overlaps_today_tooltip": true
+  }
+}
